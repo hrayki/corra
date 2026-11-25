@@ -4,6 +4,7 @@ use std::time::Instant;
 use corra_proto::{ThreadId, now_ms};
 use serde_json::{Value, json};
 
+#[cfg(test)]
 const PRIVATE: &[&str] = &[
     "isUsingOverage",
     "overageStatus",
@@ -15,6 +16,7 @@ const PRIVATE: &[&str] = &[
     "account",
 ];
 
+#[cfg(test)]
 pub fn scrub(v: &mut Value) {
     match v {
         Value::Object(o) => {
@@ -32,6 +34,7 @@ pub fn scrub(v: &mut Value) {
     }
 }
 
+#[cfg(test)]
 pub fn scrub_file(text: &str) -> String {
     text.lines()
         .map(|l| match serde_json::from_str::<Value>(l) {
