@@ -11,7 +11,7 @@ import Undo2 from 'lucide-solid/icons/undo-2'
 import { call, state } from '../lib/store'
 import { highlightIn, renderMarkdown } from '../lib/markdown'
 import { fileInCode, fileInHref, joinPath, type FileRef } from '../lib/filelinks'
-import type { Entry, ItemView, RequestView, TurnView } from '../lib/timeline'
+import { folds, isWork, type Entry, type ItemView, type RequestView, type TurnView } from '../lib/timeline'
 import type { InputPart } from '../proto/InputPart'
 import type { RequestResponse } from '../proto/RequestResponse'
 import { clock, duration } from '../lib/format'
@@ -19,12 +19,7 @@ import { openFile, setPanel } from '../lib/panel'
 import { Btn, Picture, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
 
-const isWork = (e: Entry) =>
-  (e.type === 'item' && (e.item.body.type === 'tool_call' || e.item.body.type === 'reasoning' || e.item.body.type === 'todos')) ||
-  (e.type === 'request' && !!e.request.response)
-
 export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean; cwd?: string }) {
-  const [open, setOpen] = createSignal(false)
   const top = createMemo(() => props.turn.entries.filter((e) => !(e.type === 'item' && e.item.parent)))
   const children = createMemo(() => {
     const m = new Map<string, ItemView[]>()
@@ -38,14 +33,24 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
     return m
   })
   const done = () => !!props.turn.outcome
-  const split = createMemo(() => {
-    const es = top()
-    if (!done()) return { work: [] as Entry[], rest: es }
-    let lastWork = -1
-    for (let i = 0; i < es.length; i++) if (isWork(es[i])) lastWork = i
-    return { work: es.slice(0, lastWork + 1), rest: es.slice(lastWork + 1) }
-  })
-  const steps = () => props.turn.entries.filter((e) => e.type === 'item' && e.item.body.type === 'tool_call').length
+  const parts = createMemo(() => folds(props.turn.id, top()))
+  const firstFold = () => parts().findIndex((p) => p.work.length > 0)
+  const stepsIn = (es: Entry[]) => {
+    let n = 0
+    const walk = (items: ItemView[]) => {
+      for (const it of items) {
+        if (it.body.type === 'tool_call') n++
+        walk(children().get(it.id) ?? [])
+      }
+    }
+    walk(es.flatMap((e) => (e.type === 'item' ? [e.item] : [])))
+    return n
+  }
+  const foldLabel = (i: number, lead?: Entry) => {
+    if (i === firstFold()) return `${props.turn.outcome === 'interrupted' ? 'Stopped after' : 'Worked for'} ${took()}`
+    const at = lead?.type === 'item' ? lead.item.at : undefined
+    return at && props.turn.ended ? `Continued for ${duration(props.turn.ended - at)}` : 'Continued'
+  }
   const took = () => (props.turn.ended && props.turn.started ? duration(props.turn.ended - props.turn.started) : '')
   const changes = createMemo(() => {
     const files = (props.turn.checkpoint ?? []).flatMap((r) => r.files.map((f) => ({ ...f, repo: r.repo })))
@@ -80,31 +85,6 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
         <UserMessage thread={props.thread} turn={props.turn} />
       </Show>
       <div class="mt-4 space-y-3">
-        <Show when={split().work.length > 0}>
-          <div>
-            <button
-              class="group flex items-center gap-1 text-[13px] text-mute hover:text-ink"
-              aria-expanded={open()}
-              onClick={() => setOpen(!open())}
-            >
-              <span>
-                {props.turn.outcome === 'interrupted' ? 'Stopped after' : 'Worked for'} {took()}
-                <Show when={steps() > 0}>
-                  <span class="text-faint">
-                    {' '}
-                    · {steps()} {steps() === 1 ? 'step' : 'steps'}
-                  </span>
-                </Show>
-              </span>
-              <ChevronRight size={14} class="transition-transform duration-100" classList={{ 'rotate-90': open() }} />
-            </button>
-            <Show when={open()}>
-              <div class="mt-3 space-y-2.5 border-l border-line pl-4">
-                <For each={split().work}>{render}</For>
-              </div>
-            </Show>
-          </div>
-        </Show>
         <Show
           when={done()}
           fallback={
@@ -120,7 +100,17 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
             </>
           }
         >
-          <For each={split().rest}>{render}</For>
+          <For each={parts()}>
+            {(p, i) => (
+              <>
+                <Show when={p.lead}>{(l) => render(l())}</Show>
+                <Show when={p.work.length > 0}>
+                  <Fold label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
+                </Show>
+                <For each={p.rest}>{render}</For>
+              </>
+            )}
+          </For>
         </Show>
       </div>
       <For each={secrets()}>
@@ -184,13 +174,42 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
           </div>
         )}
       </Show>
-      <Show when={done() && split().work.length === 0 && took()}>
+      <Show when={done() && firstFold() < 0 && took()}>
         <div class="mt-2 text-[12px] text-faint">
           {props.turn.outcome === 'interrupted' ? 'Stopped · ' : ''}
           {took()}
         </div>
       </Show>
     </section>
+  )
+}
+
+function Fold(props: { label: string; steps: number; entries: Entry[]; render: (e: Entry) => JSX.Element }) {
+  const [open, setOpen] = createSignal(false)
+  return (
+    <div>
+      <button
+        class="group flex items-center gap-1 text-[13px] text-mute hover:text-ink"
+        aria-expanded={open()}
+        onClick={() => setOpen(!open())}
+      >
+        <span>
+          {props.label}
+          <Show when={props.steps > 0}>
+            <span class="text-faint">
+              {' '}
+              · {props.steps} {props.steps === 1 ? 'step' : 'steps'}
+            </span>
+          </Show>
+        </span>
+        <ChevronRight size={14} class="transition-transform duration-100" classList={{ 'rotate-90': open() }} />
+      </button>
+      <Show when={open()}>
+        <div class="mt-3 space-y-2.5 border-l border-line pl-4">
+          <For each={props.entries}>{props.render}</For>
+        </div>
+      </Show>
+    </div>
   )
 }
 
