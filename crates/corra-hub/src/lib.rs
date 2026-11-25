@@ -59,10 +59,6 @@ pub fn build(opts: Options) -> Result<Built> {
         tracing::warn!("couldn't close the requests left from before the restart: {e:#}");
     }
     lifecycle::spawn(hub.clone());
-    {
-        let hub = hub.clone();
-        tokio::spawn(async move { phone::retire_old(&hub).await });
-    }
     backup::spawn(hub.clone(), opts.data.clone());
     let state = AppState {
         hub,

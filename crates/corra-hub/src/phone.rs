@@ -17,7 +17,6 @@ use crate::hub::{Hub, HubRef, hash_token, new_token};
 use crate::leftovers::clean;
 use crate::providers::{CreateRequest, Size};
 
-pub const OLD_PROVIDER: &str = "phone";
 const MACHINE_KEY: &str = "phone.machine";
 const TEMPLATE_KEY: &str = "phone.template";
 pub const SETUP_MINUTES: i64 = 90;
@@ -361,37 +360,6 @@ pub async fn switch(hub: &HubRef, new: Option<PhoneHost>) -> Result<Option<Phone
         },
     )?;
     Ok(new)
-}
-
-pub async fn retire_old(hub: &HubRef) {
-    retire_old_with(hub, &crate::providers::digitalocean::DigitalOcean::new()).await;
-}
-
-pub async fn retire_old_with(hub: &HubRef, d: &crate::providers::digitalocean::DigitalOcean) {
-    if hub.db.kv_get("phone.retired_old").ok().flatten().is_some() {
-        return;
-    }
-    let mut refs = vec![];
-    for m in hub.db.machines().unwrap_or_default() {
-        if m.provider != OLD_PROVIDER {
-            continue;
-        }
-        if let Ok(Some(r)) = hub.db.machine_provider_ref(m.id) {
-            refs.push(r);
-        }
-        let _ = hub.db.set_machine_status(m.id, MachineStatus::Destroyed);
-        hub.publish_machine(m.id);
-    }
-    let done = hub
-        .secrets
-        .get("digitalocean.token")
-        .ok()
-        .flatten()
-        .is_none()
-        || d.retire_old_phone(hub, refs).await;
-    if done {
-        let _ = hub.db.kv_set("phone.retired_old", &now_ms().to_string());
-    }
 }
 
 pub async fn act(hub: &Hub, action: PhoneOp) -> Result<Value> {

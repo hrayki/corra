@@ -11,7 +11,7 @@ import { ago } from '../lib/format'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
-import { paired, providerLabel, providers, refreshCatalog } from '../lib/catalog'
+import { paired, providerLabel, providerOf, providers, refreshCatalog } from '../lib/catalog'
 
 export function Settings() {
   const hubUp = () => state.conn.hub === 'open'
@@ -371,9 +371,11 @@ function Machines() {
       ),
   )
   const label = (m: MachineX) => (m.id === state.thisMachine ? 'This computer' : m.name)
+  const gone = (m: MachineX) => providers().length > 0 && !providerOf(m.provider)
   const detail = (m: MachineX) => {
     const parts: string[] = []
     if (m.id === state.thisMachine) parts.push(m.name)
+    else if (gone(m)) return `From ${m.provider}, no longer in corra`
     else parts.push(paired(m.provider) ? 'Paired' : providerLabel(m.provider))
     if (m.project && state.projects[m.project]) parts.push(state.projects[m.project].name)
     if (m.info?.disk_used_mb) parts.push(`${(m.info.disk_used_mb / 1024).toFixed(1)} GB of disk`)
@@ -411,6 +413,16 @@ function Machines() {
                 </div>
                 <div class="truncate text-[12.5px] text-mute">{detail(m)}</div>
               </div>
+              <Show when={gone(m)}>
+                <Btn
+                  small
+                  kind="ghost"
+                  title="Removes it from corra. Anything it left on its provider stays there."
+                  onClick={() => void callOn('hub', { op: 'destroy_machine', machine: m.id })}
+                >
+                  Forget
+                </Btn>
+              </Show>
             </div>
           )}
         </For>

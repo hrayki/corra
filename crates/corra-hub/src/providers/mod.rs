@@ -447,9 +447,11 @@ impl Providers {
             .db
             .machine(id)?
             .ok_or_else(|| anyhow!("no such machine"))?;
-        let provider = self
-            .get(&m.provider)
-            .ok_or_else(|| anyhow!("unknown provider"))?;
+        let Some(provider) = self.get(&m.provider) else {
+            hub.db.set_machine_status(id, MachineStatus::Destroyed)?;
+            hub.publish_machine(id);
+            return Ok(());
+        };
         if !provider.creates_machines() {
             bail!(
                 "{} is an existing machine; corra doesn't destroy those",

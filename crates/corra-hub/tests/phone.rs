@@ -278,3 +278,28 @@ async fn a_project_moved_to_another_kind_lets_go_of_its_old_machine() {
         ["destroy box-1", "forget snap-old"]
     );
 }
+
+#[tokio::test]
+async fn a_machine_whose_provider_is_gone_can_be_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, fake) = setup(dir.path());
+    let m = hub
+        .db
+        .insert_machine(NewMachine {
+            name: "corra-phone".into(),
+            provider: "phone".into(),
+            project: None,
+            size: "8x16".into(),
+            token_hash: "h".into(),
+            provider_ref: Some("77".into()),
+            status: MachineStatus::Connected,
+            kind: None,
+        })
+        .unwrap();
+    hub.providers.destroy_machine(&hub, m.id).await.unwrap();
+    assert_eq!(
+        hub.db.machine(m.id).unwrap().unwrap().status,
+        MachineStatus::Destroyed
+    );
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
