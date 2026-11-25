@@ -1,4 +1,5 @@
-import { For, Show, createMemo, createResource, createSignal, type JSX } from 'solid-js'
+import { For, Show, createMemo, createResource, createRoot, createSignal, type JSX } from 'solid-js'
+import ChevronDown from 'lucide-solid/icons/chevron-down'
 import ArrowLeft from 'lucide-solid/icons/arrow-left'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
@@ -11,15 +12,23 @@ import { ago } from '../lib/format'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
-import { paired, providerLabel, providerOf, providers, refreshCatalog } from '../lib/catalog'
+import { kindOf, paired, providerLabel, providerOf, providers, refreshCatalog, sizeLabel, sizesFor, tools } from '../lib/catalog'
+import type { KindInfo } from '../proto/KindInfo'
+import type { ProviderInfo } from '../proto/ProviderInfo'
+import type { PhoneHost } from '../proto/PhoneHost'
+import type { Leftover } from '../proto/Leftover'
+
+const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
 export function Settings() {
   const hubUp = () => state.conn.hub === 'open'
   const pages = createMemo(() => {
     const all: { key: string; label: string; show: boolean }[] = [
       { key: 'general', label: 'General', show: true },
-      { key: 'machines', label: 'Machines', show: true },
+      { key: 'providers', label: 'Providers', show: hubUp() },
+      { key: 'tools', label: 'Tools', show: hubUp() },
       { key: 'keys', label: 'Keys', show: hubUp() },
+      { key: 'machines', label: 'Machines', show: true },
       { key: 'env', label: 'Env vars', show: hubUp() },
       { key: 'setup', label: 'Setup repo', show: hubUp() },
       { key: 'data', label: 'Backups and data', show: hubUp() },
@@ -88,8 +97,14 @@ export function Settings() {
             <Show when={on() === 'machines'}>
               <Machines />
             </Show>
+            <Show when={on() === 'providers'}>
+              <Providers />
+            </Show>
+            <Show when={on() === 'tools'}>
+              <Tools />
+            </Show>
             <Show when={on() === 'keys'}>
-              <Credentials />
+              <Keys />
             </Show>
             <Show when={on() === 'env'}>
               <EnvVars />
@@ -431,76 +446,53 @@ function Machines() {
   )
 }
 
-const known = () => [
-  ...KNOWN.slice(0, 2),
-  ...providers().flatMap((p) => p.credentials.map((c) => ({ name: c.name, label: `${p.label} ${c.label.toLowerCase()}`, hint: c.hint }))),
-  ...KNOWN.slice(2),
-]
+const [secretNames, secretsRes] = createRoot(() =>
+  createResource(
+    () => state.conn.hub === 'open',
+    (up) => (up ? callOn<string[]>('hub', { op: 'list_secrets' }) : Promise.resolve([] as string[])),
+  ),
+)
+const hasSecret = (n: string) => !!secretNames()?.includes(n)
+const refreshKeys = () => {
+  void secretsRes.refetch()
+  refreshCatalog()
+}
 
-const KNOWN: { name: string; label?: string; hint: string }[] = [
-  { name: 'claude.token', label: 'Claude Code', hint: 'From claude setup-token. Signs Claude Code in on remote machines.' },
-  {
-    name: 'github.token',
-    label: 'GitHub',
-    hint: 'A fine-grained GitHub token for your repos: Contents, Pull requests and Issues read and write, Actions and Checks read, no Workflows.',
-  },
-  { name: 'digitalocean.token', label: 'DigitalOcean', hint: 'A DigitalOcean token that can make droplets. Runs the Android test phone.' },
-  { name: 'railway.token', label: 'Railway', hint: 'A Railway account token. Only manager projects get it, as RAILWAY_API_TOKEN.' },
-  {
-    name: 'cloudflare.token',
-    label: 'Cloudflare',
-    hint: 'A Cloudflare API token. Only manager projects get it, as CLOUDFLARE_API_TOKEN.',
-  },
-  {
-    name: 'cloudflare.account_id',
-    label: 'Cloudflare account ID',
-    hint: 'Your Cloudflare account ID, given with the token as CLOUDFLARE_ACCOUNT_ID.',
-  },
-]
-
-function Credentials() {
-  const [names, { refetch }] = createResource(() => callOn<string[]>('hub', { op: 'list_secrets' }))
-  const [editing, setEditing] = createSignal<string | null>(null)
-  const [name, setName] = createSignal('')
+function KeyRow(props: { name: string; label: string; hint?: string; inset?: boolean }) {
+  const [open, setOpen] = createSignal(false)
   const [value, setValue] = createSignal('')
   const [error, setError] = createSignal('')
-  const has = (n: string) => !!names()?.includes(n)
-  const save = async (n: string) => {
+  const save = async () => {
     setError('')
     try {
-      await callOn('hub', { op: 'set_secret', name: n.trim(), value: value() })
+      await callOn('hub', { op: 'set_secret', name: props.name, value: value() })
       setValue('')
-      setName('')
-      setEditing(null)
-      await refetch()
-      refreshCatalog()
+      setOpen(false)
+      refreshKeys()
     } catch (e) {
       setError((e as Error).message)
     }
   }
-  const row = (n: string, hint: string | undefined, label?: string) => (
-    <div class="px-3.5 py-3">
+  return (
+    <div classList={{ 'px-3.5 py-3': !props.inset, 'py-2': props.inset }}>
       <div class="flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-baseline gap-x-2">
-            <span class="text-[13.5px] font-medium">{label ?? n}</span>
-            <span class="text-[12px]" classList={{ 'text-ok': has(n), 'text-faint': !has(n) }}>
-              {has(n) ? 'Saved' : 'Not set'}
+            <span class="text-[13px] font-medium">{props.label}</span>
+            <span class="text-[12px]" classList={{ 'text-ok': hasSecret(props.name), 'text-faint': !hasSecret(props.name) }}>
+              {hasSecret(props.name) ? 'Saved' : 'Not set'}
             </span>
           </div>
-          <Show when={hint}>
-            <div class="mt-0.5 text-[12.5px] text-mute">{hint}</div>
-          </Show>
-          <Show when={label}>
-            <div class="mt-0.5 font-mono text-[11.5px] text-faint">{n}</div>
+          <Show when={props.hint}>
+            <div class="mt-0.5 text-[12.5px] text-mute">{props.hint}</div>
           </Show>
         </div>
-        <Btn small onClick={() => (setEditing(editing() === n ? null : n), setValue(''))}>
-          {has(n) ? 'Replace' : 'Add'}
+        <Btn small onClick={() => (setOpen(!open()), setValue(''))}>
+          {hasSecret(props.name) ? 'Replace' : 'Add'}
         </Btn>
-        <Show when={has(n)}>
+        <Show when={hasSecret(props.name)}>
           <Menu
-            label={`More for ${label ?? n}`}
+            label={`More for ${props.label}`}
             align="end"
             class="flex size-8 items-center justify-center rounded-lg text-faint hover:bg-ink/5 hover:text-ink max-md:size-9"
             items={[
@@ -508,11 +500,7 @@ function Credentials() {
                 label: 'Remove',
                 danger: true,
                 onSelect: () =>
-                  confirm(`Remove ${label ?? n}?`) &&
-                  void callOn('hub', { op: 'delete_secret', name: n }).then(() => {
-                    void refetch()
-                    refreshCatalog()
-                  }),
+                  confirm(`Remove ${props.label}?`) && void callOn('hub', { op: 'delete_secret', name: props.name }).then(refreshKeys),
               },
             ]}
           >
@@ -520,7 +508,7 @@ function Credentials() {
           </Menu>
         </Show>
       </div>
-      <Show when={editing() === n}>
+      <Show when={open()}>
         <div class="mt-2 flex gap-2">
           <input
             class={`${inputClass} flex-1`}
@@ -530,45 +518,320 @@ function Credentials() {
             placeholder="Paste the value"
             value={value()}
             onInput={(e) => setValue(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === 'Enter' && value() && void save(n)}
+            onKeyDown={(e) => e.key === 'Enter' && value() && void save()}
           />
-          <Btn kind="primary" disabled={!value()} onClick={() => void save(n)}>
+          <Btn kind="primary" disabled={!value()} onClick={() => void save()}>
             Save
           </Btn>
         </div>
       </Show>
+      <Show when={error()}>
+        <p class="mt-1.5 text-[12.5px] text-bad">{error()}</p>
+      </Show>
     </div>
   )
+}
+
+function Status(props: { ok: boolean; text: string }) {
   return (
-    <Section title="Keys" hint="Kept encrypted on the hub. They can be replaced or removed, never read back.">
+    <span class="inline-flex items-center gap-1.5 text-[12px]" classList={{ 'text-ok': props.ok, 'text-mute': !props.ok }}>
+      <span class="size-1.5 rounded-full" classList={{ 'bg-ok': props.ok, 'bg-faint': !props.ok }} />
+      {props.text}
+    </span>
+  )
+}
+
+const range = (xs: number[]) => {
+  const lo = Math.min(...xs)
+  const hi = Math.max(...xs)
+  return lo === hi ? `${lo}` : `${lo}–${hi}`
+}
+
+function kindLine(k: KindInfo) {
+  const parts = [k.sizes.length ? `${range(k.sizes.map((s) => s.cpu))} cores, ${range(k.sizes.map((s) => s.memory_gb))} GB` : 'Any size']
+  parts.push(k.kvm ? 'Has KVM' : 'No KVM')
+  if (k.max_hours) parts.push(`${k.max_hours} hours at most`)
+  return parts.join(' · ')
+}
+
+function ProviderRow(props: { p: ProviderInfo }) {
+  const [open, setOpen] = createSignal<boolean>(false)
+  return (
+    <div>
+      <button
+        class="flex w-full items-start gap-3 px-3.5 py-3 text-left hover:bg-ink/[0.025]"
+        onClick={() => setOpen(!open())}
+        aria-expanded={open()}
+      >
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+            <span class="text-[13.5px] font-medium">{props.p.label}</span>
+            <Status ok={props.p.connected} text={props.p.connected ? 'Connected' : 'Not connected'} />
+          </div>
+          <div class="mt-0.5 text-[12.5px] text-mute">{props.p.about}</div>
+        </div>
+        <ChevronDown size={15} class="mt-1 shrink-0 text-faint transition-transform" classList={{ 'rotate-180': open() }} />
+      </button>
+      <Show when={open()}>
+        <div class="space-y-3 px-3.5 pb-3.5">
+          <div class="divide-y divide-line">
+            <For each={props.p.credentials}>{(c) => <KeyRow inset name={c.name} label={c.label} hint={c.hint} />}</For>
+          </div>
+          <Show when={props.p.name === 'digitalocean'}>
+            <Region />
+          </Show>
+          <div>
+            <div class="mb-1 text-[12px] font-medium text-mute">{props.p.kinds.length > 1 ? 'Kinds of machine' : 'Machines'}</div>
+            <div class="divide-y divide-line rounded-lg border border-line">
+              <For each={props.p.kinds}>
+                {(k) => (
+                  <div class="px-3 py-2">
+                    <div class="flex flex-wrap items-baseline gap-x-2">
+                      <span class="text-[13px] font-medium">{k.label}</span>
+                      <span class="text-[12px] text-faint">{kindLine(k)}</span>
+                    </div>
+                    <div class="text-[12.5px] text-mute">{k.about}</div>
+                    <div class="text-[12.5px] text-mute">Asleep: {k.sleeps}</div>
+                  </div>
+                )}
+              </For>
+            </div>
+          </div>
+        </div>
+      </Show>
+    </div>
+  )
+}
+
+function Region() {
+  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
+  const [value, setValue] = createSignal<string | null>(null)
+  const current = () => value() ?? String(settings()?.['digitalocean.region'] ?? '')
+  const save = async () => {
+    await callOn('hub', { op: 'set_settings', settings: { 'digitalocean.region': current().trim() } })
+    setValue(null)
+    await refetch()
+  }
+  return (
+    <div class="flex flex-wrap items-center gap-2 text-[13px]">
+      <span class="text-mute">Region</span>
+      <input
+        class={`${inputClass} w-24 font-mono text-[12.5px]`}
+        placeholder="sfo3"
+        spellcheck={false}
+        value={current()}
+        onInput={(e) => setValue(e.currentTarget.value)}
+        onKeyDown={(e) => e.key === 'Enter' && void save()}
+      />
+      <Btn small disabled={value() === null} onClick={() => void save()}>
+        Save
+      </Btn>
+      <span class="text-[12px] text-faint">New droplets start here; one already made wakes where it slept.</span>
+    </div>
+  )
+}
+
+function Providers() {
+  const list = () => providers().filter((p) => p.creates_machines)
+  return (
+    <>
+      <Section title="Providers" hint="Where corra's machines come from. A project picks one, with a kind and a size, on its own page.">
+        <Card>
+          <For each={list()}>{(p) => <ProviderRow p={p} />}</For>
+        </Card>
+        <p class="mt-2 text-[12.5px] text-mute">Any Linux computer can also be a machine: pair it under Machines.</p>
+      </Section>
+      <Leftovers />
+    </>
+  )
+}
+
+function Leftovers() {
+  const [list, { mutate }] = createResource(() => callOn<Leftover[]>('hub', { op: 'leftovers' }).catch(() => []))
+  const [busy, setBusy] = createSignal(false)
+  const retry = async () => {
+    setBusy(true)
+    try {
+      mutate(await callOn<Leftover[]>('hub', { op: 'retry_leftovers' }))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Show when={list()?.length}>
+      <Section
+        title="Left behind"
+        hint="Corra couldn't delete these when it moved off a provider, so they may still be billed. Try again, or delete them in the provider's own console."
+      >
+        <Card>
+          <For each={list()}>
+            {(l) => (
+              <div class="px-3.5 py-2.5">
+                <div class="flex flex-wrap items-baseline gap-x-2">
+                  <span class="text-[13px] font-medium">{l.what.charAt(0).toUpperCase() + l.what.slice(1)}</span>
+                  <span class="text-[12px] text-faint">
+                    {providerLabel(l.provider)} {l.thing === 'image' ? 'image' : 'machine'} <span class="font-mono">{l.reference}</span>
+                  </span>
+                </div>
+                <div class="mt-0.5 truncate text-[12.5px] text-bad">{l.error}</div>
+              </div>
+            )}
+          </For>
+        </Card>
+        <div class="mt-2">
+          <Btn small disabled={busy()} onClick={() => void retry()}>
+            {busy() ? 'Trying…' : 'Try again'}
+          </Btn>
+        </div>
+      </Section>
+    </Show>
+  )
+}
+
+function PhoneHostPicker() {
+  const [info, { refetch }] = createResource(() => callOn<{ host: PhoneHost | null }>('hub', { op: 'phone_host' }))
+  const [error, setError] = createSignal('')
+  const host = () => info()?.host ?? null
+  const set = async (h: PhoneHost | null) => {
+    setError('')
+    if (host() && (!h || h.provider !== host()!.provider || h.kind !== host()!.kind)) {
+      if (
+        !confirm("Move the phone? Its machine and saved image on the current provider are deleted, and it's built again at the next start.")
+      )
+        return
+    }
+    try {
+      await callOn('hub', h ? { op: 'set_phone_host', host: h } : { op: 'set_phone_host' })
+      await refetch()
+      refreshCatalog()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+  const options = () =>
+    providers()
+      .filter((p) => p.creates_machines)
+      .flatMap((p) => p.kinds.map((k) => ({ p, k })))
+  const label = (h: PhoneHost | null) => {
+    if (!h) return 'Off'
+    const p = providerOf(h.provider)
+    const k = p?.kinds.find((x) => x.name === h.kind)
+    return p ? (p.kinds.length > 1 ? `${p.label} ${k?.label ?? h.kind}` : p.label) : h.provider
+  }
+  const kind = () => (host() ? kindOf(host()!.provider, host()!.kind) : undefined)
+  return (
+    <div class="mt-2.5 flex flex-wrap items-center gap-2">
+      <span class="text-[12.5px] text-mute">Runs on</span>
+      <Menu
+        label="Where the phone runs"
+        class={pill}
+        items={[
+          { label: 'Off', checked: !host(), onSelect: () => void set(null) },
+          ...options().map(({ p, k }) => ({
+            label: p.kinds.length > 1 ? `${p.label} ${k.label}` : p.label,
+            hint: !k.kvm ? 'No KVM' : !p.connected ? 'Not connected' : undefined,
+            disabled: !k.kvm || !p.connected,
+            checked: host()?.provider === p.name && host()?.kind === k.name,
+            onSelect: () => void set({ provider: p.name, kind: k.name, size: host()?.size ?? '8x16' }),
+          })),
+        ]}
+      >
+        <span>{label(host())}</span>
+        <ChevronDown size={13} class="text-faint" />
+      </Menu>
+      <Show when={host() && kind()}>
+        <Menu
+          label="The phone's machine size"
+          class={pill}
+          items={sizesFor(kind()).map((s) => ({
+            label: sizeLabel(s),
+            checked: s === host()!.size,
+            onSelect: () => void set({ ...host()!, size: s }),
+          }))}
+        >
+          <span>{sizeLabel(host()!.size)}</span>
+          <ChevronDown size={13} class="text-faint" />
+        </Menu>
+      </Show>
+      <Show when={error()}>
+        <p class="w-full text-[12.5px] text-bad">{error()}</p>
+      </Show>
+    </div>
+  )
+}
+
+function Tools() {
+  return (
+    <Section
+      title="Tools"
+      hint="What agents can use besides Claude Code's own tools. A project turns the browser and the phone on or off on its page."
+    >
       <Card>
-        <For each={known()}>{(k) => row(k.name, k.hint, k.label)}</For>
-        <For each={(names() ?? []).filter((n) => !known().some((k) => k.name === n) && !n.startsWith('backup.'))}>
-          {(n) => row(n, undefined)}
+        <For each={tools()}>
+          {(t) => (
+            <div class="px-3.5 py-3">
+              <div class="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                <span class="text-[13.5px] font-medium">{t.label}</span>
+                <Status ok={t.ready} text={t.ready ? 'Ready' : (t.missing ?? 'Not ready')} />
+              </div>
+              <div class="mt-0.5 text-[12.5px] text-mute">{t.about}</div>
+              <Show when={t.name === 'github'}>
+                <div class="mt-1 border-t border-line">
+                  <KeyRow
+                    inset
+                    name="github.token"
+                    label="GitHub token"
+                    hint="Fine-grained, for your repos: Contents, Pull requests and Issues read and write, Actions and Checks read, no Workflows."
+                  />
+                </div>
+              </Show>
+              <Show when={t.name === 'phone'}>
+                <PhoneHostPicker />
+              </Show>
+            </div>
+          )}
         </For>
       </Card>
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <input
-          class={`${inputClass} w-44 font-mono text-[12.5px]`}
-          placeholder="another.name"
-          spellcheck={false}
-          value={name()}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-        <input
-          class={`${inputClass} flex-1`}
-          type="password"
-          autocomplete="off"
-          placeholder="value"
-          value={editing() ? '' : value()}
-          onInput={(e) => (setEditing(null), setValue(e.currentTarget.value))}
-        />
-        <Btn disabled={!name().trim() || !value() || !!editing()} onClick={() => void save(name())}>
-          Add
-        </Btn>
-      </div>
-      <p class="mt-2 text-[12.5px] text-bad">{error()}</p>
     </Section>
+  )
+}
+
+function Keys() {
+  const known = new Set(['claude.token', 'anthropic.api_key', 'railway.token', 'cloudflare.token', 'cloudflare.account_id', 'github.token'])
+  const others = () =>
+    (secretNames() ?? []).filter(
+      (n) => !known.has(n) && !n.startsWith('backup.') && !providers().some((p) => p.credentials.some((c) => c.name === n)),
+    )
+  return (
+    <>
+      <Section
+        title="The agent"
+        hint="What signs Claude Code in on corra's machines. The hub uses the Claude token, and the API key when there's no token."
+      >
+        <Card>
+          <KeyRow name="claude.token" label="Claude token" hint="From claude setup-token: your subscription." />
+          <KeyRow name="anthropic.api_key" label="Anthropic API key" hint="Billed per use, from the Anthropic Console." />
+        </Card>
+      </Section>
+      <Section title="Full-access projects" hint="Only projects with full access get these, as the usual variables.">
+        <Card>
+          <KeyRow name="railway.token" label="Railway" hint="An account token, given as RAILWAY_API_TOKEN." />
+          <KeyRow name="cloudflare.token" label="Cloudflare" hint="An API token, given as CLOUDFLARE_API_TOKEN." />
+          <KeyRow name="cloudflare.account_id" label="Cloudflare account ID" hint="Given with the token as CLOUDFLARE_ACCOUNT_ID." />
+        </Card>
+      </Section>
+      <Show when={others().length}>
+        <Section title="Other keys" hint="Saved earlier; nothing in corra reads them.">
+          <Card>
+            <For each={others()}>{(n) => <KeyRow name={n} label={n} />}</For>
+          </Card>
+        </Section>
+      </Show>
+      <p class="text-[12.5px] text-mute">
+        Keys are kept encrypted on the hub; they can be replaced or removed, never read back. Each provider's keys are under Providers, and
+        GitHub's under Tools.
+      </p>
+    </>
   )
 }
 
