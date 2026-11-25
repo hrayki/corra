@@ -161,6 +161,9 @@ pub struct Project {
     #[ts(optional)]
     pub default_machine: Option<MachineId>,
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
     pub size: String,
     pub settings: AgentSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +210,9 @@ pub struct Machine {
     pub id: MachineId,
     pub name: String,
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<String>,
     pub status: MachineStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -234,6 +240,8 @@ pub struct MachineInfo {
     pub agents: Vec<AgentAvailability>,
     #[serde(default)]
     pub disk_used_mb: u64,
+    #[serde(default)]
+    pub kvm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -436,4 +444,62 @@ pub enum TouchAction {
     Down,
     Move,
     Up,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CredentialInfo {
+    pub name: String,
+    pub label: String,
+    pub hint: String,
+    pub set: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SizeChoice {
+    pub cpu: u32,
+    pub memory_gb: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct KindInfo {
+    pub name: String,
+    pub label: String,
+    pub about: String,
+    pub sizes: Vec<SizeChoice>,
+    pub sleeps: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_hours: Option<u32>,
+    pub kvm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub label: String,
+    pub about: String,
+    pub creates_machines: bool,
+    pub credentials: Vec<CredentialInfo>,
+    pub kinds: Vec<KindInfo>,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ToolInfo {
+    pub name: String,
+    pub label: String,
+    pub about: String,
+    pub needs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host: Option<String>,
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub missing: Option<String>,
 }

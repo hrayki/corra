@@ -23,6 +23,7 @@ fn machine(hub: &HubRef, name: &str) -> MachineId {
             token_hash: new_id().to_string(),
             provider_ref: None,
             status: MachineStatus::Connected,
+            kind: None,
         })
         .unwrap()
         .id

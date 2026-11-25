@@ -10,13 +10,12 @@ import { call, state, type ProjectX } from '../lib/store'
 import { folders } from '../lib/machines'
 import { InputBox, SendButton, SettingsPickers, useInput } from './Composer'
 import { Btn, Menu, inputClass, type MenuItem } from './bits'
+import { providerLabel, providerOf } from '../lib/catalog'
 import type { AgentSettings } from '../proto/AgentSettings'
 import type { Thread } from '../proto/Thread'
 import type { Project } from '../proto/Project'
 
 type Target = { key: string; project: ProjectX; machine?: string; label: string; laptop: boolean }
-
-const providerLabel = (p: string) => (p === 'modal' ? 'Modal' : p === 'agent37' ? 'Agent37' : p)
 
 export function NewThread(props: { project?: string }) {
   const names = createMemo(() => [...new Set(Object.values(state.projects).map((p) => p.name))].sort((a, b) => a.localeCompare(b)))
@@ -35,7 +34,7 @@ export function NewThread(props: { project?: string }) {
     const out: Target[] = []
     for (const p of Object.values(state.projects)) {
       if (p.name !== n) continue
-      if (p.provider === 'modal' || p.provider === 'agent37')
+      if (providerOf(p.provider)?.creates_machines)
         out.push({ key: `hub:${p.provider}`, project: p, label: `${providerLabel(p.provider)} machine`, laptop: false })
       else {
         const m = p.default_machine ? state.machines[p.default_machine] : undefined

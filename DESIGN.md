@@ -27,14 +27,20 @@ The README says what corra is. This is how it fits together.
 
 ## Machines
 
-A project has one machine, with its repos in `~/projects/<project>/<repo>`, on one of:
+A project has one machine, with its repos in `~/projects/<project>/<repo>`. Each provider describes itself in code: what
+it is, its keys, and the kinds of machine it makes, each with its sizes, how it sleeps, any time limit and whether it
+has KVM. The app and the manager's tools read those descriptions, so nothing outside a provider's own file names it. A
+project picks a provider, a kind and a size, on one of:
 
 - **Modal** (VM mode): asks for a quarter of a core and 1 GB and bursts up to the project's size, so it's billed on
   what it uses. Asleep, it's a snapshot of its disk. A machine lives 24 hours at most, so one still awake is put to
   sleep before then, even mid-turn. Modal writes a machine's DNS servers into `/etc/resolv.conf` on every boot and
   can't write through a link, so before a Modal machine sleeps its helper turns that file back into a plain one.
-- **Agent37** (VM): billed on its size while awake. Asleep, it's stopped and only its disk is billed.
+- **Agent37**: a VM, which has KVM, or a container, which is cheaper and doesn't. Both are billed on their size while
+  awake. Asleep, it's stopped and only its disk is billed.
 - **A machine paired by hand**: any Linux computer running the runner. The hub never starts or stops it.
+
+The runner reports in its machine info whether `/dev/kvm` opens.
 
 The first thread makes the machine: the runner downloads itself from the hub, clones the repos through it and applies
 the setup kit. After 15 idle minutes, or an hour while an app shows the thread or a question waits, the hub puts it to

@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
                 token_hash: hash_token(&token),
                 provider_ref: None,
                 status: MachineStatus::Offline,
+                kind: None,
             })?;
             write_private(&token_file, &token)?;
             println!(

@@ -6,6 +6,7 @@ import { state } from '../lib/store'
 import { claudeSessions, importSession, type ClaudeSession } from '../lib/machines'
 import { ago } from '../lib/format'
 import { Menu } from './bits'
+import { paired } from '../lib/catalog'
 
 const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
@@ -19,9 +20,7 @@ function size(n: number) {
 
 export function ImportSession(props: { machine?: string }) {
   const machine = () =>
-    props.machine ??
-    state.thisMachine ??
-    Object.values(state.machines).find((m) => m.provider === 'existing' && m.status === 'connected')?.id
+    props.machine ?? state.thisMachine ?? Object.values(state.machines).find((m) => paired(m.provider) && m.status === 'connected')?.id
   const [sessions] = createResource(machine, (m) => claudeSessions(m))
   const home = () => (machine() ? (state.machines[machine()!]?.info?.home ?? '') : '')
   const where = () => (machine() === state.thisMachine ? 'this computer' : (state.machines[machine() ?? '']?.name ?? 'the machine'))

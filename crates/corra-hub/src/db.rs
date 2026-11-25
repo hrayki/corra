@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS projects (
     env TEXT NOT NULL DEFAULT '[]',
     tools TEXT NOT NULL DEFAULT '["browser","phone"]',
     allow_main INTEGER NOT NULL DEFAULT 0,
-    trusted INTEGER NOT NULL DEFAULT 0
+    trusted INTEGER NOT NULL DEFAULT 0,
+    kind TEXT
 );
 CREATE TABLE IF NOT EXISTS machines (
     id TEXT PRIMARY KEY,
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS machines (
     created_at INTEGER NOT NULL,
     last_seen INTEGER,
     install_id TEXT,
-    sleep_ref TEXT
+    sleep_ref TEXT,
+    kind TEXT
 );
 CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
@@ -82,7 +84,8 @@ CREATE TABLE IF NOT EXISTS thread_files (
 ) WITHOUT ROWID;
 "#;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
+const OLDEST_VERSION: i64 = 12;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -91,12 +94,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    if !fresh && v < SCHEMA_VERSION {
+    if !fresh && v < OLDEST_VERSION {
         anyhow::bail!(
-            "this database is from a corra older than its schema version {SCHEMA_VERSION} (it's at {v}), which this hub can't open"
+            "this database is from a corra older than its schema version {OLDEST_VERSION} (it's at {v}), which this hub can't open"
         );
     }
     conn.execute_batch(SCHEMA)?;
+    if !fresh && v < 13 {
+        conn.execute_batch(
+            "ALTER TABLE projects ADD COLUMN kind TEXT;
+             ALTER TABLE machines ADD COLUMN kind TEXT;",
+        )?;
+    }
     conn.execute_batch(
         "UPDATE machines SET provider = 'existing' WHERE provider = 'local';
          UPDATE projects SET provider = 'existing' WHERE provider = 'local';",
@@ -132,6 +141,7 @@ pub struct NewMachine {
     pub token_hash: String,
     pub provider_ref: Option<String>,
     pub status: MachineStatus,
+    pub kind: Option<String>,
 }
 
 pub struct MachineAuth {
@@ -273,7 +283,7 @@ impl Db {
     pub fn projects(&self) -> Result<Vec<Project>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted FROM projects ORDER BY name",
+                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted, kind FROM projects ORDER BY name",
             )?;
             st.query_map([], row_project)?.collect()
         })
@@ -282,7 +292,7 @@ impl Db {
     pub fn project(&self, id: ProjectId) -> Result<Option<Project>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted FROM projects WHERE id = ?1",
+                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted, kind FROM projects WHERE id = ?1",
                 [id.to_string()],
                 row_project,
             )
@@ -293,7 +303,7 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO projects(id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     p.id.to_string(),
                     p.name,
@@ -308,7 +318,8 @@ impl Db {
                     json(&p.env),
                     json(&p.tools),
                     p.allow_main,
-                    p.trusted
+                    p.trusted,
+                    p.kind
                 ],
             )
             .map(|_| ())
@@ -318,7 +329,7 @@ impl Db {
     pub fn update_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE projects SET name = ?2, repos = ?3, default_machine = ?4, provider = ?5, size = ?6, settings = ?7, path = ?8, setup = ?9, env = ?10, tools = ?11, allow_main = ?12, trusted = ?13 WHERE id = ?1",
+                "UPDATE projects SET name = ?2, repos = ?3, default_machine = ?4, provider = ?5, size = ?6, settings = ?7, path = ?8, setup = ?9, env = ?10, tools = ?11, allow_main = ?12, trusted = ?13, kind = ?14 WHERE id = ?1",
                 params![
                     p.id.to_string(),
                     p.name,
@@ -332,7 +343,8 @@ impl Db {
                     json(&p.env),
                     json(&p.tools),
                     p.allow_main,
-                    p.trusted
+                    p.trusted,
+                    p.kind
                 ],
             )
             .map(|_| ())
@@ -342,7 +354,7 @@ impl Db {
     pub fn project_by_name(&self, name: &str) -> Result<Option<Project>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted FROM projects WHERE name = ?1",
+                "SELECT id, name, repos, default_machine, provider, size, settings, created_at, path, setup, env, tools, allow_main, trusted, kind FROM projects WHERE name = ?1",
                 [name],
                 row_project,
             )
@@ -353,7 +365,7 @@ impl Db {
     pub fn machines(&self) -> Result<Vec<Machine>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, provider, status, project, size, info, created_at, last_seen FROM machines WHERE status != 'destroyed' ORDER BY created_at",
+                "SELECT id, name, provider, status, project, size, info, created_at, last_seen, kind FROM machines WHERE status != 'destroyed' ORDER BY created_at",
             )?;
             st.query_map([], row_machine)?.collect()
         })
@@ -362,7 +374,7 @@ impl Db {
     pub fn machine(&self, id: MachineId) -> Result<Option<Machine>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, name, provider, status, project, size, info, created_at, last_seen FROM machines WHERE id = ?1",
+                "SELECT id, name, provider, status, project, size, info, created_at, last_seen, kind FROM machines WHERE id = ?1",
                 [id.to_string()],
                 row_machine,
             )
@@ -387,7 +399,7 @@ impl Db {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO machines(id, name, provider, status, project, size, token_hash, provider_ref, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO machines(id, name, provider, status, project, size, token_hash, provider_ref, created_at, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
                     m.name,
@@ -397,7 +409,8 @@ impl Db {
                     m.size,
                     m.token_hash,
                     m.provider_ref,
-                    now
+                    now,
+                    m.kind
                 ],
             )
             .map(|_| ())
@@ -836,6 +849,7 @@ fn row_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         tools: parse(r.get(11)?),
         allow_main: r.get(12)?,
         trusted: r.get(13)?,
+        kind: r.get(14)?,
         created_at: r.get(7)?,
     })
 }
@@ -852,6 +866,7 @@ fn row_machine(r: &rusqlite::Row) -> rusqlite::Result<Machine> {
         info: info.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.get(7)?,
         last_seen: r.get(8)?,
+        kind: r.get(9)?,
     })
 }
 

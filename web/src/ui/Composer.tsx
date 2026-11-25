@@ -13,6 +13,7 @@ import { Menu, Picture } from './bits'
 import { draftFor, setDraftFor } from './Timeline'
 import { continueList, loadDraft, saveDraftImages, saveDraftText } from '../lib/drafts'
 import { usageWindows } from '../lib/seen'
+import { paired } from '../lib/catalog'
 
 export const MODELS = ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5', 'claude-haiku-5-5']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -437,7 +438,7 @@ export function Composer(props: { thread: ThreadX }) {
   })
   const offline = () => {
     const m = props.thread.machine ? state.machines[props.thread.machine] : undefined
-    return m && m.provider === 'existing' && m.status !== 'connected' ? m.name : null
+    return m && paired(m.provider) && m.status !== 'connected' ? m.name : null
   }
   return (
     <div class="px-4 pt-2 pb-4 sm:px-6">

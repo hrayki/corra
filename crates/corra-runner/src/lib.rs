@@ -234,7 +234,16 @@ pub fn machine_info() -> MachineInfo {
         home: files::home().to_string_lossy().to_string(),
         agents,
         disk_used_mb: disk_used_mb(),
+        kvm: kvm(),
     }
+}
+
+fn kvm() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok()
 }
 
 fn disk_used_mb() -> u64 {

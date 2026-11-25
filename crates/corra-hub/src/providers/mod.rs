@@ -19,8 +19,63 @@ pub const BASE_DOCKERFILE: &str = include_str!("../../../../machines/base.Docker
 pub struct CreateRequest {
     pub name: String,
     pub machine: MachineId,
+    pub kind: String,
     pub size: Size,
     pub env: Vec<(String, String)>,
+}
+
+pub struct Credential {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub hint: &'static str,
+}
+
+pub struct Description {
+    pub label: &'static str,
+    pub about: &'static str,
+    pub credentials: &'static [Credential],
+    pub kinds: Vec<KindInfo>,
+    pub listed: bool,
+}
+
+pub struct Kind {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub about: &'static str,
+    pub sizes: &'static [(u32, u32)],
+    pub sleeps: &'static str,
+    pub max_hours: Option<u32>,
+    pub kvm: bool,
+}
+
+impl From<Kind> for KindInfo {
+    fn from(k: Kind) -> KindInfo {
+        KindInfo {
+            name: k.name.into(),
+            label: k.label.into(),
+            about: k.about.into(),
+            sizes: k
+                .sizes
+                .iter()
+                .map(|&(cpu, memory_gb)| SizeChoice { cpu, memory_gb })
+                .collect(),
+            sleeps: k.sleeps.into(),
+            max_hours: k.max_hours,
+            kvm: k.kvm,
+        }
+    }
+}
+
+pub fn fit(sizes: &[SizeChoice], want: &str) -> String {
+    let w = Size::parse(want);
+    let pick = sizes
+        .iter()
+        .find(|s| s.cpu >= w.cpu && s.memory_gb >= w.memory_gb)
+        .or(sizes.last());
+    match pick {
+        Some(s) => format!("{}x{}", s.cpu, s.memory_gb),
+        None => want.to_string(),
+    }
 }
 
 pub fn hub_id(hub: &Hub) -> String {
@@ -70,6 +125,7 @@ pub enum ProviderStatus {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
+    fn describe(&self) -> Description;
     fn creates_machines(&self) -> bool;
     fn max_lifetime(&self) -> Option<Duration> {
         None
@@ -174,6 +230,53 @@ impl Providers {
         "existing"
     }
 
+    pub fn kind(&self, provider: &str, kind: Option<&str>) -> Option<KindInfo> {
+        let kinds = self.get(provider)?.describe().kinds;
+        match kind {
+            Some(k) => kinds.into_iter().find(|x| x.name == k),
+            None => kinds.into_iter().next(),
+        }
+    }
+
+    pub fn kind_name(&self, provider: &str, kind: Option<&str>) -> String {
+        self.kind(provider, kind)
+            .map(|k| k.name)
+            .or(kind.map(String::from))
+            .unwrap_or_default()
+    }
+
+    pub fn info(&self, hub: &Hub) -> Vec<ProviderInfo> {
+        let has = |k: &str| hub.secrets.get(k).ok().flatten().is_some();
+        let mut all: Vec<_> = self.by_name.read().unwrap().values().cloned().collect();
+        all.sort_by_key(|p| p.name());
+        all.into_iter()
+            .filter_map(|p| {
+                let d = p.describe();
+                d.listed.then(|| {
+                    let credentials: Vec<CredentialInfo> = d
+                        .credentials
+                        .iter()
+                        .map(|c| CredentialInfo {
+                            name: c.name.into(),
+                            label: c.label.into(),
+                            hint: c.hint.into(),
+                            set: has(c.name),
+                        })
+                        .collect();
+                    ProviderInfo {
+                        name: p.name().into(),
+                        label: d.label.into(),
+                        about: d.about.into(),
+                        creates_machines: p.creates_machines(),
+                        connected: credentials.iter().all(|c| c.set),
+                        credentials,
+                        kinds: d.kinds,
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub async fn start_for_project(&self, hub: &Arc<Hub>, p: &Project) -> Result<MachineId> {
         if let Some(m) = p.default_machine
             && hub.runner_connected(m)
@@ -238,8 +341,12 @@ impl Providers {
                 p.name
             );
         }
+        let kind = self.kind_name(&p.provider, p.kind.as_deref());
         let asleep = hub.db.machines()?.into_iter().find(|m| {
-            m.project == Some(p.id) && m.provider == p.provider && m.status == MachineStatus::Asleep
+            m.project == Some(p.id)
+                && m.provider == p.provider
+                && self.kind_name(&m.provider, m.kind.as_deref()) == kind
+                && m.status == MachineStatus::Asleep
         });
         let (m, woke) = match asleep {
             Some(m) => (m, true),
@@ -252,6 +359,7 @@ impl Providers {
                     token_hash: hash_token(&new_token("cm")),
                     provider_ref: None,
                     status: MachineStatus::Creating,
+                    kind: Some(kind.clone()),
                 })?;
                 (m, false)
             }
@@ -264,6 +372,7 @@ impl Providers {
         let req = CreateRequest {
             name: m.name.clone(),
             machine: m.id,
+            kind,
             size: Size::parse(&p.size),
             env: self.machine_env(hub, m.id)?,
         };

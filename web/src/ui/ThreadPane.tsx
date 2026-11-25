@@ -20,6 +20,7 @@ import { SidePanel } from './Panel'
 import { threadActions } from './actions'
 import { refreshChanges, totals as changeTotals } from '../lib/changes'
 import { limitedNow } from '../lib/seen'
+import { paired } from '../lib/catalog'
 
 function repeatsError(turns: TurnView[], i: number) {
   const t = turns[i]
@@ -180,7 +181,7 @@ export function ThreadPane(props: { id: string }) {
                 <span>{project()?.name}</span>
                 <span class="text-faint">·</span>
                 <span class="inline-flex items-center gap-1">
-                  {here() || machine()?.provider === 'existing' ? <Laptop size={12} /> : <Cloud size={12} />}
+                  {here() || (machine() && paired(machine()!.provider)) ? <Laptop size={12} /> : <Cloud size={12} />}
                   {where()}
                 </span>
                 <Show when={statusWord[thread()!.status]}>

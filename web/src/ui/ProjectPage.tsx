@@ -4,6 +4,7 @@ import ChevronDown from 'lucide-solid/icons/chevron-down'
 import X from 'lucide-solid/icons/x'
 import { callOn, state, type ProjectX } from '../lib/store'
 import { ago } from '../lib/format'
+import { kindOf, makers, paired, providerOf, sizeLabel, sizesFor } from '../lib/catalog'
 import { RepoPicker } from './RepoPicker'
 import { Btn, Menu } from './bits'
 
@@ -20,7 +21,6 @@ export function ProjectPage(props: { id: string }) {
   const p = () => state.projects[props.id] as ProjectX | undefined
   const [setups] = createResource(() => callOn<SetupRow[]>('hub', { op: 'list_setups' }).catch(() => []))
   const [envNames] = createResource(() => callOn<string[]>('hub', { op: 'list_env' }).catch(() => []))
-  const [secrets] = createResource(() => callOn<string[]>('hub', { op: 'list_secrets' }).catch(() => []))
   const [error, setError] = createSignal('')
   const [busy, setBusy] = createSignal(false)
   const run = async (f: () => Promise<unknown>) => {
@@ -58,14 +58,15 @@ export function ProjectPage(props: { id: string }) {
     return parts.join(' · ')
   }
   const places = createMemo(() => {
-    const out = [] as { key: string; label: string }[]
-    if (secrets()?.includes('modal.token_id')) out.push({ key: 'modal', label: 'Modal' })
-    if (secrets()?.includes('agent37.key')) out.push({ key: 'agent37', label: 'Agent37' })
+    const out = makers().map((x) => ({ key: x.name, label: x.label }))
     for (const m of Object.values(state.machines))
-      if (m.src === 'hub' && m.provider === 'existing' && m.status !== 'destroyed') out.push({ key: `machine:${m.id}`, label: m.name })
+      if (m.src === 'hub' && paired(m.provider) && m.status !== 'destroyed') out.push({ key: `machine:${m.id}`, label: m.name })
     return out
   })
-  const placeKey = () => (p()?.provider === 'existing' ? `machine:${p()?.default_machine}` : p()?.provider)
+  const makes = () => !!providerOf(p()?.provider)?.creates_machines
+  const placeKey = () => (makes() ? p()?.provider : `machine:${p()?.default_machine}`)
+  const kinds = () => providerOf(p()?.provider)?.kinds ?? []
+  const kind = () => kindOf(p()?.provider, p()?.kind)
   const has = (t: string) => !!p()?.tools.includes(t)
   const setTool = (t: string, on: boolean) =>
     update({ tools: on ? [...new Set([...(p()?.tools ?? []), t])] : (p()?.tools ?? []).filter((x) => x !== t) })
@@ -116,7 +117,9 @@ export function ProjectPage(props: { id: string }) {
                       checked: x.key === placeKey(),
                       onSelect: () =>
                         void update(
-                          x.key.startsWith('machine:') ? { provider: 'existing', default_machine: x.key.slice(8) } : { provider: x.key },
+                          x.key.startsWith('machine:')
+                            ? { provider: state.machines[x.key.slice(8)]?.provider ?? 'existing', default_machine: x.key.slice(8) }
+                            : { provider: x.key },
                         ),
                     }))}
                   >
@@ -124,7 +127,35 @@ export function ProjectPage(props: { id: string }) {
                     <ChevronDown size={13} class="text-faint" />
                   </Menu>
                 </Show>
-                <Show when={machine() && (p()!.provider === 'modal' || p()!.provider === 'agent37')}>
+                <Show when={makes() && kinds().length > 1}>
+                  <Menu
+                    label="Kind"
+                    class={pill}
+                    items={kinds().map((k) => ({
+                      label: k.label,
+                      checked: k.name === kind()?.name,
+                      onSelect: () => void update({ kind: k.name }),
+                    }))}
+                  >
+                    <span>{kind()?.label}</span>
+                    <ChevronDown size={13} class="text-faint" />
+                  </Menu>
+                </Show>
+                <Show when={makes()}>
+                  <Menu
+                    label="Size"
+                    class={pill}
+                    items={sizesFor(kind()).map((s) => ({
+                      label: sizeLabel(s),
+                      checked: s === p()!.size,
+                      onSelect: () => void update({ size: s }),
+                    }))}
+                  >
+                    <span>{sizeLabel(p()!.size)}</span>
+                    <ChevronDown size={13} class="text-faint" />
+                  </Menu>
+                </Show>
+                <Show when={machine() && makes()}>
                   <Btn
                     kind="danger"
                     disabled={busy()}
@@ -138,6 +169,9 @@ export function ProjectPage(props: { id: string }) {
                   </Btn>
                 </Show>
               </div>
+              <Show when={makes() && kind()?.about}>
+                <p class="mt-1.5 text-[12.5px] text-faint">{kind()!.about}</p>
+              </Show>
             </div>
 
             <span class="pt-1.5 text-[13px] text-mute">Setup</span>

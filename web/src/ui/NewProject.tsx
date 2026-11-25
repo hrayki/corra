@@ -5,6 +5,7 @@ import Lock from 'lucide-solid/icons/lock'
 import Search from 'lucide-solid/icons/search'
 import { callOn, state, type ProjectX } from '../lib/store'
 import { ago } from '../lib/format'
+import { makers, paired, providerOf, tools as toolInfo } from '../lib/catalog'
 import { Btn, Menu, inputClass } from './bits'
 import { FolderPicker } from './NewThread'
 
@@ -44,8 +45,7 @@ export function NewProject() {
   const [envNames, { refetch: refetchEnv }] = createResource(hubUp, (up) =>
     up ? callOn<string[]>('hub', { op: 'list_env' }) : Promise.resolve([]),
   )
-  const [secrets] = createResource(hubUp, (up) => (up ? callOn<string[]>('hub', { op: 'list_secrets' }) : Promise.resolve([])))
-  const has = (n: string) => !!secrets()?.includes(n)
+  const phoneReady = () => !!toolInfo().find((t) => t.name === 'phone')?.ready
 
   const [q, setQ] = createSignal('')
   const [picked, setPicked] = createSignal<string[]>([])
@@ -62,16 +62,17 @@ export function NewProject() {
   const [busy, setBusy] = createSignal(false)
 
   const machines = createMemo(() =>
-    Object.values(state.machines).filter((m) => m.src === 'hub' && m.provider === 'existing' && m.status !== 'destroyed'),
+    Object.values(state.machines).filter((m) => m.src === 'hub' && paired(m.provider) && m.status !== 'destroyed'),
   )
   const places = createMemo(() => {
-    const out: { key: string; label: string }[] = []
-    if (has('modal.token_id')) out.push({ key: 'modal', label: 'Modal' })
-    if (has('agent37.key')) out.push({ key: 'agent37', label: 'Agent37' })
+    const out = makers().map((p) => ({ key: p.name, label: p.label }))
     for (const m of machines()) out.push({ key: `machine:${m.id}`, label: m.name })
     return out
   })
   const place = () => places().find((p) => p.key === where()) ?? places()[0]
+  const [kindName, setKindName] = createSignal<string>('')
+  const kinds = () => providerOf(place()?.key)?.kinds ?? []
+  const kind = () => kinds().find((k) => k.name === kindName()) ?? kinds()[0]
 
   const filtered = createMemo(() => {
     const needle = q().trim().toLowerCase()
@@ -117,12 +118,13 @@ export function NewProject() {
     try {
       for (const [k, v] of Object.entries(values())) if (v.trim()) await callOn('hub', { op: 'set_env', name: k, value: v })
       await refetchEnv()
-      const tools = [...(browser() ? ['browser'] : []), ...(phone() ? ['phone'] : [])]
+      const tools = [...(browser() ? ['browser'] : []), ...(phone() && phoneReady() ? ['phone'] : [])]
       const made = await callOn<ProjectX>('hub', {
         op: 'create_project',
         name: projectName(),
         repos: picked(),
         provider: p.key.startsWith('machine:') ? undefined : p.key,
+        kind: p.key.startsWith('machine:') ? undefined : kind()?.name,
         machine: p.key.startsWith('machine:') ? p.key.slice(8) : undefined,
         setup: setup() ?? undefined,
         env: env(),
@@ -258,7 +260,7 @@ export function NewProject() {
               <div>
                 <Show
                   when={places().length}
-                  fallback={<span class="text-[13px] text-warn">Add Modal or Agent37 in Settings → Credentials first.</span>}
+                  fallback={<span class="text-[13px] text-warn">Connect a provider in Settings first, or pair a machine.</span>}
                 >
                   <Menu
                     label="Runs on"
@@ -268,6 +270,23 @@ export function NewProject() {
                     <span>{place()?.label}</span>
                     <ChevronDown size={13} class="text-faint" />
                   </Menu>
+                  <Show when={kinds().length > 1}>
+                    <Menu
+                      label="Kind"
+                      class={`${pill} ml-2`}
+                      items={kinds().map((k) => ({
+                        label: k.label,
+                        checked: k.name === kind()?.name,
+                        onSelect: () => setKindName(k.name),
+                      }))}
+                    >
+                      <span>{kind()?.label}</span>
+                      <ChevronDown size={13} class="text-faint" />
+                    </Menu>
+                  </Show>
+                  <Show when={kind()?.about}>
+                    <p class="mt-1.5 text-[12.5px] text-faint">{kind()!.about}</p>
+                  </Show>
                 </Show>
               </div>
 
@@ -359,12 +378,12 @@ export function NewProject() {
                   />
                   Browser
                 </label>
-                <label class="flex items-center gap-1.5" classList={{ 'text-faint': !has('digitalocean.token') }}>
+                <label class="flex items-center gap-1.5" classList={{ 'text-faint': !phoneReady() }}>
                   <input
                     type="checkbox"
                     class="accent-[var(--accent)]"
-                    disabled={!has('digitalocean.token')}
-                    checked={phone() && has('digitalocean.token')}
+                    disabled={!phoneReady()}
+                    checked={phone() && phoneReady()}
                     onChange={(e) => setPhone(e.currentTarget.checked)}
                   />
                   Android test phone
@@ -383,9 +402,7 @@ export function NewProject() {
                 <span class="text-[12.5px] text-mute">Pick at least one repo.</span>
               </Show>
               <Show when={!missing().length && picked().length > 0 && !place()}>
-                <span class="text-[12.5px] text-mute">
-                  Add a Modal or Agent37 key in Settings, or pair a machine, so it has somewhere to run.
-                </span>
+                <span class="text-[12.5px] text-mute">Connect a provider in Settings, or pair a machine, so it has somewhere to run.</span>
               </Show>
             </div>
           </Show>

@@ -153,7 +153,7 @@ pub fn defs_for(hub: &HubRef, project: &Project, machine: MachineId) -> Vec<Tool
         })
         .collect();
     if is_manager(hub, machine) {
-        let manage = crate::manage::defs();
+        let manage = crate::manage::defs(hub);
         defs.retain(|d| !manage.iter().any(|m| m.action == d.action));
         defs.extend(manage);
     }
@@ -173,7 +173,7 @@ pub async fn call(
         .thread(thread)?
         .ok_or_else(|| anyhow!("no such thread"))?;
     let phone = crate::phone::is_phone(action);
-    if (crate::manage::is_manage(action) || phone) && is_manager(hub, machine) {
+    if (crate::manage::is_manage(hub, action) || phone) && is_manager(hub, machine) {
         if phone {
             return crate::phone::run(hub, machine, action, input).await;
         }
@@ -298,4 +298,57 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
         a if a.starts_with("github.") => crate::github::run(hub, p, a, &input).await,
         _ => bail!("unknown tool {action}"),
     }
+}
+
+pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
+    let has = |k: &str| hub.secrets.get(k).ok().flatten().is_some();
+    let tool = |name: &str, label: &str, about: &str, needs: &[&str], host: Option<&str>| {
+        let missing: Vec<&str> = needs.iter().copied().filter(|k| !has(k)).collect();
+        ToolInfo {
+            name: name.into(),
+            label: label.into(),
+            about: about.into(),
+            needs: needs.iter().map(|s| s.to_string()).collect(),
+            host: host.map(String::from),
+            ready: missing.is_empty(),
+            missing: (!missing.is_empty()).then(|| format!("Needs {}", missing.join(" and "))),
+        }
+    };
+    vec![
+        tool(
+            "github",
+            "GitHub",
+            "Clone, push, and work with pull requests, issues and checks. The hub holds the key.",
+            &["github.token"],
+            None,
+        ),
+        tool(
+            "browser",
+            "Browser",
+            "A Chromium on the project's machine that agents drive and you can watch.",
+            &[],
+            None,
+        ),
+        tool(
+            "phone",
+            "Android phone",
+            "A test phone in the cloud that agents drive and you can watch. Its apps and data go when it stops.",
+            &["digitalocean.token"],
+            Some("kvm"),
+        ),
+        tool(
+            "threads",
+            "Other threads",
+            "List the project's threads and start new ones.",
+            &[],
+            None,
+        ),
+        tool(
+            "manage",
+            "Managing corra",
+            "Create and change projects, read and message any thread, and manage machines and keys. Only full-access projects get it.",
+            &[],
+            None,
+        ),
+    ]
 }

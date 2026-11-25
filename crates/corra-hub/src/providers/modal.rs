@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use super::{BASE_DOCKERFILE, CreateRequest, Provider, ProviderStatus, boot_command};
+use super::{
+    BASE_DOCKERFILE, CreateRequest, Credential, Description, Kind, Provider, ProviderStatus,
+    boot_command,
+};
 use crate::hub::Hub;
 
 pub struct Modal {
@@ -133,6 +136,38 @@ impl Modal {
 impl Provider for Modal {
     fn name(&self) -> &'static str {
         "modal"
+    }
+
+    fn describe(&self) -> Description {
+        Description {
+            label: "Modal",
+            about: "Cloud machines billed on the CPU and memory they use.",
+            credentials: &[
+                Credential {
+                    name: "modal.token_id",
+                    label: "Token ID",
+                    hint: "Modal, Settings, API Tokens.",
+                },
+                Credential {
+                    name: "modal.token_secret",
+                    label: "Token secret",
+                    hint: "The secret half of the same token.",
+                },
+            ],
+            kinds: vec![
+                Kind {
+                    name: "vm",
+                    label: "VM sandbox",
+                    about: "Starts small and bursts up to the project's size, billed on what it uses.",
+                    sizes: &[],
+                    sleeps: "Its disk is snapshotted and the machine shut down.",
+                    max_hours: Some(24),
+                    kvm: false,
+                }
+                .into(),
+            ],
+            listed: true,
+        }
     }
 
     fn creates_machines(&self) -> bool {

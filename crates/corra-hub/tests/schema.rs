@@ -57,10 +57,24 @@ async fn a_database_made_by_the_old_hub_opens_and_keeps_working() {
         })
         .unwrap();
     q.allow_main = true;
+    q.kind = Some("vm".into());
     hub.db.update_project(&q).unwrap();
+    assert_eq!(p.kind, None);
+    assert_eq!(hub.db.machines().unwrap()[0].kind, None);
     hub.db.file_replace(threads[0].id, "s.jsonl", b"x").unwrap();
     hub.remove_thread(threads[0].id).unwrap();
     assert!(hub.db.project_by_name("new").unwrap().unwrap().allow_main);
+    drop(hub);
+    let hub = open(dir.path()).unwrap();
+    assert_eq!(
+        hub.db
+            .project_by_name("new")
+            .unwrap()
+            .unwrap()
+            .kind
+            .as_deref(),
+        Some("vm")
+    );
 }
 
 #[tokio::test]
@@ -78,7 +92,7 @@ async fn a_new_database_gets_the_whole_schema_and_opens_again() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 12);
+    assert_eq!(v, 13);
 }
 
 #[tokio::test]
