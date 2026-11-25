@@ -15,6 +15,7 @@ export type ItemView = {
   parent?: string
   body: ItemBody
   done: boolean
+  at?: number
   live?: string
   liveInput?: string
 }
@@ -52,6 +53,33 @@ export type ThreadView = {
   slashCommands: string[]
   preface: Entry[]
   turns: TurnView[]
+}
+
+export const isWork = (e: Entry) =>
+  (e.type === 'item' && (e.item.body.type === 'tool_call' || e.item.body.type === 'reasoning' || e.item.body.type === 'todos')) ||
+  (e.type === 'request' && !!e.request.response)
+
+export type Fold = { lead?: Entry; work: Entry[]; rest: Entry[] }
+
+export function folds(turn: string, entries: Entry[]): Fold[] {
+  const out: Fold[] = []
+  let lead: Entry | undefined
+  let cur: Entry[] = []
+  const close = () => {
+    let last = -1
+    cur.forEach((e, i) => {
+      if (isWork(e)) last = i
+    })
+    out.push({ lead, work: cur.slice(0, last + 1), rest: cur.slice(last + 1) })
+  }
+  for (const e of entries)
+    if (e.type === 'item' && e.item.body.type === 'user_message' && e.item.id !== `${turn}:input`) {
+      close()
+      lead = e
+      cur = []
+    } else cur.push(e)
+  close()
+  return out
 }
 
 export const emptyView = (): ThreadView => ({ lastSeq: 0, slashCommands: [], preface: [], turns: [] })
@@ -116,7 +144,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
         }
       } else {
         if (body.type === 'user_message' && id === `${t.id}:input` && t.input.length > 0) break
-        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done } })
+        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done, at: e.ts } })
       }
       break
     }
