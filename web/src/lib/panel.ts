@@ -3,7 +3,7 @@ import { sidebarCollapsed, sidebarWidth } from './layout'
 
 export type Panel =
   | { kind: 'diff'; turn?: string; file?: string }
-  | { kind: 'files'; path?: string }
+  | { kind: 'files'; path?: string; line?: number }
   | { kind: 'terminal' }
   | { kind: 'browser' }
   | { kind: 'phone' }
@@ -11,6 +11,10 @@ export type Panel =
 const [panel, setPanel] = createSignal<Panel | null>(null)
 const [panelWidthSignal, setPanelWidthSignal] = createSignal(Number(localStorage.getItem('corra_panel_w')) || 560)
 export { panel, setPanel }
+
+export function openFile(ref: { path: string; line?: number }) {
+  setPanel({ kind: 'files', path: ref.path, line: ref.line })
+}
 
 const CHAT_MIN = 480
 const sidebar = () => (sidebarCollapsed() ? 48 : sidebarWidth())

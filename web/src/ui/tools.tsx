@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createResource } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource } from 'solid-js'
 import type { ToolOutput } from '../proto/ToolOutput'
 import type { JsonValue } from '../proto/serde_json/JsonValue'
 import { shortPath } from '../lib/format'
@@ -132,17 +132,38 @@ export function Pre(props: { text: string; error?: boolean }) {
   )
 }
 
-export function CodeBlock(props: { code: string; path?: string; lines?: boolean }) {
+export function CodeBlock(props: { code: string; path?: string; line?: number }) {
+  let el!: HTMLDivElement
   const lang = () => (props.path ? langOfPath(props.path) : undefined)
   const [html] = createResource(
     () => [props.code, lang()] as const,
     ([code, l]) => (l ? highlightCode(code, l) : undefined),
   )
+  createEffect(() => {
+    const n = props.line
+    if (!n || html.loading) return
+    html()
+    queueMicrotask(() => {
+      const row = el?.querySelectorAll<HTMLElement>('.line')[n - 1]
+      if (!row) return
+      row.classList.add('jumped')
+      const left = el.scrollLeft
+      row.scrollIntoView({ block: 'center' })
+      el.scrollLeft = left
+    })
+  })
+  const plain = () => (props.code.length > 60000 ? props.code.slice(0, 60000) + '\n…' : props.code)
   return (
-    <div class="max-h-96 overflow-auto rounded-lg border border-line bg-panel font-mono text-[12px] leading-[1.55]">
+    <div ref={el} class="max-h-96 overflow-auto rounded-lg border border-line bg-panel font-mono text-[12px] leading-[1.55]">
       <Show
         when={html()}
-        fallback={<pre class="px-3 py-2 whitespace-pre">{props.code.length > 60000 ? props.code.slice(0, 60000) + '\n…' : props.code}</pre>}
+        fallback={
+          <pre class="px-3 py-2 whitespace-pre">
+            <Show when={props.line} fallback={plain()}>
+              <For each={plain().split('\n')}>{(l) => [<span class="line">{l}</span>, '\n']}</For>
+            </Show>
+          </pre>
+        }
       >
         <div class="[&_pre]:!bg-transparent [&_pre]:px-3 [&_pre]:py-2" innerHTML={html()} />
       </Show>

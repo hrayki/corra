@@ -13,6 +13,7 @@ import RotateCw from 'lucide-solid/icons/rotate-cw'
 import { changesOf, refreshChanges, totals, type ChangedFile } from '../lib/changes'
 import { ago } from '../lib/format'
 import { IconBtn } from './bits'
+import { inside } from '../lib/filelinks'
 
 const TerminalPanel = lazy(lazyPart(() => import('./Terminal').then((m) => ({ default: m.TerminalPanel }))))
 const BrowserPanel = lazy(lazyPart(() => import('./Browser').then((m) => ({ default: m.BrowserPanel }))))
@@ -358,15 +359,20 @@ function Hunks(props: { f: FileDiff }) {
 type Entry = { name: string; dir: boolean; size: number }
 
 function FilesPanel(props: { thread: string }) {
-  const [open, setOpen] = createSignal<string | null>(null)
+  const [open, setOpen] = createSignal<{ path: string; line?: number } | null>(null)
+  createEffect(
+    on(panel, (p) => {
+      if (p?.kind === 'files' && p.path) setOpen({ path: inside(state.threads[props.thread]?.cwd ?? '', p.path), line: p.line })
+    }),
+  )
   return (
     <div class="flex h-full max-sm:flex-col">
       <div class="w-56 shrink-0 overflow-auto border-line py-1.5 max-sm:max-h-48 max-sm:w-full max-sm:border-b sm:border-r">
-        <Dir thread={props.thread} path="" depth={0} onOpen={setOpen} selected={open()} />
+        <Dir thread={props.thread} path="" depth={0} onOpen={(path) => setOpen({ path })} selected={open()?.path ?? null} />
       </div>
       <div class="min-w-0 flex-1 overflow-auto">
         <Show when={open()} fallback={<p class="p-5 text-[13px] text-mute">Pick a file to read it.</p>} keyed>
-          {(p) => <FileView thread={props.thread} path={p} />}
+          {(o) => <FileView thread={props.thread} path={o.path} line={o.line} />}
         </Show>
       </div>
     </div>
@@ -398,9 +404,17 @@ function Dir(props: { thread: string; path: string; depth: number; onOpen: (p: s
 
 function Node(props: { thread: string; e: Entry; path: string; depth: number; onOpen: (p: string) => void; selected: string | null }) {
   const [expanded, setExpanded] = createSignal(false)
+  createEffect(() => {
+    if (props.e.dir && props.selected?.startsWith(props.path + '/')) setExpanded(true)
+  })
   return (
     <>
       <button
+        ref={(b) =>
+          createEffect(() => {
+            if (props.selected === props.path) queueMicrotask(() => b.scrollIntoView({ block: 'nearest' }))
+          })
+        }
         class="flex w-full items-center gap-1.5 py-[3px] pr-2 text-left text-[12.5px] hover:bg-ink/5"
         classList={{ 'bg-ink/[0.06] font-medium': props.selected === props.path }}
         style={{ 'padding-left': `${10 + props.depth * 12}px` }}
@@ -420,7 +434,7 @@ function Node(props: { thread: string; e: Entry; path: string; depth: number; on
 
 const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i
 
-function FileView(props: { thread: string; path: string }) {
+function FileView(props: { thread: string; path: string; line?: number }) {
   const [file] = createResource(
     () => props.path,
     (p) => call<{ text?: string; base64?: string; size: number; truncated: boolean }>({ op: 'read_file', thread: props.thread, path: p }),
@@ -445,12 +459,12 @@ function FileView(props: { thread: string; path: string }) {
                   when={/\.mdx?$/i.test(props.path)}
                   fallback={
                     <div class="[&>div]:max-h-none [&>div]:rounded-none [&>div]:border-0 [&>div]:bg-transparent">
-                      <CodeBlock code={f().text!} path={props.path} />
+                      <CodeBlock code={f().text!} path={props.path} line={props.line} />
                     </div>
                   }
                 >
                   <div class="p-5">
-                    <Markdown text={f().text!} />
+                    <Markdown text={f().text!} base={props.path.split('/').slice(0, -1).join('/')} />
                   </div>
                 </Show>
               </Show>
