@@ -2,4 +2,4 @@
 import type { MachineInfo } from "./MachineInfo";
 import type { MachineStatus } from "./MachineStatus";
 
-export type Machine = { id: string, name: string, provider: string, status: MachineStatus, project?: string, size: string, info?: MachineInfo, created_at: number, last_seen?: number, };
+export type Machine = { id: string, name: string, provider: string, kind?: string, status: MachineStatus, project?: string, size: string, info?: MachineInfo, created_at: number, last_seen?: number, };

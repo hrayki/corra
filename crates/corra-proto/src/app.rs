@@ -41,6 +41,12 @@ pub enum AppCall {
         provider: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         setup: Option<String>,
         #[serde(default)]
         env: Vec<String>,
@@ -179,6 +185,8 @@ pub enum AppCall {
         name: String,
     },
     ListSecrets,
+    ListProviders,
+    ListTools,
     Presence {
         focused: bool,
     },
@@ -213,6 +221,9 @@ pub enum AppCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        kind: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         size: Option<String>,

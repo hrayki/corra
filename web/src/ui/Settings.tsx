@@ -11,6 +11,7 @@ import { ago } from '../lib/format'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
+import { paired, providerLabel, providers, refreshCatalog } from '../lib/catalog'
 
 export function Settings() {
   const hubUp = () => state.conn.hub === 'open'
@@ -373,7 +374,7 @@ function Machines() {
   const detail = (m: MachineX) => {
     const parts: string[] = []
     if (m.id === state.thisMachine) parts.push(m.name)
-    else parts.push(m.provider === 'existing' ? 'Paired' : m.provider === 'modal' ? 'Modal' : 'Agent37')
+    else parts.push(paired(m.provider) ? 'Paired' : providerLabel(m.provider))
     if (m.project && state.projects[m.project]) parts.push(state.projects[m.project].name)
     if (m.info?.disk_used_mb) parts.push(`${(m.info.disk_used_mb / 1024).toFixed(1)} GB of disk`)
     parts.push(m.status === 'connected' ? 'awake' : m.status === 'offline' && m.last_seen ? `seen ${ago(m.last_seen)} ago` : m.status)
@@ -393,7 +394,7 @@ function Machines() {
           {(m) => (
             <div class="flex items-center gap-3 px-3.5 py-2.5">
               <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ink/[0.05] text-mute">
-                {m.provider === 'existing' ? <Laptop size={15} /> : <Cloud size={15} />}
+                {paired(m.provider) ? <Laptop size={15} /> : <Cloud size={15} />}
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 text-[13.5px] font-medium">
@@ -418,6 +419,12 @@ function Machines() {
   )
 }
 
+const known = () => [
+  ...KNOWN.slice(0, 2),
+  ...providers().flatMap((p) => p.credentials.map((c) => ({ name: c.name, label: `${p.label} ${c.label.toLowerCase()}`, hint: c.hint }))),
+  ...KNOWN.slice(2),
+]
+
 const KNOWN: { name: string; label?: string; hint: string }[] = [
   { name: 'claude.token', label: 'Claude Code', hint: 'From claude setup-token. Signs Claude Code in on remote machines.' },
   {
@@ -425,9 +432,6 @@ const KNOWN: { name: string; label?: string; hint: string }[] = [
     label: 'GitHub',
     hint: 'A fine-grained GitHub token for your repos: Contents, Pull requests and Issues read and write, Actions and Checks read, no Workflows.',
   },
-  { name: 'modal.token_id', label: 'Modal token ID', hint: 'Modal, Settings, API Tokens.' },
-  { name: 'modal.token_secret', label: 'Modal token secret', hint: 'The secret half of the Modal token.' },
-  { name: 'agent37.key', label: 'Agent37', hint: 'Agent37 API key.' },
   { name: 'digitalocean.token', label: 'DigitalOcean', hint: 'A DigitalOcean token that can make droplets. Runs the Android test phone.' },
   { name: 'railway.token', label: 'Railway', hint: 'A Railway account token. Only manager projects get it, as RAILWAY_API_TOKEN.' },
   {
@@ -457,6 +461,7 @@ function Credentials() {
       setName('')
       setEditing(null)
       await refetch()
+      refreshCatalog()
     } catch (e) {
       setError((e as Error).message)
     }
@@ -491,7 +496,11 @@ function Credentials() {
                 label: 'Remove',
                 danger: true,
                 onSelect: () =>
-                  confirm(`Remove ${label ?? n}?`) && void callOn('hub', { op: 'delete_secret', name: n }).then(() => refetch()),
+                  confirm(`Remove ${label ?? n}?`) &&
+                  void callOn('hub', { op: 'delete_secret', name: n }).then(() => {
+                    void refetch()
+                    refreshCatalog()
+                  }),
               },
             ]}
           >
@@ -521,8 +530,8 @@ function Credentials() {
   return (
     <Section title="Keys" hint="Kept encrypted on the hub. They can be replaced or removed, never read back.">
       <Card>
-        <For each={KNOWN}>{(k) => row(k.name, k.hint, k.label)}</For>
-        <For each={(names() ?? []).filter((n) => !KNOWN.some((k) => k.name === n) && !n.startsWith('backup.'))}>
+        <For each={known()}>{(k) => row(k.name, k.hint, k.label)}</For>
+        <For each={(names() ?? []).filter((n) => !known().some((k) => k.name === n) && !n.startsWith('backup.'))}>
           {(n) => row(n, undefined)}
         </For>
       </Card>

@@ -81,6 +81,7 @@ pub async fn up(hub: &HubRef) -> Result<MachineId> {
         token_hash: hash_token(&token),
         provider_ref: None,
         status: MachineStatus::Creating,
+        kind: None,
     })?;
     hub.publish_machine(m.id);
     let creating =
@@ -98,6 +99,7 @@ pub async fn up(hub: &HubRef) -> Result<MachineId> {
             CreateRequest {
                 name: m.name.clone(),
                 machine: m.id,
+                kind: String::new(),
                 size: Size::parse(&m.size),
                 env: vec![
                     ("CORRA_HUB".into(), hub.providers.hub_url.clone()),

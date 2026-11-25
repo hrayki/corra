@@ -809,6 +809,8 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             machine,
             path,
             provider,
+            kind,
+            size,
             setup,
             env,
             tools,
@@ -821,6 +823,8 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             machine,
             path,
             provider,
+            kind,
+            size,
             setup,
             env,
             tools,
@@ -1038,6 +1042,8 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.secrets.delete(&name)?;
             Value::Null
         }
+        AppCall::ListProviders => serde_json::to_value(hub.providers.info(hub))?,
+        AppCall::ListTools => serde_json::to_value(crate::tools::info(hub))?,
         AppCall::ListSecrets => json!(
             hub.secrets
                 .names()?
@@ -1063,6 +1069,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             repos,
             default_machine,
             provider,
+            kind,
             size,
             settings,
             setup,
@@ -1099,18 +1106,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             if let Some(s) = settings {
                 p.settings = s;
             }
-            if let Some(pr) = provider {
-                if hub.providers.get(&pr).is_none() {
-                    anyhow::bail!("unknown provider {pr}");
-                }
-                p.provider = pr;
-                if p.provider != "existing" && p.provider != "local" {
-                    p.default_machine = None;
-                }
-            }
-            if let Some(sz) = size {
-                p.size = sz;
-            }
+            hub.place_project(&mut p, provider, kind, size)?;
             hub.db.update_project(&p)?;
             hub.publish_project(&p);
             serde_json::to_value(p)?

@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use corra_hub::db::NewMachine;
 use corra_hub::hub::{Hub, HubRef, NewProject};
-use corra_hub::providers::{CreateRequest, Provider, ProviderStatus};
+use corra_hub::providers::{CreateRequest, Description, Provider, ProviderStatus};
 use corra_proto::*;
 
 struct Fake {
@@ -17,6 +17,15 @@ struct Fake {
 impl Provider for Fake {
     fn name(&self) -> &'static str {
         "fake"
+    }
+    fn describe(&self) -> Description {
+        Description {
+            label: "Fake",
+            about: "",
+            credentials: &[],
+            kinds: vec![],
+            listed: true,
+        }
     }
     fn creates_machines(&self) -> bool {
         true
@@ -78,6 +87,7 @@ async fn the_sweep_leaves_a_machine_alone_while_it_wakes() {
             token_hash: "h".into(),
             provider_ref: None,
             status: MachineStatus::Asleep,
+            kind: None,
         })
         .unwrap();
     hub.db.set_machine_sleep_ref(m.id, Some("snap")).unwrap();

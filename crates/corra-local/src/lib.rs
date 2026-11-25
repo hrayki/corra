@@ -154,6 +154,7 @@ fn this_machine(hub: &HubRef, token: &str) -> Result<MachineId> {
                             token_hash: hash_token(token),
                             provider_ref: None,
                             status: MachineStatus::Offline,
+                            kind: None,
                         })?
                         .id
                 }

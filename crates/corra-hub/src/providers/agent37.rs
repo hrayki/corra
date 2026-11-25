@@ -4,12 +4,30 @@ use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{BASE_DOCKERFILE, CreateRequest, Provider, ProviderStatus, boot_command};
+use super::{
+    BASE_DOCKERFILE, CreateRequest, Credential, Description, Kind, Provider, ProviderStatus,
+    boot_command,
+};
 use crate::hub::Hub;
 
 const API: &str = "https://api.agent37.com/v1";
 
 pub struct Agent37;
+
+const CONTAINER_SIZES: &[(u32, u32)] = &[(2, 4), (4, 8), (4, 16), (4, 32)];
+const VM_SIZES: &[(u32, u32)] = &[(2, 4), (4, 8), (4, 16), (4, 32), (8, 64)];
+const VM_DISK_GB: u32 = 40;
+
+pub fn disk_gb(kind: &str, memory_gb: u32) -> u32 {
+    if kind != "container" {
+        return VM_DISK_GB;
+    }
+    match memory_gb {
+        0..=4 => 12,
+        5..=8 => 20,
+        _ => VM_DISK_GB,
+    }
+}
 
 fn key(hub: &Hub) -> Result<String> {
     hub.secrets
@@ -74,6 +92,41 @@ fn context_tar() -> Result<Vec<u8>> {
 impl Provider for Agent37 {
     fn name(&self) -> &'static str {
         "agent37"
+    }
+
+    fn describe(&self) -> Description {
+        Description {
+            label: "Agent37",
+            about: "Cloud machines billed on their size while awake.",
+            credentials: &[Credential {
+                name: "agent37.key",
+                label: "API key",
+                hint: "Agent37, Dashboard, Cloud, API keys.",
+            }],
+            kinds: vec![
+                Kind {
+                    name: "vm",
+                    label: "VM",
+                    about: "A machine with its own kernel, so it can run the Android phone. Costs 2.5 times a container while awake.",
+                    sizes: VM_SIZES,
+                    sleeps: "It's stopped, and only its disk is billed.",
+                    max_hours: None,
+                    kvm: true,
+                }
+                .into(),
+                Kind {
+                    name: "container",
+                    label: "Container",
+                    about: "Cheaper than a VM, but it can't run the phone.",
+                    sizes: CONTAINER_SIZES,
+                    sleeps: "It's stopped, and only its disk is billed.",
+                    max_hours: None,
+                    kvm: false,
+                }
+                .into(),
+            ],
+            listed: true,
+        }
     }
 
     fn creates_machines(&self) -> bool {
@@ -149,13 +202,18 @@ impl Provider for Agent37 {
             .ok_or_else(|| anyhow!("unknown Agent37 image {image}"))?;
         let env: serde_json::Map<String, Value> =
             req.env.into_iter().map(|(k, v)| (k, json!(v))).collect();
-        let resources = json!({ "cpu": req.size.cpu, "memory": req.size.memory_gb, "disk": 40 });
+        let resources = json!({ "cpu": req.size.cpu, "memory": req.size.memory_gb, "disk": disk_gb(&req.kind, req.size.memory_gb) });
+        let kind = if req.kind == "container" {
+            "default"
+        } else {
+            "vm"
+        };
         let v = self
             .api(
                 hub,
                 reqwest::Method::POST,
                 "/instances",
-                Some(json!({ "template": template, "type": "vm", "resources": resources, "env": env, "name": format!("{}-{}", req.name, super::hub_tag(hub)) })),
+                Some(json!({ "template": template, "type": kind, "resources": resources, "env": env, "name": format!("{}-{}", req.name, super::hub_tag(hub)) })),
             )
             .await?;
         Ok(v["id"]
@@ -256,6 +314,32 @@ impl Provider for Agent37 {
             }),
             Err(e) if e.to_string().contains("404") => Ok(ProviderStatus::Gone),
             Err(e) => Err(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_size_asks_for_a_disk_agent37_allows() {
+        let container_max = |memory_gb: u32| match memory_gb {
+            4 => 12,
+            8 => 20,
+            16 => 40,
+            32 => 80,
+            _ => 0,
+        };
+        for &(_, mem) in CONTAINER_SIZES {
+            let d = disk_gb("container", mem);
+            assert!(
+                (2..=container_max(mem)).contains(&d),
+                "{mem} GB container asks for {d} GB"
+            );
+        }
+        for &(_, mem) in VM_SIZES {
+            assert_eq!(disk_gb("vm", mem), VM_DISK_GB);
         }
     }
 }

@@ -22,7 +22,40 @@ fn tool(action: &str, description: &str, props: Value, required: &[&str]) -> Too
     }
 }
 
-pub fn defs() -> Vec<ToolDef> {
+fn kinds_line(providers: &[ProviderInfo]) -> String {
+    let each: Vec<String> = providers
+        .iter()
+        .filter(|p| !p.kinds.is_empty())
+        .map(|p| {
+            let kinds: Vec<String> = p
+                .kinds
+                .iter()
+                .map(|k| {
+                    if k.kvm {
+                        format!("{} (can run the phone)", k.name)
+                    } else {
+                        k.name.clone()
+                    }
+                })
+                .collect();
+            format!("{} has {}", p.name, kinds.join(" and "))
+        })
+        .collect();
+    format!(
+        "The kind of machine its provider makes: {}. Defaults to the first.",
+        each.join("; ")
+    )
+}
+
+pub fn defs(hub: &HubRef) -> Vec<ToolDef> {
+    let providers = hub.providers.info(hub);
+    let makers: Vec<&str> = providers
+        .iter()
+        .filter(|p| p.creates_machines)
+        .map(|p| p.name.as_str())
+        .collect();
+    let all_providers: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+    let kind = json!({ "type": "string", "description": kinds_line(&providers) });
     let thread = json!({ "type": "string", "description": "A thread's id from threads.list, or the last characters of it." });
     let project_settings = |mut props: Value| {
         let more = json!({
@@ -102,16 +135,18 @@ pub fn defs() -> Vec<ToolDef> {
             "Create a project that runs on remote machines.",
             project_settings(json!({
                 "name": { "type": "string" },
-                "provider": { "type": "string", "enum": ["modal", "agent37"], "description": "Who makes its machines." }
+                "provider": { "type": "string", "enum": makers, "description": "Who makes its machines." },
+                "kind": kind
             })),
             &["name"],
         ),
         tool(
             "projects.update",
-            "Change a project's provider, machine size, repos, setup, env vars, permission mode, tools or what it may push without asking.",
+            "Change a project's provider, kind of machine, machine size, repos, setup, env vars, permission mode, tools or what it may push without asking.",
             project_settings(json!({
                 "project": { "type": "string", "description": "The project's name." },
-                "provider": { "type": "string", "enum": ["modal", "agent37", "existing"] }
+                "provider": { "type": "string", "enum": all_providers },
+                "kind": kind
             })),
             &["project"],
         ),
@@ -149,8 +184,8 @@ pub fn defs() -> Vec<ToolDef> {
     all
 }
 
-pub fn is_manage(action: &str) -> bool {
-    defs().iter().any(|d| d.action == action)
+pub fn is_manage(hub: &HubRef, action: &str) -> bool {
+    defs(hub).iter().any(|d| d.action == action)
 }
 
 fn find_thread(hub: &HubRef, key: &str) -> Result<Thread> {
@@ -432,11 +467,12 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 .into_iter()
                 .map(|p| json!({
                     "name": p.name,
-                    "runs_on": if p.provider == "existing" || p.provider == "local" {
+                    "runs_on": if !hub.providers.get(&p.provider).is_some_and(|x| x.creates_machines()) {
                         p.default_machine.and_then(|m| machines.iter().find(|x| x.id == m)).map(|m| m.name.clone()).unwrap_or_else(|| p.provider.clone())
                     } else {
                         p.provider.clone()
                     },
+                    "kind": p.kind,
                     "size": p.size,
                     "folder": p.path,
                     "repos": p.repos.iter().map(|r| r.github.clone().unwrap_or_else(|| r.name.clone())).collect::<Vec<_>>(),
@@ -510,18 +546,8 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
 }
 
 fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> {
-    if let Some(pr) = input["provider"].as_str() {
-        if hub.providers.get(pr).is_none() {
-            bail!("unknown provider {pr}");
-        }
-        p.provider = pr.to_string();
-        if pr != "existing" && pr != "local" {
-            p.default_machine = None;
-        }
-    }
-    if let Some(s) = input["size"].as_str() {
-        p.size = s.to_string();
-    }
+    let opt = |k: &str| input[k].as_str().map(String::from);
+    hub.place_project(&mut p, opt("provider"), opt("kind"), opt("size"))?;
     if let Some(r) = repos_from(&input["repos"]) {
         p.repos = r;
     }
@@ -556,6 +582,7 @@ fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> 
     Ok(json!({
         "name": p.name,
         "provider": p.provider,
+        "kind": p.kind,
         "size": p.size,
         "repos": p.repos.iter().map(|r| r.github.clone().unwrap_or_else(|| r.name.clone())).collect::<Vec<_>>(),
         "setup": p.setup,
@@ -602,6 +629,7 @@ pub async fn register_machine(
             token_hash: hash_token(&token),
             provider_ref: None,
             status: MachineStatus::Offline,
+            kind: None,
         })?;
         s.hub.db.set_machine_install(m.id, install)?;
         s.hub.db.kv_set(&format!("machine:{}:kit", m.id), "off")?;

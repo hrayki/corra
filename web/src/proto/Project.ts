@@ -2,4 +2,4 @@
 import type { AgentSettings } from "./AgentSettings";
 import type { Repo } from "./Repo";
 
-export type Project = { id: string, name: string, repos: Array<Repo>, default_machine?: string, provider: string, size: string, settings: AgentSettings, path?: string, setup?: string, env: Array<string>, tools: Array<string>, allow_main: boolean, trusted: boolean, created_at: number, };
+export type Project = { id: string, name: string, repos: Array<Repo>, default_machine?: string, provider: string, kind?: string, size: string, settings: AgentSettings, path?: string, setup?: string, env: Array<string>, tools: Array<string>, allow_main: boolean, trusted: boolean, created_at: number, };

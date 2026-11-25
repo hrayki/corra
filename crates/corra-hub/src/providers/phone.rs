@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{CreateRequest, Provider, ProviderStatus};
+use super::{CreateRequest, Description, Provider, ProviderStatus};
 use crate::hub::Hub;
 
 const API: &str = "https://api.digitalocean.com/v2";
@@ -247,6 +247,16 @@ fn boot_script(env: &[(String, String)]) -> String {
 impl Provider for Phone {
     fn name(&self) -> &'static str {
         "phone"
+    }
+
+    fn describe(&self) -> Description {
+        Description {
+            label: "Phone",
+            about: "",
+            credentials: &[],
+            kinds: vec![],
+            listed: false,
+        }
     }
 
     fn creates_machines(&self) -> bool {

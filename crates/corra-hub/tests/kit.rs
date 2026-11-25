@@ -104,6 +104,7 @@ async fn a_paired_machine_serving_two_projects_gets_both_setups() {
                 token_hash: format!("hash-{name}"),
                 provider_ref: None,
                 status: MachineStatus::Offline,
+                kind: None,
             })
             .unwrap()
             .id

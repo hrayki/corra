@@ -95,6 +95,8 @@ pub struct NewProject {
     pub machine: Option<MachineId>,
     pub path: Option<String>,
     pub provider: Option<String>,
+    pub kind: Option<String>,
+    pub size: Option<String>,
     pub setup: Option<String>,
     pub env: Vec<String>,
     pub tools: Option<Vec<String>>,
@@ -829,12 +831,13 @@ impl Hub {
                 env.push(e);
             }
         }
-        let p = Project {
+        let mut p = Project {
             id: new_id(),
             name,
             repos,
             default_machine: machine,
-            provider,
+            provider: provider.clone(),
+            kind: None,
             size: "4x8".into(),
             settings: AgentSettings {
                 permission_mode: n.permission_mode,
@@ -851,9 +854,76 @@ impl Hub {
             trusted: n.trusted,
             created_at: now_ms(),
         };
+        self.place_project(&mut p, Some(provider), n.kind, n.size)?;
         self.db.insert_project(&p)?;
         self.publish_project(&p);
         Ok(p)
+    }
+
+    pub fn place_project(
+        &self,
+        p: &mut Project,
+        provider: Option<String>,
+        kind: Option<String>,
+        size: Option<String>,
+    ) -> Result<()> {
+        let before = (
+            p.provider.clone(),
+            self.providers.kind_name(&p.provider, p.kind.as_deref()),
+        );
+        if let Some(pr) = provider {
+            if self.providers.get(&pr).is_none() {
+                bail!("unknown provider {pr}");
+            }
+            if pr != p.provider {
+                p.provider = pr;
+                p.kind = None;
+            }
+        }
+        let kinds = self
+            .providers
+            .get(&p.provider)
+            .map(|x| x.describe().kinds)
+            .unwrap_or_default();
+        if let Some(k) = kind.filter(|k| !k.is_empty()) {
+            if !kinds.iter().any(|x| x.name == k) {
+                let names: Vec<_> = kinds.iter().map(|x| x.name.as_str()).collect();
+                bail!(
+                    "{} has no kind called {k}; it has {}",
+                    p.provider,
+                    if names.is_empty() {
+                        "none".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                );
+            }
+            p.kind = Some(k);
+        }
+        if p.kind.is_none() && !kinds.is_empty() && p.default_machine.is_none() {
+            p.kind = kinds.first().map(|k| k.name.clone());
+        }
+        if let Some(sz) = size.filter(|s| !s.trim().is_empty()) {
+            p.size = sz.trim().to_string();
+        }
+        if let Some(k) = self.providers.kind(&p.provider, p.kind.as_deref())
+            && !k.sizes.is_empty()
+        {
+            p.size = crate::providers::fit(&k.sizes, &p.size);
+        }
+        let after = (
+            p.provider.clone(),
+            self.providers.kind_name(&p.provider, p.kind.as_deref()),
+        );
+        if after != before
+            && self
+                .providers
+                .get(&p.provider)
+                .is_some_and(|x| x.creates_machines())
+        {
+            p.default_machine = None;
+        }
+        Ok(())
     }
 
     pub fn project_cwd(p: &Project) -> String {
@@ -1371,6 +1441,7 @@ impl Hub {
                         repos: vec![],
                         default_machine: Some(machine),
                         provider: "existing".into(),
+                        kind: None,
                         size: "existing".into(),
                         settings: item.project.settings.clone(),
                         path: item.project.path.clone(),
