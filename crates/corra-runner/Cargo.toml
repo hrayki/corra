@@ -1,0 +1,33 @@
+[package]
+name = "corra-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runs Claude Code for corra on a machine and connects it to the hub"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.8", features = ["derive", "env"] }
+corra-proto = { version = "0.1.0", path = "../corra-proto" }
+flate2 = "1.1.11"
+futures-util = "0.3.34"
+jpeg-encoder = "0.7.1"
+libc = "0.2.191"
+png = "0.18.1"
+pty-process = { version = "0.5.4", features = ["async"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tar = "0.4.46"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.3", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

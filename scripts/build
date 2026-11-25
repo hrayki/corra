@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+rm -rf web/src/proto
+mise exec -- cargo test -q -p corra-proto >/dev/null
+(cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
+mise exec -- cargo zigbuild --release --target x86_64-unknown-linux-musl -p corra-hub -p corra-runner
+(cd helpers/modal && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../target/x86_64-unknown-linux-musl/release/corra-modal .)
+ls -la target/x86_64-unknown-linux-musl/release/corra-{hub,runner,modal}

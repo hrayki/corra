@@ -1,0 +1,23 @@
+[package]
+name = "corra-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Corra's desktop core: the laptop as a machine of the hub, with a built-in hub for when it can't be reached"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+corra-hub = { path = "../corra-hub" }
+corra-proto = { path = "../corra-proto" }
+corra-runner = { path = "../corra-runner" }
+futures-util = "0.3.34"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

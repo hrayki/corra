@@ -1,0 +1,195 @@
+import type { StoredEvent } from '../proto/StoredEvent'
+import type { ItemBody } from '../proto/ItemBody'
+import type { InputPart } from '../proto/InputPart'
+import type { AgentSettings } from '../proto/AgentSettings'
+import type { AgentRequest } from '../proto/AgentRequest'
+import type { RequestResponse } from '../proto/RequestResponse'
+import type { TurnOutcome } from '../proto/TurnOutcome'
+import type { Usage } from '../proto/Usage'
+import type { Delta } from '../proto/Delta'
+import type { NoticeLevel } from '../proto/NoticeLevel'
+import type { RepoCheckpoint } from '../proto/RepoCheckpoint'
+
+export type ItemView = {
+  id: string
+  parent?: string
+  body: ItemBody
+  done: boolean
+  live?: string
+  liveInput?: string
+}
+
+export type RequestView = {
+  id: string
+  request: AgentRequest
+  response?: RequestResponse
+}
+
+export type Entry =
+  | { type: 'item'; item: ItemView }
+  | { type: 'request'; request: RequestView }
+  | { type: 'notice'; level: NoticeLevel; text: string; ts: number }
+  | { type: 'compacted'; trigger?: string }
+
+export type TurnView = {
+  id: string
+  input: InputPart[]
+  settings: AgentSettings
+  started: number
+  entries: Entry[]
+  outcome?: TurnOutcome
+  usage?: Usage
+  error?: string
+  resetsAt?: number
+  ended?: number
+  checkpoint?: RepoCheckpoint[]
+}
+
+export type ThreadView = {
+  lastSeq: number
+  sessionId?: string
+  model?: string
+  slashCommands: string[]
+  preface: Entry[]
+  turns: TurnView[]
+}
+
+export const emptyView = (): ThreadView => ({ lastSeq: 0, slashCommands: [], preface: [], turns: [] })
+
+function findTurn(v: ThreadView, id: string): TurnView | undefined {
+  for (let i = v.turns.length - 1; i >= 0; i--) if (v.turns[i].id === id) return v.turns[i]
+  return undefined
+}
+
+function ensureTurn(v: ThreadView, id: string, ts: number): TurnView {
+  let t = findTurn(v, id)
+  if (!t) {
+    t = { id, input: [], settings: {}, started: ts, entries: [] }
+    v.turns.push(t)
+  }
+  return t
+}
+
+function findItem(t: TurnView, id: string): ItemView | undefined {
+  for (let i = t.entries.length - 1; i >= 0; i--) {
+    const e = t.entries[i]
+    if (e.type === 'item' && e.item.id === id) return e.item
+  }
+  return undefined
+}
+
+function lastTurn(v: ThreadView): TurnView | undefined {
+  return v.turns[v.turns.length - 1]
+}
+
+export function apply(v: ThreadView, e: StoredEvent) {
+  if (e.seq <= v.lastSeq) return
+  v.lastSeq = e.seq
+  switch (e.kind) {
+    case 'session':
+      v.sessionId = e.session_id
+      v.model = e.model
+      v.slashCommands = e.slash_commands
+      break
+    case 'turn_started': {
+      const t = ensureTurn(v, e.turn, e.ts)
+      t.input = e.input
+      t.settings = e.settings
+      t.started = e.ts
+      break
+    }
+    case 'item_started':
+    case 'item_completed': {
+      const t = ensureTurn(v, e.turn, e.ts)
+      const done = e.kind === 'item_completed'
+      const existing = findItem(t, e.item.id)
+      const { id, parent, ...rest } = e.item
+      const body = rest as ItemBody
+      if (body.type === 'user_message' && id === `${t.id}:input`)
+        for (const other of v.turns) if (other !== t) other.entries = other.entries.filter((x) => !(x.type === 'item' && x.item.id === id))
+      if (existing) {
+        existing.body = body
+        existing.done = done
+        if (done) {
+          existing.live = undefined
+          existing.liveInput = undefined
+        }
+      } else {
+        if (body.type === 'user_message' && id === `${t.id}:input` && t.input.length > 0) break
+        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done } })
+      }
+      break
+    }
+    case 'request': {
+      const t = ensureTurn(v, e.turn, e.ts)
+      t.entries.push({ type: 'request', request: { id: e.id, request: e.request } })
+      break
+    }
+    case 'request_resolved': {
+      for (let i = v.turns.length - 1; i >= 0; i--) {
+        const r = v.turns[i].entries.find((x) => x.type === 'request' && x.request.id === e.id)
+        if (r && r.type === 'request') {
+          r.request.response = e.response
+          break
+        }
+      }
+      break
+    }
+    case 'turn_completed': {
+      const t = ensureTurn(v, e.turn, e.ts)
+      t.outcome = e.outcome
+      t.usage = e.usage
+      t.error = e.error
+      t.resetsAt = e.resets_at
+      t.ended = e.ts
+      for (const x of t.entries)
+        if (x.type === 'item') {
+          x.item.live = undefined
+          x.item.liveInput = undefined
+        }
+      break
+    }
+    case 'notice': {
+      const t = lastTurn(v)
+      const entry: Entry = { type: 'notice', level: e.level, text: e.text, ts: e.ts }
+      const into = t && !t.outcome ? t.entries : v.preface
+      const last = into[into.length - 1]
+      if (last?.type === 'notice' && last.level === e.level && last.text === e.text) break
+      into.push(entry)
+      break
+    }
+    case 'compacted': {
+      const t = lastTurn(v)
+      const entry: Entry = { type: 'compacted', trigger: e.trigger }
+      if (t) t.entries.push(entry)
+      else v.preface.push(entry)
+      break
+    }
+    case 'checkpoint': {
+      const t = findTurn(v, e.turn)
+      if (t) t.checkpoint = e.repos
+      break
+    }
+    case 'settings_changed':
+    case 'status':
+      break
+  }
+}
+
+export function applyDelta(v: ThreadView, turn: string, item: string, parent: string | undefined, d: Delta) {
+  const t = ensureTurn(v, turn, Date.now())
+  let it = findItem(t, item)
+  if (!it) {
+    const body: ItemBody =
+      d.type === 'reasoning'
+        ? { type: 'reasoning', text: '' }
+        : d.type === 'tool_input'
+          ? { type: 'tool_call', name: '', input: null, status: 'running' }
+          : { type: 'agent_message', text: '' }
+    it = { id: item, parent, body, done: false }
+    t.entries.push({ type: 'item', item: it })
+  }
+  if (it.done) return
+  if (d.type === 'tool_input') it.liveInput = (it.liveInput ?? '') + d.json
+  else it.live = (it.live ?? '') + d.text
+}
