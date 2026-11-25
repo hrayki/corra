@@ -534,6 +534,7 @@ async fn an_approval_lets_the_tool_run_and_an_interrupt_ends_the_turn() {
 
 enum Then {
     Send(&'static str),
+    SendIn(&'static str, &'static str),
     Allow,
     InterruptIn(u64),
 }
@@ -662,6 +663,13 @@ async fn record_with(
                         input: vec![InputPart::Text { text: (*t).into() }],
                         settings: None,
                     },
+                    Then::SendIn(mode, t) => SessionCmd::Send {
+                        input: vec![InputPart::Text { text: (*t).into() }],
+                        settings: Some(AgentSettings {
+                            permission_mode: Some((*mode).into()),
+                            ..Default::default()
+                        }),
+                    },
                     Then::Allow => SessionCmd::Respond {
                         request: last_request.clone().unwrap(),
                         response: RequestResponse::Allow { always: false },
@@ -760,6 +768,49 @@ async fn record_approval_and_interrupt() {
         5,
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn record_auto_mode() {
+    record(
+        "auto_mode",
+        "Reply with exactly READY.",
+        AgentSettings {
+            model: Some("haiku".into()),
+            permission_mode: Some("default".into()),
+            ..Default::default()
+        },
+        vec![Step {
+            when: idle,
+            then: Then::SendIn(
+                "auto",
+                "Use the Write tool to create hello.txt containing hi, then run `cat hello.txt` with Bash, then reply with exactly AUTO_DONE.",
+            ),
+        }],
+        5,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn switching_a_thread_to_auto_lets_it_edit_and_run_without_asking() {
+    let out = replay("auto_mode").await;
+    let turns = turns(&out);
+    assert_eq!(turns.len(), 2, "{turns:#?}");
+    assert!(out.iter().any(|o| matches!(o,
+        AgentOut::Event(Event::SettingsChanged { settings }) if settings.permission_mode.as_deref() == Some("auto"))));
+    let t = &turns[1];
+    assert!(t.requests.is_empty(), "auto mode asked: {:?}", t.requests);
+    for name in ["Write", "Bash"] {
+        assert!(
+            t.items.iter().any(|i| matches!(&i.body,
+                ItemBody::ToolCall { name: n, status: ToolStatus::Completed, .. } if n == name)),
+            "{name} didn't run: {t:#?}"
+        );
+    }
+    assert_eq!(t.texts(), ["AUTO_DONE"]);
+    assert_eq!(t.outcome, Some(TurnOutcome::Completed));
 }
 
 async fn limited_api() -> String {

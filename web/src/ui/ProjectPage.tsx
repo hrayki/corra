@@ -10,8 +10,8 @@ import { Btn, Menu } from './bits'
 type SetupRow = { name: string; repos: string[]; env: string[] }
 
 const MAIN = [
-  { value: false, label: 'Ask first', hint: 'Pushing to the default branch or a tag, and merging, wait for your yes.' },
-  { value: true, label: 'Allow', hint: 'It pushes to the default branch and tags, and merges, on its own.' },
+  { value: false, label: 'Wait for you', hint: 'Pushing to the default branch or a tag, and merging, wait for your yes.' },
+  { value: true, label: 'On its own', hint: 'It pushes to the default branch and tags, and merges, on its own.' },
 ]
 
 const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
