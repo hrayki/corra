@@ -88,6 +88,16 @@ export function ThreadPane(props: { id: string }) {
     scroller.scrollTop = scroller.scrollHeight
     requestAnimationFrame(() => scroller && stick() && (scroller.scrollTop = scroller.scrollHeight))
   }
+  const pin = (content: HTMLDivElement) => {
+    const ro = new ResizeObserver(() => {
+      if (scroller && stick()) scroller.scrollTop = scroller.scrollHeight
+    })
+    queueMicrotask(() => {
+      ro.observe(content)
+      if (scroller) ro.observe(scroller)
+    })
+    onCleanup(() => ro.disconnect())
+  }
   const onScroll = () => {
     if (fromBottom() < 8) setStick(true)
     else if (Date.now() - byHand < 400) setStick(false)
@@ -249,7 +259,7 @@ export function ThreadPane(props: { id: string }) {
             onKeyDown={touched}
             class="min-h-0 flex-1 overflow-y-auto"
           >
-            <div class="mx-auto max-w-3xl px-4 pt-7 pb-2 sm:px-6">
+            <div ref={pin} class="mx-auto max-w-3xl px-4 pt-7 pb-2 sm:px-6">
               <For each={view()?.preface ?? []}>
                 {(e) => (
                   <div class="pb-4">
