@@ -338,7 +338,13 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
         }
         "threads.read" => {
             let t = find_thread(hub, &text(&input, "thread")?)?;
-            let events = hub.db.events_after(t.id, 0, 1_000_000)?;
+            let last = input["last"].as_u64().unwrap_or(3).max(1) as usize;
+            let from = hub
+                .db
+                .last_turns_started(t.id, last as i64)?
+                .last()
+                .map_or(0, |e| e.seq - 1);
+            let events = hub.db.events_after(t.id, from, 1_000_000)?;
             Ok(json!({
                 "id": t.id,
                 "title": t.title,
@@ -346,7 +352,7 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 "model": t.settings.model,
                 "effort": t.settings.effort,
                 "permission_mode": t.settings.permission_mode,
-                "turns": digest(&events, input["last"].as_u64().unwrap_or(3) as usize),
+                "turns": digest(&events, last),
             }))
         }
         "threads.start" => {

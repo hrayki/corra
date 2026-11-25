@@ -1638,8 +1638,8 @@ impl Hub {
             .session_id
             .clone()
             .ok_or_else(|| anyhow!("this thread hasn't started a session yet"))?;
-        let events = self.db.events_after(thread, 0, 1_000_000)?;
-        let (seq, anchor) = turn_end(&events, turn.as_deref())
+        let marks = self.db.turn_marks(thread)?;
+        let (seq, anchor) = turn_end(&marks, turn.as_deref())
             .ok_or_else(|| anyhow!("that turn hasn't finished"))?;
         let now = now_ms();
         let n = Thread {
@@ -1674,6 +1674,25 @@ impl Hub {
         Ok(n)
     }
 
+    pub fn rewind_point(
+        &self,
+        thread: ThreadId,
+        turn: &str,
+    ) -> Result<(i64, Option<String>, Vec<String>)> {
+        let marks = self.db.turn_marks(thread)?;
+        let (seq, anchor) =
+            turn_before(&marks, turn).ok_or_else(|| anyhow!("can't rewind to that turn"))?;
+        let turns = marks
+            .iter()
+            .filter(|e| e.seq > seq)
+            .filter_map(|e| match &e.event {
+                Event::TurnStarted { turn, .. } => Some(turn.clone()),
+                _ => None,
+            })
+            .collect();
+        Ok((seq, anchor, turns))
+    }
+
     pub async fn rewind_thread(self: &Arc<Self>, thread: ThreadId, turn: String) -> Result<()> {
         let t = self
             .db
@@ -1685,17 +1704,7 @@ impl Hub {
         ) {
             bail!("stop the agent first");
         }
-        let events = self.db.events_after(thread, 0, 1_000_000)?;
-        let (seq, anchor) =
-            turn_before(&events, &turn).ok_or_else(|| anyhow!("can't rewind to that turn"))?;
-        let turns: Vec<String> = events
-            .iter()
-            .filter(|e| e.seq > seq)
-            .filter_map(|e| match &e.event {
-                Event::TurnStarted { turn, .. } => Some(turn.clone()),
-                _ => None,
-            })
-            .collect();
+        let (seq, anchor, turns) = self.rewind_point(thread, &turn)?;
         let mut t = t;
         let machine = match t.machine {
             Some(m) if self.runner_connected(m) => m,
