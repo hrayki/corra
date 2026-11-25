@@ -201,6 +201,26 @@ input:focus-visible {
   text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
   text-underline-offset: 2px;
 }
+.md code.filelink {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  text-underline-offset: 2px;
+}
+.md code.filelink:hover {
+  text-decoration-color: currentColor;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.md a:hover {
+  text-decoration-color: currentColor;
+}
+.line.jumped {
+  display: inline-block;
+  min-width: 100%;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 3px;
+}
 .md blockquote {
   border-left: 2px solid var(--line);
   padding-left: 0.9em;

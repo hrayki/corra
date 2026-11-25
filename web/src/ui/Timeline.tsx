@@ -10,11 +10,12 @@ import GitFork from 'lucide-solid/icons/git-fork'
 import Undo2 from 'lucide-solid/icons/undo-2'
 import { call, state } from '../lib/store'
 import { highlightIn, renderMarkdown } from '../lib/markdown'
+import { fileInCode, fileInHref, joinPath, type FileRef } from '../lib/filelinks'
 import type { Entry, ItemView, RequestView, TurnView } from '../lib/timeline'
 import type { InputPart } from '../proto/InputPart'
 import type { RequestResponse } from '../proto/RequestResponse'
 import { clock, duration } from '../lib/format'
-import { setPanel } from '../lib/panel'
+import { openFile, setPanel } from '../lib/panel'
 import { Btn, Picture, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
 
@@ -454,7 +455,7 @@ function copyButton(text: () => string) {
 
 const isLimit = (text?: string) => !!text && /limit/i.test(text) && /reset/i.test(text)
 
-export function Markdown(props: { text: string }) {
+export function Markdown(props: { text: string; base?: string }) {
   let el!: HTMLDivElement
   const html = createMemo(() => renderMarkdown(props.text))
   createEffect(
@@ -462,6 +463,7 @@ export function Markdown(props: { text: string }) {
       queueMicrotask(() => {
         if (!el) return
         void highlightIn(el)
+        markFiles(el, props.base)
         for (const pre of el.querySelectorAll('pre')) {
           if (pre.parentElement?.classList.contains('codewrap')) continue
           const wrap = document.createElement('div')
@@ -475,7 +477,43 @@ export function Markdown(props: { text: string }) {
       })
     }),
   )
-  return <div ref={el} class="md text-[14px] leading-[1.65]" innerHTML={html()} />
+  return <div ref={el} class="md text-[14px] leading-[1.65]" innerHTML={html()} onClick={clickFile} onKeyDown={clickFile} />
+}
+
+function markFiles(root: HTMLElement, base?: string) {
+  const at = (ref: FileRef | null) => (ref && base !== undefined ? { ...ref, path: joinPath(base, ref.path) } : ref)
+  for (const a of root.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    const ref = at(fileInHref(a.getAttribute('href')!))
+    if (ref) {
+      a.dataset.file = ref.path
+      if (ref.line) a.dataset.line = String(ref.line)
+      a.title = `Open ${ref.path}`
+    } else {
+      a.target = '_blank'
+      a.rel = 'noopener noreferrer'
+    }
+  }
+  for (const code of root.querySelectorAll<HTMLElement>('code')) {
+    if (code.closest('pre, a')) continue
+    const ref = at(fileInCode(code.textContent ?? ''))
+    if (!ref) continue
+    code.dataset.file = ref.path
+    if (ref.line) code.dataset.line = String(ref.line)
+    code.classList.add('filelink')
+    code.role = 'link'
+    code.tabIndex = 0
+    code.title = `Open ${ref.path}`
+  }
+}
+
+function clickFile(e: MouseEvent | KeyboardEvent) {
+  if (e instanceof KeyboardEvent && e.key !== 'Enter') return
+  if (e instanceof MouseEvent && e.button !== 0) return
+  const t = (e.target as HTMLElement).closest<HTMLElement>('[data-file]')
+  const sel = window.getSelection()
+  if (!t || (sel && !sel.isCollapsed && sel.containsNode(t, true))) return
+  e.preventDefault()
+  openFile({ path: t.dataset.file!, line: t.dataset.line ? Number(t.dataset.line) : undefined })
 }
 
 function Reasoning(props: { item: ItemView }) {
