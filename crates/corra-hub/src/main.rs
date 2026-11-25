@@ -237,7 +237,7 @@ async fn serve(
         .map(|st| corra_hub::storage::hold(st.clone()));
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
-        r = axum::serve(listener, app).into_future() => r?,
+        r = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).into_future() => r?,
         _ = term.recv() => tracing::info!("stopping"),
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
     }

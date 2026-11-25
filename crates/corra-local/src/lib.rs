@@ -221,7 +221,12 @@ pub async fn start(opts: Options) -> Result<Desktop> {
     });
     let router = corra_hub::finish(built.router.merge(connect::router(state.clone())));
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
+        if let Err(e) = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("the built-in hub stopped: {e}");
         }
     });

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::Json;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
@@ -17,12 +17,15 @@ use crate::hub::{HubRef, hash_token, new_token};
 
 const COOKIE: &str = "corra_session";
 const SESSION_DAYS: i64 = 365;
+const WRONG_TRIES: u32 = 10;
+const WRONG_WINDOW: Duration = Duration::from_secs(60);
 
 pub struct Auth {
     secure_cookie: bool,
     pub dev_no_auth: bool,
     key_hash: Mutex<Option<String>>,
-    failures: Mutex<Vec<Instant>>,
+    trust_ip_header: Option<String>,
+    failures: Mutex<HashMap<String, (Instant, u32)>>,
     pairing: Mutex<HashMap<String, Instant>>,
 }
 
@@ -34,10 +37,52 @@ impl Auth {
             secure_cookie: public_url.starts_with("https://"),
             dev_no_auth,
             key_hash: Mutex::new(None),
-            failures: Mutex::new(vec![]),
+            trust_ip_header: std::env::var("CORRA_TRUST_IP_HEADER")
+                .ok()
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty()),
+            failures: Mutex::new(HashMap::new()),
             pairing: Mutex::new(HashMap::new()),
         })
     }
+}
+
+impl Auth {
+    fn client(&self, headers: &HeaderMap, ext: &Extensions) -> String {
+        let named = self
+            .trust_ip_header
+            .as_deref()
+            .and_then(|h| headers.get(h))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(ip) = named {
+            return ip.to_string();
+        }
+        ext.get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip().to_string())
+            .unwrap_or_default()
+    }
+
+    fn locked_out(&self, client: &str) -> bool {
+        let mut f = self.failures.lock().unwrap();
+        f.retain(|_, (since, _)| since.elapsed() < WRONG_WINDOW);
+        f.get(client).is_some_and(|(_, n)| *n >= WRONG_TRIES)
+    }
+
+    fn failed(&self, client: &str) {
+        let mut f = self.failures.lock().unwrap();
+        let e = f.entry(client.to_string()).or_insert((Instant::now(), 0));
+        e.1 += 1;
+    }
+}
+
+fn too_many() -> Response {
+    err(
+        StatusCode::TOO_MANY_REQUESTS,
+        "Too many wrong tries from here; try again in a minute.",
+    )
 }
 
 fn err(status: StatusCode, msg: &str) -> Response {
@@ -235,21 +280,16 @@ pub async fn key_login(
     State(s): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
+    ext: Extensions,
     Json(body): Json<KeyLogin>,
 ) -> Response {
-    {
-        let mut f = s.auth.failures.lock().unwrap();
-        f.retain(|t| t.elapsed() < Duration::from_secs(60));
-        if f.len() >= 10 {
-            return err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many wrong keys; try again in a minute.",
-            );
-        }
+    let client = s.auth.client(&headers, &ext);
+    if s.auth.locked_out(&client) {
+        return too_many();
     }
     let expected = s.auth.key_hash.lock().unwrap().clone();
     if expected.is_none() || expected.as_deref() != Some(hash_token(body.key.trim()).as_str()) {
-        s.auth.failures.lock().unwrap().push(Instant::now());
+        s.auth.failed(&client);
         return err(StatusCode::UNAUTHORIZED, "That isn't the hub's key.");
     }
     if let Some(name) = body.device {
@@ -323,13 +363,23 @@ pub struct PairFinish {
     name: String,
 }
 
-pub async fn pair_finish(State(s): State<AppState>, Json(body): Json<PairFinish>) -> Response {
+pub async fn pair_finish(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    ext: Extensions,
+    Json(body): Json<PairFinish>,
+) -> Response {
+    let client = s.auth.client(&headers, &ext);
+    if s.auth.locked_out(&client) {
+        return too_many();
+    }
     let code = body.code.trim().to_uppercase().replace(['-', ' '], "");
     let ok = {
         let mut p = s.auth.pairing.lock().unwrap();
         matches!(p.remove(&code), Some(t) if t.elapsed() < Duration::from_secs(600))
     };
     if !ok {
+        s.auth.failed(&client);
         return err(
             StatusCode::UNAUTHORIZED,
             "That code isn't valid or has expired.",
