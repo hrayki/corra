@@ -331,7 +331,7 @@ pub async fn reset_project(hub: &Arc<Hub>, project: ProjectId) -> Result<()> {
     Ok(())
 }
 
-async fn orphans(hub: &Arc<Hub>) {
+pub async fn orphans(hub: &Arc<Hub>) {
     for name in hub.providers.names() {
         let Some(provider) = hub.providers.get(name) else {
             continue;

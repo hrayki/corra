@@ -4,14 +4,19 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use corra_hub::db::NewMachine;
+use corra_hub::hub::RunnerConn;
 use corra_hub::hub::{Hub, HubRef, NewProject};
-use corra_hub::providers::{CreateRequest, Description, Kind, Provider};
+use corra_hub::providers::{CreateRequest, Description, Kind, Provider, ProviderStatus};
+use corra_proto::runner::{HubMsg, RunnerRequest};
 use corra_proto::*;
+use tokio::sync::mpsc;
 
 #[derive(Default)]
 struct Fake {
     calls: Mutex<Vec<String>>,
     broken: Mutex<bool>,
+    snapshotting: tokio::sync::Notify,
+    snapshotted: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -56,7 +61,29 @@ impl Provider for Fake {
         true
     }
     async fn create(&self, _hub: &Hub, _req: CreateRequest) -> Result<String> {
-        Ok("new".into())
+        self.calls.lock().unwrap().push("create".into());
+        Ok("droplet-1".into())
+    }
+    async fn sleep(&self, hub: &Hub, r: &str) -> Result<String> {
+        self.calls.lock().unwrap().push(format!("sleep {r}"));
+        hub.runners.lock().unwrap().clear();
+        self.snapshotting.notify_one();
+        self.snapshotted.notified().await;
+        Ok("snap-1".into())
+    }
+    async fn wake(&self, _hub: &Hub, s: &str, _req: CreateRequest) -> Result<String> {
+        self.calls.lock().unwrap().push(format!("wake {s}"));
+        Ok("droplet-2".into())
+    }
+    async fn running(&self, _hub: &Hub) -> Result<Vec<String>> {
+        Ok(vec!["droplet-2".into()])
+    }
+    async fn status(&self, _hub: &Hub, r: &str) -> Result<ProviderStatus> {
+        Ok(if r == "droplet-1" {
+            ProviderStatus::Gone
+        } else {
+            ProviderStatus::Running
+        })
     }
     async fn destroy(&self, _hub: &Hub, r: &str) -> Result<()> {
         self.calls.lock().unwrap().push(format!("destroy {r}"));
@@ -302,4 +329,103 @@ async fn a_machine_whose_provider_is_gone_can_be_forgotten() {
         MachineStatus::Destroyed
     );
     assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+fn attach_runner(hub: &HubRef, m: MachineId) -> mpsc::UnboundedReceiver<HubMsg> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    hub.runners.lock().unwrap().insert(
+        m,
+        RunnerConn {
+            tx,
+            live: Default::default(),
+            prepared: Default::default(),
+            conn_id: 0,
+        },
+    );
+    hub.db
+        .set_machine_status(m, MachineStatus::Connected)
+        .unwrap();
+    rx
+}
+
+async fn answer(hub: &HubRef, m: MachineId, rx: &mut mpsc::UnboundedReceiver<HubMsg>) -> PhoneOp {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the hub should ask the phone's machine something")
+            .unwrap();
+        if let HubMsg::Request {
+            id,
+            body: RunnerRequest::Phone { action },
+        } = msg
+        {
+            hub.resolve_pending(m, id, Ok(serde_json::json!({})));
+            return action;
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_sweep_leaves_the_phone_alone_while_its_first_start_makes_a_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, fake) = setup(dir.path());
+    corra_hub::phone::switch(&hub, Some(host("vm")))
+        .await
+        .unwrap();
+    let up = {
+        let hub = hub.clone();
+        tokio::spawn(async move { corra_hub::phone::up(&hub).await })
+    };
+    let m = loop {
+        if let Some(m) = corra_hub::phone::machine(&hub) {
+            break m.id;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let mut rx = attach_runner(&hub, m);
+    assert!(matches!(answer(&hub, m, &mut rx).await, PhoneOp::Setup));
+
+    tokio::time::timeout(Duration::from_secs(10), fake.snapshotting.notified())
+        .await
+        .unwrap();
+    corra_hub::lifecycle::sweep(&hub).await.unwrap();
+    let day_ago = now_ms() - 24 * 3600 * 1000;
+    rusqlite::Connection::open(dir.path().join("corra.db"))
+        .unwrap()
+        .execute(
+            "UPDATE machines SET created_at = ?1, last_seen = ?1 WHERE id = ?2",
+            rusqlite::params![day_ago, m.to_string()],
+        )
+        .unwrap();
+    corra_hub::lifecycle::sweep(&hub).await.unwrap();
+    fake.snapshotted.notify_one();
+
+    for _ in 0..500 {
+        if hub.db.machine_provider_ref(m).unwrap().as_deref() == Some("droplet-2") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    corra_hub::lifecycle::sweep(&hub).await.unwrap();
+    corra_hub::lifecycle::orphans(&hub).await;
+    let mut rx = attach_runner(&hub, m);
+    assert!(matches!(answer(&hub, m, &mut rx).await, PhoneOp::Boot));
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), up)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        m
+    );
+    assert_eq!(
+        *fake.calls.lock().unwrap(),
+        ["create", "sleep droplet-1", "wake snap-1"]
+    );
+    assert_eq!(corra_hub::phone::machine(&hub).map(|m| m.id), Some(m));
+    assert_eq!(
+        hub.db.machine(m).unwrap().unwrap().status,
+        MachineStatus::Connected
+    );
 }
