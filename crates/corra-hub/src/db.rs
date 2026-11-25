@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use corra_proto::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 #[derive(Clone)]
 pub struct Db {
@@ -210,7 +210,7 @@ impl Db {
 
     pub fn file_replace(&self, thread: ThreadId, path: &str, data: &[u8]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "DELETE FROM thread_files WHERE thread = ?1 AND path = ?2",
             params![thread.to_string(), path],
@@ -231,7 +231,7 @@ impl Db {
         data: &[u8],
     ) -> Result<std::result::Result<u64, u64>> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (size, last): (i64, i64) = tx.query_row(
             "SELECT COALESCE(SUM(length(data)), 0), COALESCE(MAX(part), -1) FROM thread_files WHERE thread = ?1 AND path = ?2",
             params![thread.to_string(), path],
@@ -637,7 +637,7 @@ impl Db {
         event: &Event,
     ) -> Result<Option<StoredEvent>> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (last_seq, last_runner): (i64, i64) = match tx
             .query_row(
                 "SELECT last_seq, runner_seq FROM threads WHERE id = ?1",
@@ -711,7 +711,7 @@ impl Db {
         events: &[StoredEvent],
     ) -> Result<Vec<StoredEvent>> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let last: i64 = tx
             .query_row(
                 "SELECT last_seq FROM threads WHERE id = ?1",
