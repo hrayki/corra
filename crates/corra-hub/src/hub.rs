@@ -185,6 +185,14 @@ impl Hub {
             .unwrap_or_else(|| serde_json::json!({}))
     }
 
+    pub fn set_setting(&self, key: &str, value: Value) -> Result<()> {
+        let mut cur = self.settings();
+        if let Some(c) = cur.as_object_mut() {
+            c.insert(key.to_string(), value);
+        }
+        self.db.kv_set("settings", &cur.to_string())
+    }
+
     pub fn setting_str(&self, key: &str) -> Option<String> {
         self.settings()[key]
             .as_str()
@@ -504,7 +512,7 @@ impl Hub {
             }
         };
         if stop {
-            let phone = matches!(self.db.machine(machine), Ok(Some(m)) if m.provider == crate::phone::PROVIDER);
+            let phone = crate::phone::is_machine(self, machine);
             let _ = self.send_runner(
                 machine,
                 if phone {

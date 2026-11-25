@@ -536,6 +536,68 @@ impl Provider for DigitalOcean {
     }
 }
 
+impl DigitalOcean {
+    pub async fn retire_old_phone(&self, hub: &Hub, droplets: Vec<String>) -> bool {
+        use crate::leftovers::clean;
+        use corra_proto::LeftoverThing;
+        let mut ids = droplets;
+        let tag = super::hub_tag(hub);
+        for t in [
+            format!("corra-phone-{tag}"),
+            format!("corra-phone-{tag}-build"),
+        ] {
+            let Ok(v) = self
+                .call(
+                    hub,
+                    reqwest::Method::GET,
+                    &format!("/droplets?tag_name={t}&per_page=200"),
+                    None,
+                )
+                .await
+            else {
+                return false;
+            };
+            ids.extend(
+                v["droplets"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| d["id"].as_u64().map(|i| i.to_string())),
+            );
+        }
+        let name = std::env::var("CORRA_PHONE_IMAGE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "corra-phone-image".into());
+        let Ok(image) = self.snapshot_named(hub, &name).await else {
+            return false;
+        };
+        if let Some(id) = image.as_ref().and_then(|s| s["id"].as_str()) {
+            clean(
+                hub,
+                "the old phone's image",
+                "digitalocean",
+                LeftoverThing::Image,
+                id,
+            )
+            .await;
+        }
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            clean(
+                hub,
+                "the old phone's droplet",
+                "digitalocean",
+                LeftoverThing::Machine,
+                &id,
+            )
+            .await;
+        }
+        true
+    }
+}
+
 const SIZE_DISKS: &[(&str, u64)] = &[
     ("s-2vcpu-4gb-amd", 80),
     ("s-4vcpu-8gb-amd", 160),

@@ -314,6 +314,10 @@ pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
             missing: (!missing.is_empty()).then(|| format!("Needs {}", missing.join(" and "))),
         }
     };
+    let phone_host = crate::phone::host(hub);
+    let phone_ready = phone_host
+        .as_ref()
+        .is_some_and(|h| crate::phone::check_host(hub, h).is_ok());
     vec![
         tool(
             "github",
@@ -329,13 +333,23 @@ pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
             &[],
             None,
         ),
-        tool(
-            "phone",
-            "Android phone",
-            "A test phone in the cloud that agents drive and you can watch. Its apps and data go when it stops.",
-            &["digitalocean.token"],
-            Some("kvm"),
-        ),
+        ToolInfo {
+            ready: phone_ready,
+            missing: (!phone_ready).then(|| {
+                if phone_host.is_some() {
+                    "Its machine's provider isn't connected".to_string()
+                } else {
+                    "Off: pick where it runs".to_string()
+                }
+            }),
+            ..tool(
+                "phone",
+                "Android phone",
+                "A test phone in the cloud that agents drive and you can watch. Its apps and data go when it stops.",
+                &[],
+                Some("kvm"),
+            )
+        },
         tool(
             "threads",
             "Other threads",

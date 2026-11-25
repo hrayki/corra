@@ -148,6 +148,7 @@ fn hub(dir: &std::path::Path) -> HubRef {
     .unwrap()
     .state
     .hub;
+    hub.db.kv_set("phone.retired_old", "1").unwrap();
     hub.secrets.set("digitalocean.token", "t").unwrap();
     hub
 }
@@ -243,4 +244,60 @@ async fn a_machine_cant_wake_on_a_droplet_smaller_than_its_disk() {
         .to_string();
     assert!(err.contains("200 GB") && err.contains("80 GB"), "{err}");
     p.wake(&hub, &snap, req("8x16")).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_old_phone_and_its_image_are_cleaned_up_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let (url, cloud) = fake().await;
+    hub.providers.add(Arc::new(DigitalOcean::with_api(
+        &url,
+        Duration::from_millis(5),
+    )));
+    let tag = format!("corra-phone-{}", corra_hub::providers::hub_tag(&hub));
+    {
+        let mut c = cloud.lock().unwrap();
+        c.droplets.insert(
+            77,
+            json!({ "id": 77, "name": "corra-phone", "status": "active", "tags": [tag] }),
+        );
+        c.droplets.insert(
+            78,
+            json!({ "id": 78, "name": "someone-else", "status": "active", "tags": ["other"] }),
+        );
+        c.snapshots.insert(
+            "500".into(),
+            json!({ "id": "500", "name": "corra-phone-image", "min_disk_size": 320 }),
+        );
+    }
+    let old = hub
+        .db
+        .insert_machine(corra_hub::db::NewMachine {
+            name: "corra-phone".into(),
+            provider: "phone".into(),
+            project: None,
+            size: "8x16".into(),
+            token_hash: "h".into(),
+            provider_ref: Some("77".into()),
+            status: MachineStatus::Connected,
+            kind: None,
+        })
+        .unwrap();
+
+    hub.db.kv_delete("phone.retired_old").unwrap();
+    let d = DigitalOcean::with_api(&url, Duration::from_millis(5));
+    corra_hub::phone::retire_old_with(&hub, &d).await;
+    let mut log = take(&cloud);
+    log.sort();
+    assert_eq!(log, ["delete droplet 77", "delete snapshot 500"]);
+    assert!(cloud.lock().unwrap().droplets.contains_key(&78));
+    assert!(corra_hub::leftovers::list(&hub).is_empty());
+
+    assert_eq!(
+        hub.db.machine(old.id).unwrap().unwrap().status,
+        MachineStatus::Destroyed
+    );
+    corra_hub::phone::retire_old_with(&hub, &d).await;
+    assert!(take(&cloud).is_empty(), "it ran twice");
 }

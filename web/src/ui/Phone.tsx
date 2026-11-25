@@ -1,4 +1,4 @@
-import { Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup } from 'solid-js'
+import { Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup } from 'solid-js'
 import ChevronLeft from 'lucide-solid/icons/chevron-left'
 import Circle from 'lucide-solid/icons/circle'
 import Power from 'lucide-solid/icons/power'
@@ -38,12 +38,15 @@ function codecOf(config: Uint8Array) {
 export function PhonePanel() {
   let canvas!: HTMLCanvasElement
   let box!: HTMLDivElement
-  const phone = createMemo(() =>
-    Object.values(state.machines)
-      .filter((m) => m.src === 'hub' && m.provider === 'phone' && !['destroyed', 'destroying'].includes(m.status))
-      .sort((a, b) => b.created_at - a.created_at)
-      .at(0),
+  const machineCount = () => Object.keys(state.machines).length
+  const [info, { refetch: refetchInfo }] = createResource(machineCount, () =>
+    callOn<{ host: unknown; machine?: string }>('hub', { op: 'phone_host' }).catch(() => ({ host: null, machine: undefined })),
   )
+  const phone = createMemo(() => {
+    const id = info()?.machine
+    const m = id ? state.machines[id] : undefined
+    return m && !['destroyed', 'destroying'].includes(m.status) ? m : undefined
+  })
   const status = () => phone()?.status
   const [error, setError] = createSignal('')
   const [busy, setBusy] = createSignal(false)
@@ -240,12 +243,18 @@ export function PhonePanel() {
       <Match when={state.conn.hub === 'none'}>
         <Notice title="The test phone runs through a hub" text="Connect a hub in Settings to start an Android phone from here." />
       </Match>
-      <Match when={!phone() || status() === 'failed'}>
+      <Match when={info() && !info()!.host}>
+        <Notice
+          title="The phone is off"
+          text="Pick where it runs in Settings, under Tools. It needs a machine with KVM, like a DigitalOcean droplet or an Agent37 VM."
+        />
+      </Match>
+      <Match when={!phone() || status() === 'failed' || status() === 'asleep'}>
         <Notice
           title={status() === 'failed' ? "The phone didn't start" : 'No phone is running'}
-          text="An Android phone with Google Play, for you and your agents. It runs in the cloud while you use it and is destroyed when you stop."
+          text="An Android phone with Google Play, for you and your agents. It runs in the cloud while you use it, and its apps and data go when you stop it."
         >
-          <Btn kind="primary" disabled={busy()} onClick={() => run(() => callOn('hub', { op: 'phone_up' }))}>
+          <Btn kind="primary" disabled={busy()} onClick={() => run(() => callOn('hub', { op: 'phone_up' }).then(() => refetchInfo()))}>
             {status() === 'failed' ? 'Try again' : 'Start the phone'}
           </Btn>
         </Notice>
