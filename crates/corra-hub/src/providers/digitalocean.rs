@@ -342,7 +342,7 @@ pub fn image_script(dockerfile: &str) -> String {
         .map(|(k, v)| format!("export {k}={}\n", shell_quote(v)))
         .collect();
     format!(
-        "#!/bin/bash\nset -euxo pipefail\nexport HOME=/root\ncd /root\necho 'DPkg::Lock::Timeout \"900\";' > /etc/apt/apt.conf.d/90corra-lock\ncat > /etc/profile.d/corra.sh <<'CORRA_ENV'\n{profile}CORRA_ENV\n{}\ncloud-init clean --logs || true\npoweroff\n",
+        "#!/bin/bash\nset -euxo pipefail\nexport HOME=/root\ncd /root\necho 'DPkg::Lock::Timeout \"900\";' > /etc/apt/apt.conf.d/90corra-lock\ncat > /etc/profile.d/corra.sh <<'CORRA_ENV'\n{profile}CORRA_ENV\n{}\ncloud-init clean --logs || true\n/usr/sbin/poweroff\n",
         steps.join("\n")
     )
 }
