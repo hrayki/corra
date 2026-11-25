@@ -235,6 +235,10 @@ pub async fn up(hub: &HubRef) -> Result<MachineId> {
     .await
     .map_err(fail)?;
     if !provider.sleep_keeps_machine() && provider.sleeps() {
+        hub.db
+            .kv_set(&crate::providers::starting_key(m.id), &now_ms().to_string())?;
+        hub.db.set_machine_status(m.id, MachineStatus::Creating)?;
+        hub.publish_machine(m.id);
         let snap = provider.sleep(hub, &r).await.map_err(fail)?;
         hub.db.kv_set(
             TEMPLATE_KEY,
