@@ -228,7 +228,16 @@ async fn rest(hub: &Arc<Hub>, m: &Machine, notice: Option<&str>) {
 }
 
 async fn lost(hub: &Arc<Hub>, m: &Machine) {
-    if hub.db.machine_sleep_ref(m.id).ok().flatten().is_some() {
+    let sleep_ref = hub.db.machine_sleep_ref(m.id).ok().flatten();
+    if let Some(s) = &sleep_ref {
+        if let (Ok(Some(r)), Some(provider)) = (
+            hub.db.machine_provider_ref(m.id),
+            hub.providers.get(&m.provider),
+        ) && r != *s
+            && let Err(e) = provider.destroy(hub, &r).await
+        {
+            tracing::warn!(machine = %m.name, "couldn't delete what was left of a lost machine: {e:#}");
+        }
         let _ = hub.db.set_machine_status(m.id, MachineStatus::Asleep);
         hub.publish_machine(m.id);
         settle_threads(

@@ -38,6 +38,10 @@ project picks a provider, a kind and a size, on one of:
   can't write through a link, so before a Modal machine sleeps its helper turns that file back into a plain one.
 - **Agent37**: a VM, which has KVM, or a container, which is cheaper and doesn't. Both are billed on their size while
   awake. Asleep, it's stopped and only its disk is billed.
+- **DigitalOcean** (droplet, with KVM): billed by the hour while it exists. The first machine waits while corra builds a
+  base snapshot from the base image's Dockerfile. Asleep, it's a snapshot: the droplet is shut down, snapshotted and
+  deleted, since a stopped droplet is still billed. It wakes as a new droplet from that snapshot in the same region
+  (`digitalocean.region` in Settings, `sfo3` by default).
 - **A machine paired by hand**: any Linux computer running the runner. The hub never starts or stops it.
 
 The runner reports in its machine info whether `/dev/kvm` opens.

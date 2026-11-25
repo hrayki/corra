@@ -1,4 +1,5 @@
 mod agent37;
+pub mod digitalocean;
 mod existing;
 mod modal;
 pub mod phone;
@@ -196,6 +197,7 @@ impl Providers {
             Arc::new(existing::Existing),
             Arc::new(modal::Modal::new()),
             Arc::new(agent37::Agent37),
+            Arc::new(digitalocean::DigitalOcean::new()),
             Arc::new(phone::Phone),
         ];
         for p in all {
