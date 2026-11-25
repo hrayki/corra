@@ -196,7 +196,7 @@ async fn handle_runner_msg(
     match msg {
         RunnerMsg::Hello { .. } => {}
         RunnerMsg::TunnelOpen { id, port } => {
-            let is_phone = matches!(hub.db.machine(machine), Ok(Some(m)) if m.provider == crate::phone::PROVIDER);
+            let is_phone = crate::phone::is_machine(hub, machine);
             let target = hub.phone.forwards.lock().unwrap().get(&port).copied();
             match target.filter(|t| is_phone && hub.runner_connected(*t)) {
                 Some(t) => {
@@ -675,9 +675,9 @@ async fn handle_app_call(
             Value::Null
         }
         AppCall::PhoneUp => {
-            if !crate::providers::phone::configured(hub) {
+            if crate::phone::host(hub).is_none() {
                 return Err(anyhow!(
-                    "add digitalocean.token in Settings, under Credentials, to use a test phone"
+                    "the phone is off: pick where it runs in Settings, under Tools"
                 ));
             }
             let hub = hub.clone();
@@ -1042,6 +1042,15 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.secrets.delete(&name)?;
             Value::Null
         }
+        AppCall::PhoneHost => json!({
+            "host": crate::phone::host(hub),
+            "machine": crate::phone::machine(hub).map(|m| m.id),
+        }),
+        AppCall::SetPhoneHost { host } => {
+            serde_json::to_value(crate::phone::switch(hub, host).await?)?
+        }
+        AppCall::Leftovers => serde_json::to_value(crate::leftovers::list(hub))?,
+        AppCall::RetryLeftovers => serde_json::to_value(crate::leftovers::retry(hub).await)?,
         AppCall::ListProviders => serde_json::to_value(hub.providers.info(hub))?,
         AppCall::ListTools => serde_json::to_value(crate::tools::info(hub))?,
         AppCall::ListSecrets => json!(
@@ -1108,6 +1117,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             }
             hub.place_project(&mut p, provider, kind, size)?;
             hub.db.update_project(&p)?;
+            crate::lifecycle::retire_moved(hub, p.id);
             hub.publish_project(&p);
             serde_json::to_value(p)?
         }

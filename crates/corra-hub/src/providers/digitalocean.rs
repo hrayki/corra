@@ -536,6 +536,8 @@ impl Provider for DigitalOcean {
     }
 }
 
+impl DigitalOcean {}
+
 const SIZE_DISKS: &[(&str, u64)] = &[
     ("s-2vcpu-4gb-amd", 80),
     ("s-4vcpu-8gb-amd", 160),

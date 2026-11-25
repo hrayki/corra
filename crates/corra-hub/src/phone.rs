@@ -6,16 +6,20 @@ use anyhow::{Result, anyhow, bail};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use corra_proto::runner::RunnerRequest;
+use corra_proto::runner::{HubMsg, RunnerRequest};
 use corra_proto::*;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::AppState;
 use crate::db::NewMachine;
 use crate::hub::{Hub, HubRef, hash_token, new_token};
+use crate::leftovers::clean;
 use crate::providers::{CreateRequest, Size};
 
-pub const PROVIDER: &str = "phone";
+const MACHINE_KEY: &str = "phone.machine";
+const TEMPLATE_KEY: &str = "phone.template";
+pub const SETUP_MINUTES: i64 = 90;
 
 #[derive(Default)]
 pub struct PhoneState {
@@ -25,27 +29,120 @@ pub struct PhoneState {
     pub tunnels: std::sync::Mutex<std::collections::HashMap<String, (MachineId, MachineId)>>,
 }
 
-fn name() -> String {
-    std::env::var("CORRA_PHONE_NAME")
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Template {
+    host: PhoneHost,
+    reference: String,
+}
+
+pub fn host(hub: &Hub) -> Option<PhoneHost> {
+    match hub.settings().get("phone") {
+        Some(v) if v.is_object() => serde_json::from_value(v.clone()).ok(),
+        Some(_) => None,
+        None => hub
+            .secrets
+            .get("digitalocean.token")
+            .ok()
+            .flatten()
+            .map(|_| PhoneHost {
+                provider: "digitalocean".into(),
+                kind: "droplet".into(),
+                size: "8x16".into(),
+            }),
+    }
+}
+
+pub fn check_host(hub: &Hub, h: &PhoneHost) -> Result<PhoneHost> {
+    let p = hub
+        .providers
+        .info(hub)
+        .into_iter()
+        .find(|p| p.name == h.provider && p.creates_machines)
+        .ok_or_else(|| anyhow!("{} can't make machines for the phone", h.provider))?;
+    if !p.connected {
+        bail!("connect {} in Settings first", p.label);
+    }
+    let k = p
+        .kinds
+        .iter()
+        .find(|k| k.name == h.kind)
+        .ok_or_else(|| anyhow!("{} has no kind called {}", p.label, h.kind))?;
+    if !k.kvm {
+        bail!(
+            "a {} {} has no KVM, which the Android emulator needs",
+            p.label,
+            k.label
+        );
+    }
+    Ok(PhoneHost {
+        provider: h.provider.clone(),
+        kind: h.kind.clone(),
+        size: if k.sizes.is_empty() {
+            h.size.clone()
+        } else {
+            crate::providers::fit(&k.sizes, &h.size)
+        },
+    })
+}
+
+fn template(hub: &Hub) -> Option<Template> {
+    hub.db
+        .kv_get(TEMPLATE_KEY)
         .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "corra-phone".into())
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 pub fn machine(hub: &Hub) -> Option<Machine> {
-    hub.db.machines().ok()?.into_iter().rev().find(|m| {
-        m.provider == PROVIDER
-            && !matches!(
-                m.status,
-                MachineStatus::Destroyed | MachineStatus::Destroying | MachineStatus::Failed
-            )
+    let id: MachineId = hub.db.kv_get(MACHINE_KEY).ok().flatten()?.parse().ok()?;
+    hub.db.machine(id).ok().flatten().filter(|m| {
+        !matches!(
+            m.status,
+            MachineStatus::Destroyed | MachineStatus::Destroying
+        )
     })
+}
+
+pub fn busy(hub: &Hub) -> bool {
+    hub.phone.starting.try_lock().is_err()
+}
+
+pub fn is_machine(hub: &Hub, id: MachineId) -> bool {
+    hub.db
+        .kv_get(MACHINE_KEY)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == id.to_string())
 }
 
 fn ready(hub: &Hub) -> Option<MachineId> {
     machine(hub)
         .filter(|m| hub.runner_connected(m.id))
         .map(|m| m.id)
+}
+
+async fn connect(hub: &HubRef, m: &Machine, r: &str) -> Result<()> {
+    let provider = hub
+        .providers
+        .get(&m.provider)
+        .ok_or_else(|| anyhow!("unknown provider {}", m.provider))?;
+    hub.db.set_machine_provider_ref(m.id, r)?;
+    if let Err(e) = crate::providers::await_runner(hub, provider.as_ref(), m.id, r).await {
+        hub.db.set_machine_status(m.id, MachineStatus::Failed)?;
+        hub.publish_machine(m.id);
+        bail!(e);
+    }
+    Ok(())
+}
+
+fn request(hub: &Hub, m: &Machine, h: &PhoneHost) -> Result<CreateRequest> {
+    Ok(CreateRequest {
+        name: m.name.clone(),
+        machine: m.id,
+        kind: h.kind.clone(),
+        size: Size::parse(&h.size),
+        env: hub.providers.machine_env(hub, m.id)?,
+    })
 }
 
 pub async fn up(hub: &HubRef) -> Result<MachineId> {
@@ -58,73 +155,99 @@ pub async fn up(hub: &HubRef) -> Result<MachineId> {
         boot(hub, m).await?;
         return Ok(m);
     }
-    for m in hub.db.machines()? {
-        if m.provider == PROVIDER
-            && matches!(m.status, MachineStatus::Creating | MachineStatus::Offline)
-        {
-            let _ = hub.providers.destroy_machine(hub, m.id).await;
-        }
-    }
+    let h = host(hub).ok_or_else(|| anyhow!("the phone is off: pick where it runs in Settings"))?;
+    let h = check_host(hub, &h)?;
     let provider = hub
         .providers
-        .get(PROVIDER)
-        .ok_or_else(|| anyhow!("the test phone needs a hub"))?;
-    if !crate::providers::phone::configured(hub) {
-        bail!("add digitalocean.token in Settings → Credentials to use a test phone");
+        .get(&h.provider)
+        .ok_or_else(|| anyhow!("unknown provider {}", h.provider))?;
+
+    if let Some(m) = machine(hub) {
+        let sleep_ref = hub.db.machine_sleep_ref(m.id)?;
+        if m.status == MachineStatus::Asleep
+            && let Some(s) = sleep_ref
+        {
+            hub.db.set_machine_status(m.id, MachineStatus::Creating)?;
+            hub.publish_machine(m.id);
+            let r = provider.wake(hub, &s, request(hub, &m, &h)?).await?;
+            connect(hub, &m, &r).await?;
+            boot(hub, m.id).await?;
+            return Ok(m.id);
+        }
+        if let Some(r) = hub.db.machine_provider_ref(m.id)? {
+            clean(
+                hub,
+                "the phone's machine",
+                &m.provider,
+                LeftoverThing::Machine,
+                &r,
+            )
+            .await;
+        }
+        hub.db.set_machine_status(m.id, MachineStatus::Destroyed)?;
+        hub.publish_machine(m.id);
+        let _ = hub.db.kv_delete(MACHINE_KEY);
     }
-    let token = new_token("cm");
+
+    let tpl = template(hub).filter(|t| t.host == h);
     let m = hub.db.insert_machine(NewMachine {
-        name: name(),
-        provider: PROVIDER.into(),
+        name: format!("corra-phone-{}", &new_id().simple().to_string()[26..]),
+        provider: h.provider.clone(),
         project: None,
-        size: "8x16".into(),
-        token_hash: hash_token(&token),
+        size: h.size.clone(),
+        token_hash: hash_token(&new_token("cm")),
         provider_ref: None,
         status: MachineStatus::Creating,
-        kind: None,
+        kind: Some(h.kind.clone()),
     })?;
+    hub.db.kv_set(MACHINE_KEY, &m.id.to_string())?;
+    hub.db
+        .kv_set(&crate::providers::starting_key(m.id), &now_ms().to_string())?;
     hub.publish_machine(m.id);
-    let creating =
-        || matches!(hub.db.machine(m.id), Ok(Some(x)) if x.status == MachineStatus::Creating);
     let fail = |e: anyhow::Error| {
-        if creating() {
-            let _ = hub.db.set_machine_status(m.id, MachineStatus::Failed);
-            hub.publish_machine(m.id);
-        }
+        let _ = hub.db.set_machine_status(m.id, MachineStatus::Failed);
+        hub.publish_machine(m.id);
         e
     };
+
+    if let Some(t) = tpl {
+        let r = provider
+            .wake(hub, &t.reference, request(hub, &m, &h)?)
+            .await
+            .map_err(fail)?;
+        connect(hub, &m, &r).await?;
+        boot(hub, m.id).await?;
+        return Ok(m.id);
+    }
+
     let r = provider
-        .create(
-            hub,
-            CreateRequest {
-                name: m.name.clone(),
-                machine: m.id,
-                kind: String::new(),
-                size: Size::parse(&m.size),
-                env: vec![
-                    ("CORRA_HUB".into(), hub.providers.hub_url.clone()),
-                    ("CORRA_TOKEN".into(), token),
-                ],
-            },
-        )
+        .create(hub, request(hub, &m, &h)?)
         .await
         .map_err(fail)?;
-    if !creating() {
-        let _ = provider.destroy(hub, &r).await;
-        bail!("the phone was stopped while it was starting");
-    }
-    hub.db.set_machine_provider_ref(m.id, &r)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-    while !hub.runner_connected(m.id) {
-        if matches!(hub.db.machine(m.id), Ok(Some(x)) if matches!(x.status, MachineStatus::Destroyed | MachineStatus::Destroying))
-        {
-            bail!("the phone was stopped while it was starting");
-        }
-        if tokio::time::Instant::now() > deadline {
-            let _ = provider.destroy(hub, &r).await;
-            return Err(fail(anyhow!("the phone didn't connect within 5 minutes")));
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    connect(hub, &m, &r).await?;
+    hub.runner_request_timeout(
+        m.id,
+        RunnerRequest::Phone {
+            action: PhoneOp::Setup,
+        },
+        Duration::from_secs(50 * 60),
+    )
+    .await
+    .map_err(fail)?;
+    if !provider.sleep_keeps_machine() && provider.sleeps() {
+        let snap = provider.sleep(hub, &r).await.map_err(fail)?;
+        hub.db.kv_set(
+            TEMPLATE_KEY,
+            &serde_json::to_string(&Template {
+                host: h.clone(),
+                reference: snap.clone(),
+            })?,
+        )?;
+        let r = provider
+            .wake(hub, &snap, request(hub, &m, &h)?)
+            .await
+            .map_err(fail)?;
+        connect(hub, &m, &r).await?;
     }
     boot(hub, m.id).await?;
     Ok(m.id)
@@ -146,17 +269,97 @@ async fn boot(hub: &Hub, m: MachineId) -> Result<()> {
 pub async fn down(hub: &HubRef) -> Result<()> {
     hub.phone.forwards.lock().unwrap().clear();
     hub.phone.tunnels.lock().unwrap().clear();
-    for m in hub.db.machines()? {
-        if m.provider == PROVIDER
-            && !matches!(
-                m.status,
-                MachineStatus::Destroyed | MachineStatus::Destroying
-            )
-        {
-            hub.providers.destroy_machine(hub, m.id).await?;
-        }
+    let Some(m) = machine(hub) else {
+        return Ok(());
+    };
+    if m.status == MachineStatus::Asleep {
+        return Ok(());
     }
+    let provider = hub.providers.get(&m.provider);
+    let r = hub.db.machine_provider_ref(m.id)?;
+    if let (Some(p), Some(r)) = (&provider, &r)
+        && p.sleep_keeps_machine()
+        && hub.runner_connected(m.id)
+    {
+        let _ = hub.send_runner_pub(m.id, HubMsg::PhoneStop);
+        let s = p.sleep(hub, r).await?;
+        hub.db.set_machine_sleep_ref(m.id, Some(&s))?;
+        hub.db.set_machine_status(m.id, MachineStatus::Asleep)?;
+        hub.publish_machine(m.id);
+        return Ok(());
+    }
+    if let Some(r) = &r {
+        clean(
+            hub,
+            "the phone's machine",
+            &m.provider,
+            LeftoverThing::Machine,
+            r,
+        )
+        .await;
+    }
+    hub.db.set_machine_status(m.id, MachineStatus::Destroyed)?;
+    hub.publish_machine(m.id);
+    let _ = hub.db.kv_delete(MACHINE_KEY);
     Ok(())
+}
+
+pub async fn switch(hub: &HubRef, new: Option<PhoneHost>) -> Result<Option<PhoneHost>> {
+    let new = match new {
+        Some(h) => Some(check_host(hub, &h)?),
+        None => None,
+    };
+    let _guard = hub.phone.starting.lock().await;
+    if host(hub) != new {
+        hub.phone.forwards.lock().unwrap().clear();
+        hub.phone.tunnels.lock().unwrap().clear();
+        if let Some(m) = machine(hub) {
+            if let Some(r) = hub.db.machine_provider_ref(m.id)? {
+                clean(
+                    hub,
+                    "the phone's machine",
+                    &m.provider,
+                    LeftoverThing::Machine,
+                    &r,
+                )
+                .await;
+            }
+            if let Some(s) = hub.db.machine_sleep_ref(m.id)?
+                && Some(&s) != hub.db.machine_provider_ref(m.id)?.as_ref()
+            {
+                clean(
+                    hub,
+                    "the phone's saved machine",
+                    &m.provider,
+                    LeftoverThing::Image,
+                    &s,
+                )
+                .await;
+            }
+            hub.db.set_machine_status(m.id, MachineStatus::Destroyed)?;
+            hub.publish_machine(m.id);
+        }
+        if let Some(t) = template(hub) {
+            clean(
+                hub,
+                "the phone's template",
+                &t.host.provider,
+                LeftoverThing::Image,
+                &t.reference,
+            )
+            .await;
+        }
+        let _ = hub.db.kv_delete(MACHINE_KEY);
+        let _ = hub.db.kv_delete(TEMPLATE_KEY);
+    }
+    hub.set_setting(
+        "phone",
+        match &new {
+            Some(h) => serde_json::to_value(h)?,
+            None => json!("off"),
+        },
+    )?;
+    Ok(new)
 }
 
 pub async fn act(hub: &Hub, action: PhoneOp) -> Result<Value> {
@@ -183,7 +386,7 @@ fn tool(action: &str, description: &str, props: Value, required: &[&str]) -> Too
 }
 
 pub fn defs(hub: &Hub) -> Vec<ToolDef> {
-    if !crate::providers::phone::configured(hub) {
+    if host(hub).is_none() {
         return vec![];
     }
     let x = json!({ "type": "integer", "description": "In screenshot pixels." });

@@ -18,6 +18,8 @@ const VIDEO_MAX: u32 = 1200;
 const SHOT_MAX: u32 = 1280;
 const H264: u32 = 0x6832_3634;
 
+const SETUP: &str = include_str!("../../../machines/phone-setup.sh");
+
 #[derive(Clone)]
 pub struct Phone {
     inner: Arc<Inner>,
@@ -314,10 +316,39 @@ impl Phone {
         Ok(nodes(&String::from_utf8_lossy(&xml), self.div().await?))
     }
 
+    async fn setup(&self) -> Result<Value> {
+        let path = std::env::temp_dir().join("corra-phone-setup.sh");
+        tokio::fs::write(&path, SETUP).await?;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(45 * 60),
+            tokio::process::Command::new("bash")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("setting up the phone took longer than 45 minutes"))?
+        .context("setting up the phone")?;
+        let _ = tokio::fs::remove_file(&path).await;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let tail: Vec<&str> = err.trim().lines().rev().take(5).collect();
+            bail!(
+                "setting up the phone failed: {}",
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        Ok(Value::Null)
+    }
+
     pub async fn handle(&self, op: PhoneOp) -> Result<Value> {
+        if matches!(op, PhoneOp::Setup) {
+            return self.setup().await;
+        }
         self.boot().await?;
         match op {
-            PhoneOp::Boot => Ok(Value::Null),
+            PhoneOp::Setup | PhoneOp::Boot => Ok(Value::Null),
             PhoneOp::Stream => {
                 self.stream().await?;
                 Ok(Value::Null)

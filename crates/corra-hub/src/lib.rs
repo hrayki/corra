@@ -8,6 +8,7 @@ pub mod gitproxy;
 pub mod hub;
 pub mod import;
 pub mod kit;
+pub mod leftovers;
 pub mod lifecycle;
 pub mod manage;
 pub mod notify;

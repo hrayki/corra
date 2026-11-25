@@ -226,6 +226,10 @@ impl Provider for Agent37 {
         true
     }
 
+    fn sleep_keeps_machine(&self) -> bool {
+        true
+    }
+
     async fn sleep(&self, hub: &Hub, provider_ref: &str) -> Result<String> {
         self.api(
             hub,

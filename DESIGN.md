@@ -23,7 +23,7 @@ The README says what corra is. This is how it fits together.
   shell for desktop and Android. The hub tells the app which build it serves; an app on another build saves its drafts
   and reloads, and so does one that can't load a part after a deploy.
 - `crates/corra-proto` holds the types everything shares (the app's are generated from them), `helpers/modal` a small
-  Go helper for Modal, whose SDK has no Rust version, and `machines` the base image and the phone's image script.
+  Go helper for Modal, whose SDK has no Rust version, and `machines` the base image and the phone's setup script.
 
 ## Machines
 
@@ -109,8 +109,12 @@ message to an idle thread restarts the process on the same session; a thread tha
 its next message.
 
 Beside Claude Code's own tools, agents get corra's: other threads, GitHub, and in a manager project, managing corra
-itself. A project can also turn on a browser on its machine and the Android test phone, a DigitalOcean droplet the hub
-starts and destroys.
+itself. A project can also turn on a browser on its machine and the Android test phone. The phone runs on an ordinary
+machine of a kind with KVM, picked in Settings under Tools. On DigitalOcean its first start sets it up and keeps a
+snapshot as its template, and each start after makes a new droplet from that. On Agent37 the same VM is stopped and
+started. Either way the emulator starts from the same saved state and keeps nothing, so a phone's apps and data go when
+it stops. Changing where it runs, or moving a project to another provider or kind, deletes what's left on the old one,
+and lists in Settings anything that couldn't be deleted.
 
 ## The storage lease
 

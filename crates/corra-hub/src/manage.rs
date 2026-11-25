@@ -548,6 +548,7 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
 fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> {
     let opt = |k: &str| input[k].as_str().map(String::from);
     hub.place_project(&mut p, opt("provider"), opt("kind"), opt("size"))?;
+    let moved = p.id;
     if let Some(r) = repos_from(&input["repos"]) {
         p.repos = r;
     }
@@ -578,6 +579,7 @@ fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> 
         p.allow_main = allow;
     }
     hub.db.update_project(&p)?;
+    crate::lifecycle::retire_moved(hub, moved);
     hub.publish_project(&p);
     Ok(json!({
         "name": p.name,

@@ -95,6 +95,14 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
             MachineStatus::Connected if !hub.runner_connected(m.id) => {
                 hub.db.set_machine_status(m.id, MachineStatus::Offline)?;
             }
+            MachineStatus::Connected if crate::phone::is_machine(hub, m.id) => {
+                if !crate::phone::busy(hub) && now - last > limit {
+                    tracing::info!(machine = %m.name, "nobody used the phone for a while");
+                    if let Err(e) = crate::phone::down(hub).await {
+                        tracing::warn!("couldn't stop the phone: {e:#}");
+                    }
+                }
+            }
             MachineStatus::Connected => {
                 let since = hub
                     .db
@@ -143,8 +151,8 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
                     .kv_get(&crate::providers::starting_key(m.id))?
                     .and_then(|v| v.parse::<i64>().ok())
                     .unwrap_or(m.created_at);
-                let minutes = if m.provider == crate::phone::PROVIDER {
-                    90
+                let minutes = if crate::phone::is_machine(hub, m.id) {
+                    crate::phone::SETUP_MINUTES
                 } else {
                     15
                 };
@@ -272,6 +280,14 @@ async fn retire(hub: &Arc<Hub>, machine: MachineId, notice: Option<&str>) {
             && let Err(e) = provider.forget(hub, &s).await
         {
             tracing::warn!(%machine, "couldn't delete the machine's sleep: {e:#}");
+            crate::leftovers::add(
+                hub,
+                &format!("{}'s saved disk", m.name),
+                &m.provider,
+                LeftoverThing::Image,
+                &s,
+                &format!("{e:#}"),
+            );
         }
         let _ = hub.db.set_machine_sleep_ref(machine, None);
     }
@@ -356,4 +372,124 @@ async fn orphans(hub: &Arc<Hub>) {
             }
         }
     }
+}
+
+pub fn retire_moved(hub: &Arc<Hub>, project: ProjectId) {
+    let Ok(Some(p)) = hub.db.project(project) else {
+        return;
+    };
+    let current = hub.providers.kind_name(&p.provider, p.kind.as_deref());
+    let old: Vec<Machine> = hub
+        .db
+        .machines()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| {
+            m.project == Some(project)
+                && !matches!(
+                    m.status,
+                    MachineStatus::Destroyed | MachineStatus::Destroying
+                )
+                && hub
+                    .providers
+                    .get(&m.provider)
+                    .is_some_and(|x| x.creates_machines())
+                && (m.provider != p.provider
+                    || hub.providers.kind_name(&m.provider, m.kind.as_deref()) != current)
+        })
+        .collect();
+    for m in old {
+        let hub = hub.clone();
+        let p = p.clone();
+        tokio::spawn(async move {
+            if let Err(e) = move_off(&hub, &p, &m).await {
+                tracing::warn!(machine = %m.name, "couldn't move the threads off an old machine: {e:#}");
+                for (thing, r) in [
+                    (
+                        LeftoverThing::Machine,
+                        hub.db.machine_provider_ref(m.id).ok().flatten(),
+                    ),
+                    (
+                        LeftoverThing::Image,
+                        hub.db.machine_sleep_ref(m.id).ok().flatten(),
+                    ),
+                ] {
+                    if let Some(r) = r {
+                        crate::leftovers::add(
+                            &hub,
+                            &format!(
+                                "{}'s old machine, kept because its threads' work couldn't be saved",
+                                p.name
+                            ),
+                            &m.provider,
+                            thing,
+                            &r,
+                            &format!("{e:#}"),
+                        );
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn move_off(hub: &Arc<Hub>, p: &Project, m: &Machine) -> Result<()> {
+    let provider = hub
+        .providers
+        .get(&m.provider)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider {}", m.provider))?;
+    let threads = hub.db.threads_on_machine(m.id)?;
+    if !threads.is_empty() && !hub.runner_connected(m.id) {
+        let sleep_ref = hub.db.machine_sleep_ref(m.id)?.ok_or_else(|| {
+            anyhow::anyhow!("the machine isn't running and has no sleep to wake from")
+        })?;
+        let req = crate::providers::CreateRequest {
+            name: m.name.clone(),
+            machine: m.id,
+            kind: hub.providers.kind_name(&m.provider, m.kind.as_deref()),
+            size: crate::providers::Size::parse(&m.size),
+            env: hub.providers.machine_env(hub, m.id)?,
+        };
+        hub.db.set_machine_status(m.id, MachineStatus::Creating)?;
+        hub.publish_machine(m.id);
+        let r = provider.wake(hub, &sleep_ref, req).await?;
+        hub.db.set_machine_provider_ref(m.id, &r)?;
+        crate::providers::await_runner(hub, provider.as_ref(), m.id, &r)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
+    for t in threads {
+        if hub.runner_connected(m.id) {
+            hub.stop_live(&t);
+            hub.runner_request_timeout(
+                m.id,
+                corra_proto::runner::RunnerRequest::SaveWork {
+                    cwd: t.cwd.clone(),
+                    thread: t.id,
+                },
+                Duration::from_secs(120),
+            )
+            .await?;
+        }
+        if let Ok(Some(mut t)) = hub.db.thread(t.id) {
+            let from = t.cwd.clone();
+            t.machine = None;
+            if matches!(
+                t.status,
+                ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting
+            ) {
+                t.status = ThreadStatus::Idle;
+            }
+            t.cwd = format!("~/projects/{}", p.name);
+            t.updated_at = now_ms();
+            hub.db.reset_runner_seq(t.id)?;
+            hub.db.update_thread(&t)?;
+            hub.publish_thread(&t);
+            if from != t.cwd {
+                hub.set_thread_kv(t.id, "moved_from", &from);
+            }
+        }
+    }
+    retire(hub, m.id, None).await;
+    Ok(())
 }

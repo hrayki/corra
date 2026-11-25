@@ -371,6 +371,7 @@ pub fn glob_match(pattern: &str, s: &str) -> bool {
 #[serde(tag = "do", rename_all = "snake_case")]
 #[ts(export)]
 pub enum PhoneOp {
+    Setup,
     Boot,
     Stream,
     Shot,
@@ -502,4 +503,32 @@ pub struct ToolInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub missing: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PhoneHost {
+    pub provider: String,
+    pub kind: String,
+    pub size: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Leftover {
+    pub id: String,
+    pub what: String,
+    pub provider: String,
+    pub thing: LeftoverThing,
+    pub reference: String,
+    pub error: String,
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LeftoverThing {
+    Machine,
+    Image,
 }

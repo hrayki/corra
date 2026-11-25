@@ -187,6 +187,14 @@ pub enum AppCall {
     ListSecrets,
     ListProviders,
     ListTools,
+    PhoneHost,
+    SetPhoneHost {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        host: Option<crate::PhoneHost>,
+    },
+    Leftovers,
+    RetryLeftovers,
     Presence {
         focused: bool,
     },

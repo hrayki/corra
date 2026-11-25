@@ -2,7 +2,6 @@ mod agent37;
 pub mod digitalocean;
 mod existing;
 mod modal;
-pub mod phone;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -140,6 +139,9 @@ pub trait Provider: Send + Sync {
     fn sleeps(&self) -> bool {
         false
     }
+    fn sleep_keeps_machine(&self) -> bool {
+        false
+    }
     async fn sleep(&self, _hub: &Hub, _provider_ref: &str) -> Result<String> {
         bail!("{} can't put machines to sleep", self.name())
     }
@@ -182,6 +184,37 @@ const RUNNER_WAIT: Duration = Duration::from_secs(300);
 const STATUS_EVERY: Duration = Duration::from_secs(5);
 const STOPPED_GRACE: Duration = Duration::from_secs(60);
 
+pub async fn await_runner(
+    hub: &Hub,
+    provider: &dyn Provider,
+    machine: MachineId,
+    r: &str,
+) -> std::result::Result<(), &'static str> {
+    let began = tokio::time::Instant::now();
+    let mut checked = began;
+    loop {
+        if hub.runner_connected(machine) {
+            return Ok(());
+        }
+        if began.elapsed() >= RUNNER_WAIT {
+            return Err("the machine didn't connect within 5 minutes");
+        }
+        if checked.elapsed() >= STATUS_EVERY {
+            checked = tokio::time::Instant::now();
+            match provider.status(hub, r).await {
+                Ok(ProviderStatus::Gone) => {
+                    return Err("the machine stopped before its runner connected");
+                }
+                Ok(ProviderStatus::Stopped) if began.elapsed() >= STOPPED_GRACE => {
+                    return Err("the machine stopped before its runner connected");
+                }
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 pub fn boot_command() -> Vec<String> {
     vec![
         "bash".into(),
@@ -198,7 +231,6 @@ impl Providers {
             Arc::new(modal::Modal::new()),
             Arc::new(agent37::Agent37),
             Arc::new(digitalocean::DigitalOcean::new()),
-            Arc::new(phone::Phone),
         ];
         for p in all {
             by_name.insert(p.name(), p);
@@ -317,7 +349,7 @@ impl Providers {
         result
     }
 
-    fn machine_env(&self, hub: &Hub, machine: MachineId) -> Result<Vec<(String, String)>> {
+    pub fn machine_env(&self, hub: &Hub, machine: MachineId) -> Result<Vec<(String, String)>> {
         let token = match hub.secrets.get(&format!("machine_token.{machine}"))? {
             Some(t) => t,
             None => {
@@ -400,34 +432,14 @@ impl Providers {
         hub.db.set_machine_provider_ref(m.id, &r)?;
         hub.db
             .kv_set(&format!("awake_since:{}", m.id), &now_ms().to_string())?;
-        let began = tokio::time::Instant::now();
-        let mut checked = began;
-        let failure = loop {
-            if hub.runner_connected(m.id) {
-                crate::kit::prepare(hub, p, m.id).await?;
-                return Ok(m.id);
-            }
-            if began.elapsed() >= RUNNER_WAIT {
-                break "the machine didn't connect within 5 minutes";
-            }
-            if checked.elapsed() >= STATUS_EVERY {
-                checked = tokio::time::Instant::now();
-                match provider.status(hub, &r).await {
-                    Ok(ProviderStatus::Gone) => {
-                        break "the machine stopped before its runner connected";
-                    }
-                    Ok(ProviderStatus::Stopped) if began.elapsed() >= STOPPED_GRACE => {
-                        break "the machine stopped before its runner connected";
-                    }
-                    _ => {}
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        };
-        hub.db.set_machine_status(m.id, MachineStatus::Failed)?;
-        hub.publish_machine(m.id);
-        let _ = provider.destroy(hub, &r).await;
-        bail!(failure)
+        if let Err(failure) = await_runner(hub, provider.as_ref(), m.id, &r).await {
+            hub.db.set_machine_status(m.id, MachineStatus::Failed)?;
+            hub.publish_machine(m.id);
+            let _ = provider.destroy(hub, &r).await;
+            bail!(failure);
+        }
+        crate::kit::prepare(hub, p, m.id).await?;
+        Ok(m.id)
     }
 
     pub async fn destroy_machine(&self, hub: &Hub, id: MachineId) -> Result<()> {
@@ -435,9 +447,11 @@ impl Providers {
             .db
             .machine(id)?
             .ok_or_else(|| anyhow!("no such machine"))?;
-        let provider = self
-            .get(&m.provider)
-            .ok_or_else(|| anyhow!("unknown provider"))?;
+        let Some(provider) = self.get(&m.provider) else {
+            hub.db.set_machine_status(id, MachineStatus::Destroyed)?;
+            hub.publish_machine(id);
+            return Ok(());
+        };
         if !provider.creates_machines() {
             bail!(
                 "{} is an existing machine; corra doesn't destroy those",
