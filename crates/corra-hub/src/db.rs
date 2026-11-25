@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS events (
     data TEXT NOT NULL,
     PRIMARY KEY (thread, seq)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS events_by_kind ON events(thread, kind, seq);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -809,11 +810,30 @@ impl Db {
         after: i64,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events WHERE thread = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+            params![thread.to_string(), after, limit],
+        )
+    }
+
+    pub fn turn_marks(&self, thread: ThreadId) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind IN ('turn_started', 'turn_completed') ORDER BY seq",
+            params![thread.to_string()],
+        )
+    }
+
+    pub fn last_turns_started(&self, thread: ThreadId, n: i64) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started' ORDER BY seq DESC LIMIT ?2",
+            params![thread.to_string(), n],
+        )
+    }
+
+    fn stored_events(&self, sql: &str, p: impl rusqlite::Params) -> Result<Vec<StoredEvent>> {
         self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT seq, ts, data FROM events WHERE thread = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
-            )?;
-            st.query_map(params![thread.to_string(), after, limit], |r| {
+            let mut st = c.prepare(sql)?;
+            st.query_map(p, |r| {
                 let data: String = r.get(2)?;
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, data))
             })?

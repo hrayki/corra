@@ -417,8 +417,8 @@ fn asking_thread(
                 t.updated_at,
             )
         })?;
-    let events = s.hub.db.events_after(t.id, 0, 1_000_000).ok()?;
-    let turn = events.iter().rev().find_map(|e| match &e.event {
+    let events = s.hub.db.last_turns_started(t.id, 1).ok()?;
+    let turn = events.iter().find_map(|e| match &e.event {
         corra_proto::Event::TurnStarted { turn, .. } => Some(turn.clone()),
         _ => None,
     })?;
