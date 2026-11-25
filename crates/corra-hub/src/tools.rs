@@ -311,7 +311,7 @@ pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
             needs: needs.iter().map(|s| s.to_string()).collect(),
             host: host.map(String::from),
             ready: missing.is_empty(),
-            missing: (!missing.is_empty()).then(|| format!("Needs {}", missing.join(" and "))),
+            missing: (!missing.is_empty()).then(|| format!("Needs a {label} key")),
         }
     };
     let phone_host = crate::phone::host(hub);
