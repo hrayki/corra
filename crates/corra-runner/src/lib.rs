@@ -5,6 +5,8 @@ pub mod git;
 mod image;
 pub mod kit;
 pub mod phone;
+#[cfg(target_os = "linux")]
+pub mod reaper;
 pub mod secrets;
 pub mod sync;
 pub mod term;
