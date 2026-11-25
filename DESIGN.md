@@ -14,7 +14,8 @@ The README says what corra is. This is how it fits together.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
   through its stream-json interface, and serves the thread's panel: changes, files, terminal, browser, phone. When the
   hub serves a newer runner, a runner switches to it once nothing has needed it for two minutes: no turn running and no
-  terminal open, except the desktop app's, which comes with the app.
+  terminal open, except the desktop app's, which comes with the app. On Linux it starts as a small parent that takes in
+  and reaps the processes orphaned below it, since a machine's PID 1 may not (Modal's doesn't).
 - **Desktop core** (`crates/corra-local`): inside the desktop app. It adds the laptop to the hub as one of its machines
   and runs its runner. It also holds a built-in hub, the same code as the real one: when the hub can't be reached for a
   minute, the window moves to it, and when the hub is back, the threads started there move to the hub with their events
