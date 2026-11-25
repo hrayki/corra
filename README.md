@@ -51,8 +51,6 @@ And if you need them:
 - `CORRA_LISTEN`: the address to listen on. Default `0.0.0.0:$PORT` when `PORT` is set, otherwise `127.0.0.1:7810`.
 - `CORRA_DATA`: the data folder. Default `./data`; the image uses `/data`.
 - `CORRA_IDLE_MINUTES`: how long an idle machine stays awake. Default 15.
-- `CORRA_PHONE_REGION`, `CORRA_PHONE_IMAGE` and `CORRA_PHONE_NAME`: the test phone's DigitalOcean region (default
-  `sfo3`), image snapshot name and droplet name.
 - `CORRA_RUNNER_BIN`, `CORRA_MODAL_HELPER` and `CORRA_LITESTREAM`: the helper binaries, when they aren't beside the
   hub's.
 - `CORRA_DEV_NO_AUTH`: skips signing in. Only on a loopback address, for working on corra.
