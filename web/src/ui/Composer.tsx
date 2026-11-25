@@ -18,10 +18,11 @@ import { paired } from '../lib/catalog'
 export const MODELS = ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5', 'claude-haiku-5-5']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const MODES: { value: string; label: string; hint: string }[] = [
-  { value: 'default', label: 'Ask first', hint: 'asks before edits and commands' },
+  { value: 'default', label: 'Manual', hint: 'asks before edits and commands' },
   { value: 'acceptEdits', label: 'Accept edits', hint: 'asks before commands' },
   { value: 'plan', label: 'Plan', hint: 'plans, changes nothing' },
-  { value: 'bypassPermissions', label: 'Never asks', hint: 'runs anything without asking' },
+  { value: 'auto', label: 'Auto', hint: 'a safety check decides, rarely asks' },
+  { value: 'bypassPermissions', label: 'Bypass permissions', hint: 'runs anything, no checks' },
 ]
 const effortLabel = (e?: string) => (e === 'xhigh' ? 'Extra high' : e ? e[0].toUpperCase() + e.slice(1) : 'High')
 

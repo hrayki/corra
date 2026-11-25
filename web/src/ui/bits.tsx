@@ -170,9 +170,9 @@ export function Menu(props: {
                           it.onSelect()
                         }}
                       >
-                        <span class="min-w-0 flex-1 truncate">{it.label}</span>
+                        <span class={it.hint ? 'shrink-0' : 'min-w-0 flex-1 truncate'}>{it.label}</span>
                         <Show when={it.hint}>
-                          <span class="text-[11.5px] text-faint">{it.hint}</span>
+                          <span class="min-w-0 flex-1 truncate text-right text-[11.5px] text-faint">{it.hint}</span>
                         </Show>
                         <Show when={it.checked}>
                           <span class="text-accent">✓</span>

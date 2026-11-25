@@ -101,7 +101,7 @@ their thread. An answer goes only to a request that still waits, and only once, 
 refused. Pull requests, checks, issues and merging are hub tools. A workflow that runs on any branch still runs that
 branch's code with the repo's secrets, so secrets belong in workflows that run on the default branch or tags.
 
-What an agent may do is Claude Code's own permission mode, picked per project, plus the rules in the kit's
+What an agent may do is Claude Code's own permission mode, picked per thread, plus the rules in the kit's
 `claude-settings.json`.
 
 A thread's keys, env vars and tools are fixed when its Claude Code process starts. When they've changed, the next
