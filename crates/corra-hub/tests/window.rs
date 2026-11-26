@@ -29,6 +29,7 @@ fn thread(hub: &HubRef, turns: usize) -> ThreadId {
         pinned_at: None,
         settled_at: None,
         hidden_at: None,
+        started_by: None,
     };
     hub.db.insert_thread(&t).unwrap();
     let add = |e: Value| hub.append(t.id, None, 1, ev(e)).unwrap();
