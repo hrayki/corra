@@ -111,6 +111,9 @@ pub enum Event {
         level: NoticeLevel,
         text: String,
     },
+    Unread {
+        item: String,
+    },
 }
 
 impl Event {

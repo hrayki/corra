@@ -20,6 +20,7 @@ export type ItemView = {
   ended?: number
   live?: string
   liveInput?: string
+  unread?: boolean
 }
 
 export type RequestView = {
@@ -48,6 +49,7 @@ export type TurnView = {
   resetsAt?: number
   ended?: number
   checkpoint?: RepoCheckpoint[]
+  unread?: boolean
 }
 
 export type ThreadView = {
@@ -231,6 +233,14 @@ export function apply(v: ThreadView, e: StoredEvent) {
     case 'checkpoint': {
       const t = findTurn(v, e.turn)
       if (t) t.checkpoint = e.repos
+      break
+    }
+    case 'unread': {
+      for (const t of v.turns) {
+        if (`${t.id}:input` === e.item) t.unread = true
+        const it = findItem(t, e.item)
+        if (it) it.unread = true
+      }
       break
     }
     case 'settings_changed':

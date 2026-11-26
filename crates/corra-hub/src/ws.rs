@@ -957,10 +957,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             }
             Value::Null
         }
-        AppCall::Interrupt { thread } => {
-            hub.interrupt(thread)?;
-            Value::Null
-        }
+        AppCall::Interrupt { thread } => json!({ "unsent": hub.interrupt(thread)? }),
         AppCall::StopAgent { thread, tool } => {
             hub.stop_task(thread, tool)?;
             Value::Null

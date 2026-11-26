@@ -64,7 +64,9 @@ impl Ids {
                 true
             }
             "control_request" => {
-                if want["request"]["subtype"] != got["request"]["subtype"] {
+                if want["request"]["subtype"] != got["request"]["subtype"]
+                    || want["request"]["cancel_queued"] != got["request"]["cancel_queued"]
+                {
                     return false;
                 }
                 self.learn(&want["request_id"], &got["request_id"]);
@@ -80,7 +82,17 @@ impl Ids {
 }
 
 pub async fn replay(name: &str) -> Vec<AgentOut> {
-    let entries = load(name);
+    replay_entries(name, load(name)).await
+}
+
+async fn replay_until_exit(name: &str, lines: usize) -> Vec<AgentOut> {
+    let mut entries = load(name);
+    entries.truncate(lines);
+    entries.push(json!({ "from": "exit" }));
+    replay_entries(name, entries).await
+}
+
+async fn replay_entries(name: &str, entries: Vec<Value>) -> Vec<AgentOut> {
     let start = entries
         .iter()
         .find(|e| e["from"] == "start")
@@ -200,11 +212,11 @@ pub async fn replay(name: &str) -> Vec<AgentOut> {
     while let Ok(o) = out_rx.try_recv() {
         out.push(o);
     }
-    check(name, &out);
+    check(name, &out, exited);
     out
 }
 
-fn check(name: &str, out: &[AgentOut]) {
+fn check(name: &str, out: &[AgentOut], exited: bool) {
     let mut started = HashSet::new();
     let mut open: Option<String> = None;
     let mut requests = HashSet::new();
@@ -267,7 +279,7 @@ fn check(name: &str, out: &[AgentOut]) {
         }
         _ => None,
     });
-    if let Some(s) = last_status {
+    if let Some(s) = last_status.filter(|_| !exited) {
         let want = if failed == Some(true) {
             ThreadStatus::Error
         } else {
@@ -504,19 +516,72 @@ async fn a_message_sent_mid_turn_stays_where_it_was_sent() {
     );
 }
 
+fn unread(out: &[AgentOut]) -> Vec<String> {
+    out.iter()
+        .filter_map(|o| match o {
+            AgentOut::Event(Event::Unread { item }) => Some(item.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn message_id(turn: &Turn, text: &str) -> String {
+    turn.items[turn.position(
+        |i| matches!(&i.body, ItemBody::UserMessage { content } if text_of(content).contains(text)),
+    )]
+    .id
+    .clone()
+}
+
+fn shown(out: &[AgentOut], text: &str) -> usize {
+    out.iter()
+        .filter(|o| match o {
+            AgentOut::Event(Event::TurnStarted { input, .. }) => text_of(input).contains(text),
+            AgentOut::Event(Event::ItemCompleted {
+                item:
+                    Item {
+                        id,
+                        body: ItemBody::UserMessage { content },
+                        ..
+                    },
+                turn,
+            }) => *id != format!("{turn}:input") && text_of(content).contains(text),
+            _ => false,
+        })
+        .count()
+}
+
 #[tokio::test]
-async fn a_message_a_stop_drops_never_holds_the_thread_open() {
-    let out = replay("stop_drops_message").await;
+async fn a_stop_runs_nothing_after_it_and_marks_a_waiting_message_unread() {
+    let out = replay("stop_with_waiting_message").await;
     let turns = turns(&out);
     assert_eq!(
         turns.iter().map(|t| t.outcome).collect::<Vec<_>>(),
-        [Some(TurnOutcome::Interrupted), Some(TurnOutcome::Completed)],
+        [Some(TurnOutcome::Interrupted)],
         "{turns:#?}"
     );
-    assert!(turns[1].input.contains("Are you stuck?"), "{turns:#?}");
-    assert!(out.iter().any(
-        |o| matches!(o, AgentOut::Event(Event::Notice { text, .. }) if text.contains("dropped"))
-    ));
+    let waiting = message_id(&turns[0], "SECOND_DONE");
+    assert_eq!(unread(&out), [waiting]);
+    assert_eq!(shown(&out, "SECOND_DONE"), 1);
+}
+
+#[tokio::test]
+async fn an_exit_marks_a_message_claude_code_never_took_and_shows_it_once() {
+    let out = replay_until_exit("mid_turn_message", 25).await;
+    let turns = turns(&out);
+    assert_eq!(turns.len(), 1, "{turns:#?}");
+    assert_eq!(turns[0].outcome, Some(TurnOutcome::Failed));
+    assert_eq!(unread(&out), [message_id(&turns[0], "SECOND_DONE")]);
+    assert_eq!(shown(&out, "SECOND_DONE"), 1);
+}
+
+#[tokio::test]
+async fn an_exit_after_claude_code_took_a_message_leaves_it_read() {
+    let out = replay_until_exit("mid_turn_message", 29).await;
+    let turns = turns(&out);
+    assert_eq!(turns.len(), 1, "{turns:#?}");
+    assert!(unread(&out).is_empty(), "{:?}", unread(&out));
+    assert_eq!(shown(&out, "SECOND_DONE"), 1);
 }
 
 #[tokio::test]
@@ -935,6 +1000,28 @@ async fn record_mid_turn_message() {
             then: Then::Send("Also reply with exactly SECOND_DONE after that."),
         }],
         5,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn record_stop_with_waiting_message() {
+    record(
+        "stop_with_waiting_message",
+        "Run this exact command with Bash in the foreground, not in the background: python3 -c \"import time; time.sleep(30)\". Then reply with exactly FIRST_DONE.",
+        haiku(),
+        vec![
+            Step {
+                when: |o| tool_started(o, "Bash"),
+                then: Then::Send("Also reply with exactly SECOND_DONE after that."),
+            },
+            Step {
+                when: |o| matches!(o, AgentOut::Event(Event::ItemCompleted { item, .. }) if item.id.ends_with(":input")),
+                then: Then::InterruptIn(3000),
+            },
+        ],
+        20,
     )
     .await;
 }

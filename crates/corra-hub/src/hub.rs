@@ -391,7 +391,7 @@ impl Hub {
                     let (settled, outcome) = self.settled_status(thread)?;
                     drain = settled == ThreadStatus::Idle
                         && matches!(t.status, ThreadStatus::Running | ThreadStatus::Waiting)
-                        && matches!(outcome, None | Some(TurnOutcome::Completed));
+                        && outcome != Some(TurnOutcome::Failed);
                     if t.status != ThreadStatus::Starting
                         || !matches!(settled, ThreadStatus::Idle | ThreadStatus::Error)
                     {
@@ -444,6 +444,13 @@ impl Hub {
                 ..
             } => {
                 self.take_thread_kv(thread, "continues");
+                self.note_context(thread);
+                self.send_next_queued(thread);
+            }
+            Event::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            } => {
                 self.note_context(thread);
                 self.send_next_queued(thread);
             }
@@ -1447,13 +1454,18 @@ impl Hub {
         }
     }
 
-    pub fn interrupt(&self, thread: ThreadId) -> Result<()> {
+    pub fn interrupt(&self, thread: ThreadId) -> Result<Vec<Queued>> {
         let t = self
             .db
             .thread(thread)?
             .ok_or_else(|| anyhow!("no such thread"))?;
         let m = t.machine.ok_or_else(|| anyhow!("thread has no machine"))?;
-        self.send_runner(m, HubMsg::Interrupt { thread })
+        self.send_runner(m, HubMsg::Interrupt { thread })?;
+        let unsent = self.queued(thread);
+        if !unsent.is_empty() {
+            self.set_queued(thread, &[]);
+        }
+        Ok(unsent)
     }
 
     pub fn respond(
@@ -1928,6 +1940,17 @@ pub fn open_requests(events: &[StoredEvent]) -> Vec<String> {
         }
     }
     open
+}
+
+pub fn input_text(input: &[InputPart]) -> String {
+    input
+        .iter()
+        .filter_map(|p| match p {
+            InputPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn title_from(input: &[InputPart]) -> String {

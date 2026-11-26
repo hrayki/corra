@@ -1,6 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from 'solid-js'
 import ChevronRight from 'lucide-solid/icons/chevron-right'
 import Check from 'lucide-solid/icons/check'
+import RotateCcw from 'lucide-solid/icons/rotate-ccw'
 import Circle from 'lucide-solid/icons/circle'
 import CircleDot from 'lucide-solid/icons/circle-dot'
 import Bell from 'lucide-solid/icons/bell'
@@ -316,6 +317,33 @@ function CopyButton(props: { text: () => string; label?: string }) {
 const actionRow =
   'flex flex-wrap items-center gap-0.5 transition-opacity duration-100 md:opacity-0 md:group-hover/turn:opacity-100 md:focus-within:opacity-100'
 
+function NotRead(props: { thread: string; input: InputPart[] }) {
+  const [error, setError] = createSignal('')
+  const [sent, setSent] = createSignal(false)
+  const again = () => {
+    const s = state.threads[props.thread]?.status
+    setError('')
+    call({
+      op: 'send',
+      thread: props.thread,
+      input: props.input,
+      queue: s === 'running' || s === 'waiting' || s === 'starting',
+      client_id: crypto.randomUUID(),
+    })
+      .then(() => setSent(true))
+      .catch((e) => setError((e as Error).message))
+  }
+  return (
+    <div class="flex items-center justify-end gap-1 text-[12.5px] text-faint">
+      <span>{error() || 'Not read'}</span>
+      <button type="button" class={actionBtn} disabled={sent()} onClick={again}>
+        <RotateCcw size={13} />
+        {sent() ? 'Sent again' : 'Send again'}
+      </button>
+    </div>
+  )
+}
+
 function HubNote(props: { text: string }) {
   return (
     <div class="flex gap-2.5 rounded-xl bg-ink/[0.03] px-3.5 py-2.5 text-[13px] text-mute">
@@ -369,6 +397,9 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
               </button>
             </Show>
           </div>
+        </Show>
+        <Show when={props.turn.unread}>
+          <NotRead thread={props.thread} input={props.turn.input} />
         </Show>
         <div class={`${actionRow} justify-end`}>
           <CopyButton text={() => text()?.text ?? ''} />
@@ -488,10 +519,13 @@ function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, 
         <Todos item={props.item} />
       </Match>
       <Match when={b().type === 'user_message'}>
-        <div class="flex justify-end">
+        <div class="flex flex-col items-end gap-1">
           <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] whitespace-pre-wrap">
             <For each={(b() as { content: InputPart[] }).content}>{(p) => (p.type === 'text' ? <span>{p.text}</span> : null)}</For>
           </div>
+          <Show when={props.item.unread && props.thread}>
+            {(t) => <NotRead thread={t()} input={(b() as { content: InputPart[] }).content} />}
+          </Show>
         </div>
       </Match>
     </Switch>
