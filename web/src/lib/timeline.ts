@@ -41,6 +41,7 @@ export type TurnView = {
   settings: AgentSettings
   started: number
   entries: Entry[]
+  after: Entry[]
   outcome?: TurnOutcome
   usage?: Usage
   error?: string
@@ -106,7 +107,7 @@ function findTurn(v: ThreadView, id: string): TurnView | undefined {
 function ensureTurn(v: ThreadView, id: string, ts: number): TurnView {
   let t = findTurn(v, id)
   if (!t) {
-    t = { id, input: [], settings: {}, started: ts, entries: [] }
+    t = { id, input: [], settings: {}, started: ts, entries: [], after: [] }
     v.turns.push(t)
   }
   return t
@@ -214,7 +215,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
     case 'notice': {
       const t = lastTurn(v)
       const entry: Entry = { type: 'notice', level: e.level, text: e.text, ts: e.ts }
-      const into = t && !t.outcome ? t.entries : v.preface
+      const into = !t ? v.preface : t.outcome ? t.after : t.entries
       const last = into[into.length - 1]
       if (last?.type === 'notice' && last.level === e.level && last.text === e.text) break
       into.push(entry)

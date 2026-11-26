@@ -110,6 +110,36 @@ test('a thread opened on its last turns ignores steps of earlier turns until tho
   )
 })
 
+test('a notice sent between turns shows after the turn before it, opened whole or from its end', () => {
+  const start = (turn: string, ts: number) => ev(ts, { kind: 'turn_started', turn, input: [{ type: 'text', text: turn }], settings: {} })
+  const done = (turn: string, ts: number) => ev(ts, { kind: 'turn_completed', turn, outcome: 'completed' })
+  const note = (ts: number, text: string) => ev(ts, { kind: 'notice', level: 'warning', text })
+  const older = [
+    note(1, 'Before any turn'),
+    start('t1', 2),
+    answer('t1', 'a1', 3, 'one'),
+    done('t1', 4),
+    note(5, 'The machine running this thread stopped.'),
+  ]
+  const window = [start('t2', 6), answer('t2', 'a2', 7, 'two'), done('t2', 8), note(9, "Couldn't send: the machine is asleep")]
+  const text = (e: Entry) => (e.type === 'notice' ? e.text : e.type)
+  const where = (v: ReturnType<typeof buildView>) => ({
+    top: v.preface.map(text),
+    turns: v.turns.map((t) => [t.id, t.after.map(text)]),
+  })
+  const partial = buildView(window, true)
+  assert.deepEqual(where(partial), { top: [], turns: [['t2', ["Couldn't send: the machine is asleep"]]] })
+  apply(partial, note(10, 'The machine restarted.'))
+  assert.deepEqual(partial.turns[0].after.map(text), ["Couldn't send: the machine is asleep", 'The machine restarted.'])
+  assert.deepEqual(where(buildView([...older, ...window], false)), {
+    top: ['Before any turn'],
+    turns: [
+      ['t1', ['The machine running this thread stopped.']],
+      ['t2', ["Couldn't send: the machine is asleep"]],
+    ],
+  })
+})
+
 test('a thread cached before session events carried models still opens', () => {
   const v = buildView(
     [
