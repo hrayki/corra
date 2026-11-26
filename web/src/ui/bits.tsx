@@ -3,7 +3,7 @@ import { Portal } from 'solid-js/web'
 import type { ThreadStatus } from '../proto/ThreadStatus'
 import type { InputPart } from '../proto/InputPart'
 
-export function StatusMark(props: { status: ThreadStatus; class?: string }) {
+export function StatusMark(props: { status: ThreadStatus | 'done'; class?: string }) {
   return (
     <span class={`relative inline-flex size-3.5 shrink-0 items-center justify-center ${props.class ?? ''}`} aria-hidden="true">
       <Show when={props.status === 'running' || props.status === 'starting'}>
@@ -15,6 +15,9 @@ export function StatusMark(props: { status: ThreadStatus; class?: string }) {
       <Show when={props.status === 'error'}>
         <span class="size-2 rounded-full bg-bad" />
       </Show>
+      <Show when={props.status === 'done'}>
+        <span class="size-2 rounded-full bg-done" />
+      </Show>
       <Show when={props.status === 'idle'}>
         <span class="size-1.5 rounded-full bg-faint/60" />
       </Show>
@@ -22,8 +25,9 @@ export function StatusMark(props: { status: ThreadStatus; class?: string }) {
   )
 }
 
-export const statusWord: Record<ThreadStatus, string> = {
+export const statusWord: Record<ThreadStatus | 'done', string> = {
   idle: '',
+  done: 'Done',
   starting: 'Starting',
   running: 'Working',
   waiting: 'Needs you',
