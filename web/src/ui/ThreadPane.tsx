@@ -308,9 +308,18 @@ export function ThreadPane(props: { id: string }) {
               </For>
               <For each={view()?.turns ?? []}>
                 {(t, i) => (
-                  <Show when={!repeatsError(view()!.turns, i())}>
-                    <TurnBlock thread={props.id} turn={t} last={i() === (view()?.turns.length ?? 0) - 1} cwd={cwd()} />
-                  </Show>
+                  <>
+                    <Show when={!repeatsError(view()!.turns, i())}>
+                      <TurnBlock thread={props.id} turn={t} last={i() === (view()?.turns.length ?? 0) - 1} cwd={cwd()} />
+                    </Show>
+                    <For each={t.after}>
+                      {(e) => (
+                        <div class="pb-4">
+                          <EntryView thread={props.id} entry={e} />
+                        </div>
+                      )}
+                    </For>
+                  </>
                 )}
               </For>
               <For each={(state.pending[props.id] ?? []).filter((p) => !p.queued)}>
