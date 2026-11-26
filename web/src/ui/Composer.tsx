@@ -10,23 +10,13 @@ import type { InputPart } from '../proto/InputPart'
 import type { AgentSettings } from '../proto/AgentSettings'
 import type { AgentKind } from '../proto/AgentKind'
 import type { Choice } from '../proto/Choice'
-import { modelLabel, tokens } from '../lib/format'
+import { tokens } from '../lib/format'
+import { AGENT_NAMES, fitEffort, pickerState } from '../lib/choices'
 import { Menu, Picture } from './bits'
 import { draftFor, setDraftFor } from './Timeline'
 import { continueList, loadDraft, saveDraftImages, saveDraftText } from '../lib/drafts'
 import { usageWindows } from '../lib/seen'
 import { paired } from '../lib/catalog'
-
-export const MODELS = ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5', 'claude-haiku-5-5']
-export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
-export const MODES: { value: string; label: string; hint: string }[] = [
-  { value: 'default', label: 'Manual', hint: 'asks before edits and commands' },
-  { value: 'acceptEdits', label: 'Accept edits', hint: 'asks before commands' },
-  { value: 'plan', label: 'Plan', hint: 'plans, changes nothing' },
-  { value: 'auto', label: 'Auto', hint: 'a safety check decides, rarely asks' },
-  { value: 'bypassPermissions', label: 'Bypass permissions', hint: 'runs anything, no checks' },
-]
-const effortLabel = (e?: string) => (e === 'xhigh' ? 'Extra high' : e ? e[0].toUpperCase() + e.slice(1) : 'High')
 
 type Image = { media_type: string; data: string }
 
@@ -86,33 +76,22 @@ export function useInput(key?: () => string) {
 const pill =
   'inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-lg border border-line px-2 text-[12.5px] text-mute hover:border-faint hover:text-ink max-md:h-9'
 
-const AGY_MODES: Choice[] = [
-  { id: 'default', name: 'Default' },
-  { id: 'accept-edits', name: 'Accept edits' },
-  { id: 'plan', name: 'Plan' },
-]
-const RANKS = ['low', 'medium', 'high', 'xhigh', 'max']
-
-const remembered = (key: string): Choice[] | undefined => {
+const remembered = (agent: AgentKind, what: 'models' | 'modes'): Choice[] | undefined => {
   try {
-    return JSON.parse(localStorage.getItem(key) ?? 'null') ?? undefined
+    return JSON.parse(localStorage.getItem(choiceKey(agent, what)) ?? 'null') ?? undefined
   } catch {
     return undefined
   }
 }
 
-export function rememberChoices(v?: { model?: string; models?: Choice[]; modes?: Choice[] }) {
-  if (v?.models?.length) localStorage.setItem('corra_agy_models', JSON.stringify(v.models))
-  if (v?.modes?.length) localStorage.setItem('corra_agy_modes', JSON.stringify(v.modes))
-  if (v?.model) localStorage.setItem('corra_agy_default', v.model)
-}
+const choiceKey = (agent: AgentKind, what: 'models' | 'modes' | 'default') =>
+  agent === 'antigravity' ? `corra_agy_${what}` : `corra_${agent}_${what}`
 
-export function fitEffort(effort: string | undefined, list: Choice[]): string | undefined {
-  if (!effort || !list.length || list.some((c) => c.id === effort)) return effort
-  const want = RANKS.indexOf(effort)
-  const ranked = list.map((c) => ({ c, r: RANKS.indexOf(c.id) })).filter((x) => x.r >= 0)
-  const below = ranked.filter((x) => x.r <= want).sort((a, b) => b.r - a.r)[0]
-  return (below ?? ranked.sort((a, b) => a.r - b.r)[0])?.c.id ?? list[0].id
+export function rememberChoices(agent: AgentKind, v?: { model?: string; models?: Choice[]; modes?: Choice[] }) {
+  if (v?.models?.length) localStorage.setItem(choiceKey(agent, 'models'), JSON.stringify(v.models))
+  if (agent !== 'antigravity') return
+  if (v?.modes?.length) localStorage.setItem(choiceKey(agent, 'modes'), JSON.stringify(v.modes))
+  if (v?.model) localStorage.setItem(choiceKey(agent, 'default'), v.model)
 }
 
 export function SettingsPickers(props: {
@@ -125,33 +104,23 @@ export function SettingsPickers(props: {
   modes?: Choice[]
   mode?: string
 }) {
-  const agy = () => props.agent === 'antigravity'
-  const modes = () =>
-    agy()
-      ? (props.modes ?? remembered('corra_agy_modes') ?? AGY_MODES).map((m) => ({ value: m.id, label: m.name, hint: m.hint ?? '' }))
-      : MODES
-  const mode = () => {
-    const p = props.settings.permission_mode ?? 'default'
-    return modes().find((m) => m.value === p) ?? modes().find((m) => m.value === props.mode) ?? modes()[0]
-  }
-  const models = (): Choice[] =>
-    agy() ? (props.models ?? remembered('corra_agy_models') ?? []) : MODELS.map((m) => ({ id: m, name: modelLabel(m) }))
-  const model = () => props.settings.model ?? (agy() ? (props.model ?? localStorage.getItem('corra_agy_default') ?? undefined) : MODELS[0])
-  const efforts = (): Choice[] => {
-    if (!agy()) return EFFORTS.map((e) => ({ id: e, name: effortLabel(e) }))
-    const m = models().find((c) => c.id === model())
-    return m?.efforts ?? (m && m.id === props.model ? props.efforts : undefined) ?? []
-  }
-  const modelName = () => {
-    const m = model()
-    return m ? (models().find((c) => c.id === m)?.name ?? modelLabel(m)) : 'Default model'
-  }
-  const effort = () => props.settings.effort ?? 'high'
-  const effortName = () => efforts().find((c) => c.id === effort())?.name ?? (agy() ? '' : effortLabel(effort()))
+  const agent = () => props.agent ?? 'claude'
+  const models = () => (props.models?.length ? props.models : (remembered(agent(), 'models') ?? []))
+  const st = createMemo(() =>
+    pickerState({
+      agent: agent(),
+      settings: props.settings,
+      models: models(),
+      modes: props.modes?.length ? props.modes : remembered(agent(), 'modes'),
+      efforts: props.efforts,
+      model: agent() === 'antigravity' ? (props.model ?? localStorage.getItem(choiceKey(agent(), 'default')) ?? undefined) : props.model,
+      mode: props.mode,
+    }),
+  )
   const pickModel = (id: string) => {
     const list = models().find((c) => c.id === id)?.efforts ?? []
-    const e = fitEffort(effort(), list)
-    props.onChange(e && e !== effort() ? { model: id, effort: e } : { model: id })
+    const e = fitEffort(st().effort, list)
+    props.onChange(e && e !== st().effort ? { model: id, effort: e } : { model: id })
   }
   return {
     mode: (
@@ -159,14 +128,14 @@ export function SettingsPickers(props: {
         label="Permissions"
         side="top"
         class={pill}
-        items={modes().map((m) => ({
-          label: m.label,
-          hint: m.hint,
-          checked: m.value === mode().value,
-          onSelect: () => props.onChange({ permission_mode: m.value }),
+        items={st().modes.map((m) => ({
+          label: m.name,
+          detail: m.hint,
+          checked: m.id === st().mode.id,
+          onSelect: () => props.onChange({ permission_mode: m.id }),
         }))}
       >
-        <span classList={{ 'text-warn': mode().value === 'bypassPermissions' }}>{mode().label}</span>
+        <span classList={{ 'text-warn': st().mode.id === 'bypassPermissions' }}>{st().mode.name}</span>
       </Menu>
     ),
     model: (
@@ -177,29 +146,37 @@ export function SettingsPickers(props: {
         class={pill}
         items={[
           { heading: 'Model' },
-          ...(agy() && !models().length
-            ? [{ label: 'Default model', hint: 'the list shows once Antigravity has started here', checked: true, onSelect: () => {} }]
+          ...(!models().length
+            ? [
+                {
+                  label: st().modelName,
+                  detail: `The list shows once ${AGENT_NAMES[agent()]} has started here.`,
+                  checked: true,
+                  onSelect: () => {},
+                },
+              ]
             : models().map((m) => ({
                 label: m.name,
-                checked: model() === m.id,
+                detail: m.hint,
+                checked: st().model?.id === m.id,
                 onSelect: () => pickModel(m.id),
               }))),
-          ...(efforts().length
+          ...(st().efforts.length
             ? [
                 'col' as const,
                 { heading: 'Effort' },
-                ...efforts().map((e) => ({
+                ...st().efforts.map((e) => ({
                   label: e.name,
-                  checked: effort() === e.id,
+                  checked: st().effort === e.id,
                   onSelect: () => props.onChange({ effort: e.id }),
                 })),
               ]
             : []),
         ]}
       >
-        <span>{modelName()}</span>
-        <Show when={effortName()}>
-          <span class="text-faint @max-xl:hidden">{effortName()}</span>
+        <span>{st().modelName}</span>
+        <Show when={st().effortName}>
+          <span class="text-faint @max-xl:hidden">{st().effortName}</span>
         </Show>
       </Menu>
     ),
@@ -508,7 +485,7 @@ export function Composer(props: { thread: ThreadX }) {
   }
   createEffect(() => {
     const v = state.views[props.thread.id]
-    if (props.thread.agent === 'antigravity') rememberChoices(v)
+    rememberChoices(props.thread.agent, v)
   })
   const pickers = SettingsPickers({
     get settings() {

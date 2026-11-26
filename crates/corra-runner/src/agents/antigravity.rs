@@ -325,7 +325,7 @@ fn flat(options: &Value) -> Vec<Choice> {
                 id: v.to_string(),
                 name: o["name"].as_str().unwrap_or(v).to_string(),
                 hint: o["description"].as_str().map(String::from),
-                efforts: None,
+                ..Default::default()
             });
         }
     }
@@ -366,7 +366,7 @@ impl Choices {
                         id: m["id"].as_str()?.to_string(),
                         name: m["name"].as_str().unwrap_or_default().to_string(),
                         hint: m["description"].as_str().map(String::from),
-                        efforts: None,
+                        ..Default::default()
                     })
                 })
                 .collect();
@@ -379,8 +379,7 @@ impl Choices {
                     Some(Choice {
                         id: m["modelId"].as_str()?.to_string(),
                         name: m["name"].as_str().unwrap_or_default().to_string(),
-                        hint: None,
-                        efforts: None,
+                        ..Default::default()
                     })
                 })
                 .collect();
@@ -418,8 +417,7 @@ impl Choices {
                         .get(id)
                         .cloned()
                         .unwrap_or_else(|| label.to_string()),
-                    hint: None,
-                    efforts: None,
+                    ..Default::default()
                 })
             })
             .collect();

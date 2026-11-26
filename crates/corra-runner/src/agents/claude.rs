@@ -347,6 +347,8 @@ struct State {
     streams: HashMap<Option<String>, StreamState>,
     message_blocks: HashMap<String, usize>,
     settings: AgentSettings,
+    init_request: Option<String>,
+    models: Vec<Choice>,
     session_id: String,
     session_announced: bool,
     turn_counter: u64,
@@ -387,6 +389,8 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
         streams: HashMap::new(),
         message_blocks: HashMap::new(),
         settings: ctx.spec.settings.clone(),
+        init_request: None,
+        models: vec![],
         session_id: String::new(),
         session_announced: false,
         turn_counter: 0,
@@ -443,7 +447,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
     if !ctx.spec.tools.is_empty() {
         init["sdkMcpServers"] = json!(["corra"]);
     }
-    proc.control(init).await?;
+    st.init_request = Some(proc.control(init).await?);
     emit(
         ctx,
         Event::Status {
@@ -798,6 +802,12 @@ async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Valu
         "control_request" => on_control_request(ctx, st, proc, &msg).await?,
         "control_response" => {
             let r = &msg["response"];
+            if r["subtype"] == "success"
+                && r["request_id"].as_str().is_some()
+                && r["request_id"].as_str() == st.init_request.as_deref()
+            {
+                st.models = models_of(&r["response"]);
+            }
             if r["subtype"] == "error"
                 && r["request_id"]
                     .as_str()
@@ -847,6 +857,51 @@ async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Valu
     Ok(())
 }
 
+fn effort_name(id: &str) -> String {
+    if id == "xhigh" {
+        return "xHigh".into();
+    }
+    let mut c = id.chars();
+    c.next()
+        .map(|f| {
+            f.to_uppercase()
+                .chain(c.flat_map(char::to_lowercase))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn models_of(reply: &Value) -> Vec<Choice> {
+    reply["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["value"].as_str()?.to_string();
+            let efforts: Vec<Choice> = m["supportedEffortLevels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|_| m["supportsEffort"] != false)
+                .filter_map(|e| e.as_str())
+                .map(|e| Choice {
+                    id: e.to_string(),
+                    name: effort_name(e),
+                    ..Default::default()
+                })
+                .collect();
+            Some(Choice {
+                name: m["displayName"].as_str().unwrap_or(&id).to_string(),
+                id,
+                hint: m["description"].as_str().map(String::from),
+                efforts: (!efforts.is_empty()).then_some(efforts),
+                resolved_model: m["resolvedModel"].as_str().map(String::from),
+                supports_auto_mode: m["supportsAutoMode"].as_bool(),
+            })
+        })
+        .collect()
+}
+
 fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
     match msg["subtype"].as_str().unwrap_or("") {
         "init" => {
@@ -876,7 +931,7 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                     tools: strings(&msg["tools"]),
                     slash_commands: strings(&msg["slash_commands"]),
                     permission_mode: msg["permissionMode"].as_str().map(String::from),
-                    models: vec![],
+                    models: st.models.clone(),
                     efforts: vec![],
                     modes: vec![],
                 },

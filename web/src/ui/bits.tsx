@@ -85,7 +85,7 @@ export function IconBtn(props: {
 }
 
 export type MenuItem =
-  | { label: string; hint?: string; danger?: boolean; checked?: boolean; disabled?: boolean; onSelect: () => void }
+  | { label: string; hint?: string; detail?: string; danger?: boolean; checked?: boolean; disabled?: boolean; onSelect: () => void }
   | 'sep'
   | 'col'
   | { heading: string }
@@ -131,8 +131,15 @@ export function Menu(props: {
     if (side === 'bottom') s.top = `${p.y + p.h + 4}px`
     else s.bottom = `${window.innerHeight - p.y + 4}px`
     s['max-height'] = `${Math.max(120, Math.min(window.innerHeight * 0.7, side === 'top' ? above : below))}px`
-    if ((props.align ?? 'start') === 'start') s.left = `${Math.min(p.x, window.innerWidth - 240)}px`
-    else s.right = `${Math.max(8, window.innerWidth - p.x - p.w)}px`
+    if ((props.align ?? 'start') === 'start') {
+      const left = Math.min(p.x, window.innerWidth - 240)
+      s.left = `${left}px`
+      s['max-width'] = `${window.innerWidth - left - 8}px`
+    } else {
+      const right = Math.max(8, window.innerWidth - p.x - p.w)
+      s.right = `${right}px`
+      s['max-width'] = `${window.innerWidth - right - 8}px`
+    }
     return s
   }
   return (
@@ -160,7 +167,10 @@ export function Menu(props: {
           >
             <div class="flex min-h-0 gap-1">
               {columns().map((items, i) => (
-                <div class="min-w-36 flex-auto overflow-y-auto overscroll-contain" classList={{ 'border-l border-line pl-1': i > 0 }}>
+                <div
+                  class="min-w-28 flex-auto overflow-y-auto overscroll-contain sm:min-w-36"
+                  classList={{ 'border-l border-line pl-1': i > 0 }}
+                >
                   {items.map((it) =>
                     it === 'sep' ? (
                       <div class="my-1 h-px bg-line" />
@@ -177,7 +187,14 @@ export function Menu(props: {
                           it.onSelect()
                         }}
                       >
-                        <span class={it.hint ? 'shrink-0' : 'min-w-0 flex-1 truncate'}>{it.label}</span>
+                        <span class={it.hint ? 'shrink-0' : 'min-w-0 flex-1 truncate'}>
+                          {it.label}
+                          <Show when={it.detail}>
+                            <span class="mt-0.5 mb-px block max-w-64 text-[11.5px] leading-snug whitespace-normal text-faint">
+                              {it.detail}
+                            </span>
+                          </Show>
+                        </span>
                         <Show when={it.hint}>
                           <span class="min-w-0 flex-1 truncate text-right text-[11.5px] text-faint">{it.hint}</span>
                         </Show>

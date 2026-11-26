@@ -54,7 +54,7 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Choice {
     pub id: String,
@@ -65,6 +65,12 @@ pub struct Choice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub efforts: Option<Vec<Choice>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_auto_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]

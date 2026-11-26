@@ -56,10 +56,10 @@ export function NewThread(props: { project?: string }) {
     localStorage.getItem('corra_last_agent') === 'antigravity' ? 'antigravity' : 'claude',
   )
   const defaults = (a: AgentKind): AgentSettings =>
-    JSON.parse(localStorage.getItem(a === 'claude' ? 'corra_last_settings' : `corra_last_settings_${a}`) ?? 'null') ??
-    (a === 'claude'
-      ? { model: 'claude-opus-5-5', effort: 'high', permission_mode: 'default' }
-      : { effort: 'high', permission_mode: 'default' })
+    JSON.parse(localStorage.getItem(a === 'claude' ? 'corra_last_settings' : `corra_last_settings_${a}`) ?? 'null') ?? {
+      effort: 'high',
+      permission_mode: 'default',
+    }
   const [settings, setSettings] = createSignal<AgentSettings>(defaults(agent()))
   const setAgent = (a: AgentKind) => {
     setAgentRaw(a)
