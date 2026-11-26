@@ -253,7 +253,7 @@ function TurnDiff(props: { thread: string; turn: string; file?: string }) {
   return (
     <div>
       <div class="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px] text-mute">
-        <span class="min-w-0 flex-1">What turn {n()} changed</span>
+        <span class="min-w-0 flex-1">{state.views[props.thread]?.partial ? 'What this turn changed' : `What turn ${n()} changed`}</span>
         <button class="rounded-md px-1.5 py-0.5 text-ink hover:bg-ink/5" onClick={() => setPanel({ kind: 'diff' })}>
           Show uncommitted changes
         </button>

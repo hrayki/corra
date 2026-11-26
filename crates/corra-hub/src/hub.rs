@@ -105,7 +105,33 @@ pub struct NewProject {
     pub trusted: bool,
 }
 
+pub struct History {
+    pub events: Vec<StoredEvent>,
+    pub from_seq: i64,
+    pub earlier: bool,
+}
+
 impl Hub {
+    pub fn history_before(&self, thread: ThreadId, before: i64, turns: i64) -> Result<History> {
+        let starts = self.db.turn_starts_before(thread, before, turns + 1)?;
+        let (from, earlier) = match starts.get(turns as usize) {
+            Some(_) => (starts[turns as usize - 1], true),
+            None => (0, false),
+        };
+        let mut events = self.db.events_between(thread, from, before)?;
+        if earlier
+            && before == i64::MAX
+            && let Some(s) = self.db.last_of_kind_before(thread, "session", from)?
+        {
+            events.insert(0, s);
+        }
+        Ok(History {
+            events,
+            from_seq: from,
+            earlier,
+        })
+    }
+
     pub fn new(
         db: Db,
         providers: Providers,

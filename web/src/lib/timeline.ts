@@ -48,6 +48,7 @@ export type TurnView = {
 
 export type ThreadView = {
   lastSeq: number
+  partial?: boolean
   sessionId?: string
   model?: string
   slashCommands: string[]
@@ -98,6 +99,17 @@ function ensureTurn(v: ThreadView, id: string, ts: number): TurnView {
   return t
 }
 
+function turnOf(v: ThreadView, id: string, ts: number): TurnView | undefined {
+  return v.partial ? findTurn(v, id) : ensureTurn(v, id, ts)
+}
+
+export function buildView(events: StoredEvent[], partial: boolean): ThreadView {
+  const v = emptyView()
+  v.partial = partial
+  for (const e of events) apply(v, e)
+  return v
+}
+
 function findItem(t: TurnView, id: string): ItemView | undefined {
   for (let i = t.entries.length - 1; i >= 0; i--) {
     const e = t.entries[i]
@@ -128,7 +140,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
     }
     case 'item_started':
     case 'item_completed': {
-      const t = ensureTurn(v, e.turn, e.ts)
+      const t = turnOf(v, e.turn, e.ts)
+      if (!t) break
       const done = e.kind === 'item_completed'
       const existing = findItem(t, e.item.id)
       const { id, parent, ...rest } = e.item
@@ -149,7 +162,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
       break
     }
     case 'request': {
-      const t = ensureTurn(v, e.turn, e.ts)
+      const t = turnOf(v, e.turn, e.ts)
+      if (!t) break
       t.entries.push({ type: 'request', request: { id: e.id, request: e.request } })
       break
     }
@@ -164,7 +178,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
       break
     }
     case 'turn_completed': {
-      const t = ensureTurn(v, e.turn, e.ts)
+      const t = turnOf(v, e.turn, e.ts)
+      if (!t) break
       t.outcome = e.outcome
       t.usage = e.usage
       t.error = e.error
@@ -205,7 +220,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
 }
 
 export function applyDelta(v: ThreadView, turn: string, item: string, parent: string | undefined, d: Delta) {
-  const t = ensureTurn(v, turn, Date.now())
+  const t = turnOf(v, turn, Date.now())
+  if (!t) return
   let it = findItem(t, item)
   if (!it) {
     const body: ItemBody =

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { apply, emptyView, folds, type Entry } from '../src/lib/timeline.ts'
+import { apply, buildView, emptyView, folds, type Entry } from '../src/lib/timeline.ts'
 import type { StoredEvent } from '../src/proto/StoredEvent.ts'
 
 let seq = 0
@@ -73,4 +73,25 @@ test('a turn without one folds its work once, as before', () => {
   const f = folds(t.id, t.entries)
   assert.equal(f.length, 1)
   assert.deepEqual([ids(f[0].work), ids(f[0].rest)], [['a'], ['m']])
+})
+
+test('a thread opened on its last turns ignores steps of earlier turns until those load', () => {
+  const start = (turn: string, ts: number) => ev(ts, { kind: 'turn_started', turn, input: [{ type: 'text', text: turn }], settings: {} })
+  const done = (turn: string, ts: number) => ev(ts, { kind: 'turn_completed', turn, outcome: 'completed' })
+  const older = [start('t1', 1), tool('t1', 'agent', 2), done('t1', 3)]
+  const window = [start('t2', 4), answer('t2', 'a2', 5, 'two'), done('t2', 6), answer('t1', 'late', 7, 'the agent of turn 1 finished')]
+  const partial = buildView(window, true)
+  assert.deepEqual(
+    partial.turns.map((t) => t.id),
+    ['t2'],
+    'a step of an unloaded turn showed up as a turn of its own',
+  )
+  const whole = buildView([...older, ...window], false)
+  assert.deepEqual(
+    whole.turns.map((t) => [t.id, ids(t.entries)]),
+    [
+      ['t1', ['agent', 'late']],
+      ['t2', ['a2']],
+    ],
+  )
 })

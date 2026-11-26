@@ -6,7 +6,7 @@ import SquareTerminal from 'lucide-solid/icons/square-terminal'
 import Ellipsis from 'lucide-solid/icons/ellipsis'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
-import { call, closeThread, openThread, state } from '../lib/store'
+import { call, closeThread, loadEarlier, openThread, state } from '../lib/store'
 import { panel, setPanel } from '../lib/panel'
 import { tokens } from '../lib/format'
 import { Composer, UsageRing } from './Composer'
@@ -98,10 +98,35 @@ export function ThreadPane(props: { id: string }) {
     })
     onCleanup(() => ro.disconnect())
   }
+  const [fetching, setFetching] = createSignal(false)
+  const earlier = () => (state.earlier[props.id] ?? null) !== null
+  const nearTop = () => !!scroller && scroller.scrollTop < 800 && (!stick() || scroller.scrollHeight <= scroller.clientHeight + 1)
+  const more = async () => {
+    if (!earlier() || fetching()) return
+    setFetching(true)
+    const below = scroller.scrollHeight - scroller.scrollTop
+    try {
+      await loadEarlier(props.id)
+    } finally {
+      setFetching(false)
+      requestAnimationFrame(() => {
+        if (!scroller) return
+        if (!stick()) scroller.scrollTop = scroller.scrollHeight - below
+        if (nearTop()) void more()
+      })
+    }
+  }
   const onScroll = () => {
     if (fromBottom() < 8) setStick(true)
     else if (Date.now() - byHand < 400) setStick(false)
+    if (nearTop()) void more()
   }
+  createEffect(
+    on(
+      () => [props.id, earlier(), view()?.turns.length] as const,
+      () => requestAnimationFrame(() => nearTop() && void more()),
+    ),
+  )
   createEffect(
     on(
       () => props.id,
@@ -260,6 +285,17 @@ export function ThreadPane(props: { id: string }) {
             class="min-h-0 flex-1 overflow-y-auto"
           >
             <div ref={pin} class="mx-auto max-w-3xl px-4 pt-7 pb-2 sm:px-6">
+              <Show when={earlier()}>
+                <div class="pb-7 text-center">
+                  <button
+                    class="text-[12.5px] text-mute hover:text-ink disabled:pointer-events-none"
+                    disabled={fetching()}
+                    onClick={() => void more()}
+                  >
+                    {fetching() ? 'Loading earlier turns…' : 'Show earlier turns'}
+                  </button>
+                </div>
+              </Show>
               <For each={view()?.preface ?? []}>
                 {(e) => (
                   <div class="pb-4">

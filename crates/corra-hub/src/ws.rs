@@ -717,7 +717,11 @@ async fn handle_app_call(
             Value::Null
         }
         AppCall::Phone { action } => crate::phone::act(hub, action).await?,
-        AppCall::Subscribe { thread, after_seq } => {
+        AppCall::Subscribe {
+            thread,
+            after_seq,
+            tail,
+        } => {
             if subs.lock().unwrap().insert(thread) {
                 hub.watch(thread, true);
             }
@@ -726,6 +730,21 @@ async fn handle_app_call(
             if after > last {
                 send_json(tx, &HubToApp::Reset { thread });
                 after = 0;
+            }
+            if let Some(turns) = tail.filter(|n| *n > 0) {
+                let h = hub.history_before(thread, i64::MAX, turns as i64)?;
+                if h.earlier && after < h.from_seq - 1 {
+                    after = h.events.last().map(|e| e.seq).unwrap_or(after);
+                    send_json(
+                        tx,
+                        &HubToApp::Window {
+                            thread,
+                            events: h.events,
+                            from_seq: h.from_seq,
+                            earlier: true,
+                        },
+                    );
+                }
             }
             loop {
                 let events = hub.db.events_after(thread, after, 500)?;
@@ -771,6 +790,8 @@ async fn handle_app_call(
     })
 }
 
+const EARLIER_TURNS: i64 = 6;
+
 pub fn is_credential(name: &str) -> bool {
     !(name.starts_with("env.")
         || name.starts_with("machine_token.")
@@ -787,6 +808,10 @@ pub fn exec_call<'a>(
 
 async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
     Ok(match call {
+        AppCall::Earlier { thread, before_seq } => {
+            let h = hub.history_before(thread, before_seq, EARLIER_TURNS)?;
+            json!({ "events": h.events, "from_seq": h.from_seq, "earlier": h.earlier })
+        }
         AppCall::Subscribe { .. }
         | AppCall::Unsubscribe { .. }
         | AppCall::BrowserOpen { .. }
