@@ -335,6 +335,8 @@ struct State {
     background_tasks: HashMap<String, BackgroundTask>,
     wake_causes: Vec<String>,
     queued_turns: VecDeque<(String, Vec<InputPart>)>,
+    ran: std::collections::HashSet<String>,
+    interrupting: bool,
     tasks: Vec<(String, Todo)>,
     context_window: Option<u64>,
     deferred: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
@@ -373,6 +375,8 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
         background_tasks: HashMap::new(),
         wake_causes: vec![],
         queued_turns: VecDeque::new(),
+        ran: Default::default(),
+        interrupting: false,
         tasks: Vec::new(),
         context_window: None,
         deferred: None,
@@ -512,7 +516,8 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                         }
                     }
                     SessionCmd::Interrupt => {
-                        proc.control(json!({ "subtype": "interrupt", "cancel_queued": true })).await?;
+                        st.interrupting = true;
+                        proc.control(json!({ "subtype": "interrupt", "cancel_queued": false })).await?;
                         let ids: Vec<String> = st.permissions.keys().cloned().collect();
                         for id in ids {
                             resolve_permission(ctx, st, proc, &id, RequestResponse::Cancelled).await?;
@@ -800,6 +805,9 @@ async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Valu
             {
                 tracing::warn!("claude control error: {}", r["error"]);
             }
+            for id in r["response"]["cancelled"].as_array().into_iter().flatten() {
+                drop_queued(ctx, st, id.as_str().unwrap_or_default());
+            }
         }
         "control_cancel_request" => {
             if let Some(id) = msg["request_id"].as_str()
@@ -1046,9 +1054,26 @@ fn wake_cause(task: Option<&BackgroundTask>, summary: &str, status: &str) -> Str
     }
 }
 
+fn drop_queued(ctx: &SessionCtx, st: &mut State, id: &str) {
+    let Some(i) = st.queued_turns.iter().position(|(t, _)| t == id) else {
+        return;
+    };
+    st.queued_turns.remove(i);
+    emit(
+        ctx,
+        Event::Notice {
+            level: NoticeLevel::Warning,
+            text: "Claude Code dropped a message sent during this turn without reading it. Send it again if you still need it.".into(),
+        },
+    );
+}
+
 fn on_lifecycle(ctx: &SessionCtx, st: &mut State, msg: &Value) {
     let ours = st.user_turn && st.turn.as_deref() == msg["command_uuid"].as_str();
     if !ours {
+        if msg["state"] == "cancelled" {
+            drop_queued(ctx, st, msg["command_uuid"].as_str().unwrap_or_default());
+        }
         return;
     }
     match msg["state"].as_str().unwrap_or("") {
@@ -1478,11 +1503,23 @@ fn on_result(ctx: &SessionCtx, st: &mut State, msg: &Value) {
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    if st.knows_users && st.user_turn && st.turn.as_deref().is_some_and(|t| !users.contains(&t)) {
+    st.ran.extend(users.iter().map(|u| u.to_string()));
+    let stopped = st.interrupting
+        && msg["terminal_reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("aborted"));
+    let passed_over = st.queued_turns.iter().any(|(t, _)| st.ran.contains(t));
+    if st.knows_users
+        && st.user_turn
+        && !stopped
+        && !passed_over
+        && st.turn.as_deref().is_some_and(|t| !users.contains(&t))
+    {
         st.streams.clear();
         st.message_blocks.clear();
         return;
     }
+    st.interrupting = false;
     let Some(turn) = st.turn.take() else {
         return;
     };
@@ -1539,18 +1576,10 @@ fn on_result(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             resets_at,
         },
     );
-    let merged: Vec<String> = msg["user_message_uuids"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
     while st
         .queued_turns
         .front()
-        .is_some_and(|(t, _)| merged.contains(t))
+        .is_some_and(|(t, _)| st.ran.contains(t))
     {
         st.queued_turns.pop_front();
     }

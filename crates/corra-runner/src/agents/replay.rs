@@ -505,6 +505,21 @@ async fn a_message_sent_mid_turn_stays_where_it_was_sent() {
 }
 
 #[tokio::test]
+async fn a_message_a_stop_drops_never_holds_the_thread_open() {
+    let out = replay("stop_drops_message").await;
+    let turns = turns(&out);
+    assert_eq!(
+        turns.iter().map(|t| t.outcome).collect::<Vec<_>>(),
+        [Some(TurnOutcome::Interrupted), Some(TurnOutcome::Completed)],
+        "{turns:#?}"
+    );
+    assert!(turns[1].input.contains("Are you stuck?"), "{turns:#?}");
+    assert!(out.iter().any(
+        |o| matches!(o, AgentOut::Event(Event::Notice { text, .. }) if text.contains("dropped"))
+    ));
+}
+
+#[tokio::test]
 async fn a_message_sent_as_a_background_agent_finishes_keeps_its_answer() {
     let out = replay("message_at_wake").await;
     let turns = turns(&out);
