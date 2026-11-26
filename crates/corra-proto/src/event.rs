@@ -89,6 +89,9 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         background: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        agents: Option<Vec<String>>,
     },
     Compacted {
         #[serde(default, skip_serializing_if = "Option::is_none")]

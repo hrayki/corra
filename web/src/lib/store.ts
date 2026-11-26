@@ -22,6 +22,7 @@ export type ThreadX = Thread & { src: Src }
 export type LiveStatus = {
   context?: { used_tokens: number; window_tokens?: number }
   background?: number
+  agents?: string[]
   continue_at?: number
   cache?: { tokens: number; until: number; compact: boolean }
   rate_limit?: { rate_limit_info?: { unifiedWindows?: Record<string, { utilization: number; resetsAt: number; status: string }> } }

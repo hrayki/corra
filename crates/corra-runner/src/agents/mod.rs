@@ -15,6 +15,9 @@ pub enum SessionCmd {
         settings: Option<AgentSettings>,
     },
     Interrupt,
+    StopTask {
+        tool: String,
+    },
     Respond {
         request: String,
         response: RequestResponse,

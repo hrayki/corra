@@ -1310,6 +1310,32 @@ impl Hub {
         Ok(env)
     }
 
+    pub fn stop_task(&self, thread: ThreadId, tool: String) -> Result<()> {
+        let t = self
+            .db
+            .thread(thread)?
+            .ok_or_else(|| anyhow!("no such thread"))?;
+        let m = t.machine.ok_or_else(|| anyhow!("thread has no machine"))?;
+        self.send_runner(m, HubMsg::StopTask { thread, tool })
+    }
+
+    pub fn background_gone(&self, thread: ThreadId) {
+        let running = self
+            .live_status
+            .lock()
+            .unwrap()
+            .get(&thread)
+            .is_some_and(|s| {
+                s.get("agents")
+                    .and_then(|a| a.as_array())
+                    .is_some_and(|a| !a.is_empty())
+                    || s.get("background").and_then(|b| b.as_i64()).unwrap_or(0) > 0
+            });
+        if running {
+            self.set_live_status(thread, serde_json::json!({ "agents": [], "background": 0 }));
+        }
+    }
+
     pub fn interrupt(&self, thread: ThreadId) -> Result<()> {
         let t = self
             .db

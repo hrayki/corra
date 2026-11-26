@@ -7,6 +7,7 @@ export type Panel =
   | { kind: 'terminal' }
   | { kind: 'browser' }
   | { kind: 'phone' }
+  | { kind: 'agent'; tool: string }
 
 const [panel, setPanel] = createSignal<Panel | null>(null)
 const [panelWidthSignal, setPanelWidthSignal] = createSignal(Number(localStorage.getItem('corra_panel_w')) || 560)

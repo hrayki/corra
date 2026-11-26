@@ -137,6 +137,10 @@ pub enum HubMsg {
     Interrupt {
         thread: ThreadId,
     },
+    StopTask {
+        thread: ThreadId,
+        tool: String,
+    },
     Respond {
         thread: ThreadId,
         request: String,

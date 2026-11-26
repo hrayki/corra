@@ -103,6 +103,9 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         acks.push((t.thread, hub.db.runner_seq(t.thread)?));
     }
     for t in hub.db.threads_on_machine(machine)? {
+        if !live.contains(&t.id) {
+            hub.background_gone(t.id);
+        }
         if !live.contains(&t.id)
             && matches!(
                 t.status,
@@ -956,6 +959,10 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
         }
         AppCall::Interrupt { thread } => {
             hub.interrupt(thread)?;
+            Value::Null
+        }
+        AppCall::StopAgent { thread, tool } => {
+            hub.stop_task(thread, tool)?;
             Value::Null
         }
         AppCall::Respond {

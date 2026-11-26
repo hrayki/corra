@@ -18,6 +18,8 @@ import { clock, duration } from '../lib/format'
 import { openFile, setPanel } from '../lib/panel'
 import { Btn, Picture, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
+import { AgentRow } from './Agents'
+import { isAgentCall } from '../lib/agents'
 
 export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean; cwd?: string }) {
   const top = createMemo(() => props.turn.entries.filter((e) => !(e.type === 'item' && e.item.parent)))
@@ -197,8 +199,11 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
   )
 }
 
+const agentsIn = (es: Entry[]) => es.filter((e) => e.type === 'item' && isAgentCall(e.item))
+
 function Fold(props: { label: string; steps: number; entries: Entry[]; render: (e: Entry) => JSX.Element }) {
   const [open, setOpen] = createSignal(false)
+  const agents = createMemo(() => agentsIn(props.entries))
   return (
     <div>
       <button
@@ -220,6 +225,11 @@ function Fold(props: { label: string; steps: number; entries: Entry[]; render: (
       <Show when={open()}>
         <div class="mt-3 space-y-2.5 border-l border-line pl-4">
           <For each={props.entries}>{props.render}</For>
+        </div>
+      </Show>
+      <Show when={!open() && agents().length > 0}>
+        <div class="mt-3 space-y-3">
+          <For each={agents()}>{props.render}</For>
         </div>
       </Show>
     </div>
@@ -245,6 +255,11 @@ function Steps(props: { entries: Entry[]; current: boolean; render: (e: Entry) =
           <Show when={open()}>
             <div class="mt-3 space-y-2.5 border-l border-line pl-4">
               <For each={folded()}>{props.render}</For>
+            </div>
+          </Show>
+          <Show when={!open() && agentsIn(folded()).length > 0}>
+            <div class="mt-3 space-y-3">
+              <For each={agentsIn(folded())}>{props.render}</For>
             </div>
           </Show>
         </div>
@@ -412,7 +427,7 @@ export function EntryView(props: { thread: string; entry: Entry; kids?: Map<stri
   return (
     <Switch>
       <Match when={props.entry.type === 'item' && props.entry}>
-        {(e) => <ItemBlock item={(e() as { item: ItemView }).item} kids={props.kids} cwd={props.cwd} />}
+        {(e) => <ItemBlock thread={props.thread} item={(e() as { item: ItemView }).item} kids={props.kids} cwd={props.cwd} />}
       </Match>
       <Match when={props.entry.type === 'request' && props.entry}>
         {(e) => <RequestCard thread={props.thread} r={(e() as { request: RequestView }).request} cwd={props.cwd} />}
@@ -445,7 +460,7 @@ export function EntryView(props: { thread: string; entry: Entry; kids?: Map<stri
   )
 }
 
-function ItemBlock(props: { item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
+function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
   const b = () => props.item.body
   return (
     <Switch>
@@ -462,8 +477,11 @@ function ItemBlock(props: { item: ItemView; kids?: Map<string, ItemView[]>; cwd?
       <Match when={b().type === 'reasoning'}>
         <Reasoning item={props.item} />
       </Match>
+      <Match when={b().type === 'tool_call' && isAgentCall(props.item)}>
+        <AgentRow thread={props.thread} item={props.item} kids={props.kids} cwd={props.cwd} />
+      </Match>
       <Match when={b().type === 'tool_call'}>
-        <ToolRow item={props.item} kids={props.kids} cwd={props.cwd} />
+        <ToolRow thread={props.thread} item={props.item} kids={props.kids} cwd={props.cwd} />
       </Match>
       <Match when={b().type === 'todos'}>
         <Todos item={props.item} />
@@ -603,7 +621,7 @@ function Todos(props: { item: ItemView }) {
   )
 }
 
-function ToolRow(props: { item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
+function ToolRow(props: { thread?: string; item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
   const [open, setOpen] = createSignal(false)
   const body = () => props.item.body as Extract<ItemView['body'], { type: 'tool_call' }>
   const summary = createMemo(() => toolSummary(body().name, body().input, props.item.liveInput, props.cwd))
@@ -643,7 +661,7 @@ function ToolRow(props: { item: ItemView; kids?: Map<string, ItemView[]>; cwd?: 
           <ToolDetail name={body().name} input={body().input} output={body().output} />
           <Show when={kids().length > 0}>
             <div class="mt-2 space-y-2 border-l border-line pl-3">
-              <For each={kids()}>{(c) => <ItemBlock item={c} cwd={props.cwd} />}</For>
+              <For each={kids()}>{(c) => <ItemBlock thread={props.thread} item={c} kids={props.kids} cwd={props.cwd} />}</For>
             </div>
           </Show>
         </div>

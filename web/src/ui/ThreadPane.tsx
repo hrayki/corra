@@ -17,6 +17,7 @@ import type { InputPart } from '../proto/InputPart'
 import type { TurnView } from '../lib/timeline'
 import { IconBtn, Menu, StatusMark, statusWord, type MenuItem } from './bits'
 import { SidePanel } from './Panel'
+import { RunningTasks } from './Agents'
 import { threadActions } from './actions'
 import { refreshChanges, totals as changeTotals } from '../lib/changes'
 import { limitedNow } from '../lib/seen'
@@ -342,10 +343,17 @@ export function ThreadPane(props: { id: string }) {
                         : 'Starting a machine'}
                 </div>
               </Show>
-              <Show when={background()}>
-                <div class="flex items-center gap-2 pb-4 text-[13px] text-mute">
-                  <span class="size-2 rounded-full bg-faint pulse" />A background agent is still working
-                </div>
+              <Show
+                when={state.live[props.id]?.agents !== undefined}
+                fallback={
+                  <Show when={background()}>
+                    <div class="flex items-center gap-2 pb-4 text-[13px] text-mute">
+                      <span class="size-2 rounded-full bg-faint pulse" />A background agent is still working
+                    </div>
+                  </Show>
+                }
+              >
+                <RunningTasks thread={props.id} cwd={cwd()} />
               </Show>
             </div>
           </div>

@@ -351,6 +351,8 @@ struct State {
     api_error: Option<(String, String)>,
     limit_resets: Option<i64>,
     foreground_tasks: std::collections::HashSet<String>,
+    task_ids: HashMap<String, String>,
+    running_tasks: Vec<String>,
 }
 
 impl State {
@@ -387,6 +389,8 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
         api_error: None,
         limit_resets: None,
         foreground_tasks: Default::default(),
+        task_ids: HashMap::new(),
+        running_tasks: vec![],
     };
     let session = match (&ctx.spec.resume_session, &ctx.spec.fork_of) {
         (Some(id), _) => SessionRef::Resume(id.clone()),
@@ -436,6 +440,15 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
         init["sdkMcpServers"] = json!(["corra"]);
     }
     proc.control(init).await?;
+    emit(
+        ctx,
+        Event::Status {
+            context: None,
+            rate_limit: None,
+            background: Some(0),
+            agents: Some(vec![]),
+        },
+    );
     let (deferred_tx, mut deferred_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     st.deferred = Some(deferred_tx);
 
@@ -492,6 +505,11 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                             apply_settings(ctx, st, proc, s).await?;
                         }
                         send_user(ctx, st, proc, input).await?;
+                    }
+                    SessionCmd::StopTask { tool } => {
+                        if let Some(id) = st.task_ids.get(&tool) {
+                            proc.control(json!({ "subtype": "stop_task", "task_id": id })).await?;
+                        }
                     }
                     SessionCmd::Interrupt => {
                         proc.control(json!({ "subtype": "interrupt", "cancel_queued": true })).await?;
@@ -754,6 +772,7 @@ fn background(ctx: &SessionCtx, at: i64) {
             context: None,
             rate_limit: None,
             background: Some(at),
+            agents: None,
         },
     );
 }
@@ -810,6 +829,7 @@ async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Valu
                     context: None,
                     rate_limit: Some(msg.clone()),
                     background: None,
+                    agents: None,
                 },
             );
         }
@@ -862,6 +882,7 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                         }),
                         rate_limit: None,
                         background: None,
+                        agents: None,
                     },
                 );
             }
@@ -888,6 +909,12 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
         }
         "task_started" => {
             let id = msg["task_id"].as_str().unwrap_or_default().to_string();
+            if let Some(tool) = msg["tool_use_id"].as_str() {
+                st.task_ids.insert(tool.to_string(), id.clone());
+                if st.running_tasks.contains(&id) {
+                    running_agents(ctx, st);
+                }
+            }
             let owner = msg["parent_task_id"].as_str().and_then(|p| {
                 st.background_tasks
                     .values()
@@ -915,10 +942,19 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             }
         }
         "background_tasks_changed" => {
-            if msg["tasks"].as_array().is_some_and(|t| t.is_empty()) {
+            st.running_tasks = msg["tasks"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t["task_id"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if st.running_tasks.is_empty() {
                 st.background_said = None;
                 background(ctx, 0);
             }
+            running_agents(ctx, st);
         }
         "task_notification" => {
             let task = msg["task_id"].as_str().unwrap_or_default();
@@ -958,6 +994,28 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
         }
         _ => {}
     }
+}
+
+fn running_agents(ctx: &SessionCtx, st: &State) {
+    let tools = st
+        .running_tasks
+        .iter()
+        .filter_map(|id| {
+            st.task_ids
+                .iter()
+                .find(|(_, t)| *t == id)
+                .map(|(tool, _)| tool.clone())
+        })
+        .collect();
+    emit(
+        ctx,
+        Event::Status {
+            context: None,
+            rate_limit: None,
+            background: None,
+            agents: Some(tools),
+        },
+    );
 }
 
 fn wake_cause(task: Option<&BackgroundTask>, summary: &str, status: &str) -> String {
@@ -1079,6 +1137,7 @@ fn on_stream(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                             }),
                             rate_limit: None,
                             background: None,
+                            agents: None,
                         },
                     );
                 }
@@ -1117,6 +1176,7 @@ fn on_assistant(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                     }),
                     rate_limit: None,
                     background: None,
+                    agents: None,
                 },
             );
         }

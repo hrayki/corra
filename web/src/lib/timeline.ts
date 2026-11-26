@@ -16,6 +16,7 @@ export type ItemView = {
   body: ItemBody
   done: boolean
   at?: number
+  ended?: number
   live?: string
   liveInput?: string
 }
@@ -154,12 +155,13 @@ export function apply(v: ThreadView, e: StoredEvent) {
         existing.body = body
         existing.done = done
         if (done) {
+          existing.ended ??= e.ts
           existing.live = undefined
           existing.liveInput = undefined
         }
       } else {
         if (body.type === 'user_message' && id === `${t.id}:input` && t.input.length > 0) break
-        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done, at: e.ts } })
+        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done, at: e.ts, ended: done ? e.ts : undefined } })
       }
       break
     }
