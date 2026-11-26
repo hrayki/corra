@@ -57,6 +57,7 @@ export type ThreadView = {
   models?: Choice[]
   efforts?: Choice[]
   modes?: Choice[]
+  permissionMode?: string
   slashCommands: string[]
   preface: Entry[]
   turns: TurnView[]
@@ -145,6 +146,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
       if (e.models?.length) v.models = e.models
       if (e.efforts?.length) v.efforts = e.efforts
       if (e.modes?.length) v.modes = e.modes
+      v.permissionMode = e.permission_mode
       break
     case 'turn_started': {
       const t = ensureTurn(v, e.turn, e.ts)
