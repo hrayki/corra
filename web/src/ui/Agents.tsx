@@ -2,14 +2,16 @@ import { For, Show, createEffect, createMemo, createSignal, on } from 'solid-js'
 import Bot from 'lucide-solid/icons/bot'
 import SquareTerminal from 'lucide-solid/icons/square-terminal'
 import ChevronRight from 'lucide-solid/icons/chevron-right'
+import MessagesSquare from 'lucide-solid/icons/messages-square'
 import { call, state } from '../lib/store'
 import { setPanel } from '../lib/panel'
 import { duration } from '../lib/format'
-import { agentInfo, findCall, isAgentCall, kidsOf, type AgentInfo } from '../lib/agents'
+import { agentInfo, findCall, isAgentCall, kidsOf, startedThread, type AgentInfo } from '../lib/agents'
 import type { ItemView } from '../lib/timeline'
 import { toolSummary } from './tools'
 import { EntryView, Markdown } from './Timeline'
-import { Btn } from './bits'
+import { Btn, StatusMark, statusWord } from './bits'
+import { ago } from '../lib/format'
 
 const [now, setNow] = createSignal(Date.now())
 setInterval(() => setNow(Date.now()), 1000)
@@ -231,5 +233,39 @@ function CommandRow(props: { item: ItemView; cwd?: string }) {
         </span>
       </span>
     </div>
+  )
+}
+
+export function ThreadRow(props: { item: ItemView }) {
+  const id = () => startedThread(props.item) ?? ''
+  const t = () => state.threads[id()]
+  const asked = () => {
+    const b = props.item.body as Extract<ItemView['body'], { type: 'tool_call' }>
+    const i = b.input as Record<string, unknown> | null
+    return String(i?.prompt ?? '').split('\n')[0]
+  }
+  return (
+    <a href={`#/t/${id()}`} class="group flex w-full items-start gap-2.5 text-left" title="Open this thread">
+      <span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-ink/[0.05] text-mute">
+        <MessagesSquare size={13} />
+      </span>
+      <span class="min-w-0 flex-1 leading-[1.45]">
+        <span class="flex items-baseline gap-2 text-[13px]">
+          <span class="min-w-0 truncate font-medium text-ink">{t()?.title ?? asked()}</span>
+          <span class="shrink-0 text-[12px] text-faint">thread</span>
+        </span>
+        <span class="flex items-center gap-1.5 text-[12.5px] text-mute">
+          <Show when={t()} fallback={<span>Not on this hub any more</span>}>
+            {(th) => (
+              <>
+                <StatusMark status={th().status} />
+                <span class="num">{statusWord[th().status] || `Updated ${ago(th().updated_at)}`}</span>
+              </>
+            )}
+          </Show>
+        </span>
+      </span>
+      <ChevronRight size={14} class="mt-1 shrink-0 text-faint transition-colors duration-100 group-hover:text-ink" />
+    </a>
   )
 }

@@ -29,6 +29,7 @@ fn long_thread(hub: &HubRef) -> Thread {
         pinned_at: None,
         settled_at: None,
         hidden_at: None,
+        started_by: None,
     };
     hub.db.insert_thread(&t).unwrap();
     let add = |e: Event| hub.append(t.id, None, 1, e).unwrap();
@@ -144,4 +145,34 @@ async fn reading_a_thread_gives_its_last_turns_and_a_push_finds_the_newest() {
     assert!(
         matches!(&newest[..], [e] if matches!(&e.event, Event::TurnStarted { turn, .. } if turn == "t4"))
     );
+}
+
+#[tokio::test]
+async fn a_thread_an_agent_starts_knows_which_thread_started_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let parent = long_thread(&hub);
+    let project = hub.db.project(parent.project).unwrap().unwrap();
+    let started = corra_hub::manage::run(
+        &hub,
+        &parent,
+        "threads.start",
+        json!({ "project": project.name, "prompt": "check the logs", "follow": false }),
+    )
+    .await
+    .unwrap();
+    let child: ThreadId = started["thread"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        hub.db.thread(child).unwrap().unwrap().started_by,
+        Some(parent.id)
+    );
+    assert!(
+        hub.db
+            .threads()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == child && t.started_by == Some(parent.id)),
+        "the thread list lost which thread started it"
+    );
+    assert_eq!(hub.db.thread(parent.id).unwrap().unwrap().started_by, None);
 }

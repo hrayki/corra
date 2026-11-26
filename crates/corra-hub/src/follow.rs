@@ -116,6 +116,7 @@ mod tests {
             pinned_at: None,
             settled_at: None,
             hidden_at: None,
+            started_by: None,
         }
     }
 

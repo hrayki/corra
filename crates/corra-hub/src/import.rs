@@ -134,6 +134,7 @@ pub async fn session(
         pinned_at: None,
         settled_at: None,
         hidden_at: None,
+        started_by: None,
     };
     hub.db.upsert_imported_thread(&t)?;
     hub.db.insert_imported_events(t.id, &events)?;

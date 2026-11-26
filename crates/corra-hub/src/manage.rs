@@ -382,6 +382,9 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 },
             )
             .await?;
+            if let Some(id) = v["id"].as_str().and_then(|s| s.parse().ok()) {
+                hub.mark_started_by(id, caller.id);
+            }
             let follow = input["follow"].as_bool().unwrap_or(true);
             if let Some(id) = v["id"].as_str().filter(|_| follow) {
                 let _ = hub
