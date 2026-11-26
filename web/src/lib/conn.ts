@@ -2,7 +2,7 @@ import { createSignal, type Accessor } from 'solid-js'
 import type { AppCall } from '../proto/AppCall'
 import type { HubToApp } from '../proto/HubToApp'
 
-type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void }
+type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; text: string; sent: boolean; again: boolean }
 export type ConnState = 'connecting' | 'open' | 'closed'
 
 export class Conn {
@@ -10,7 +10,7 @@ export class Conn {
   private nextId = 1
   private pending = new Map<number, Pending>()
   private backoff = 400
-  private queue: string[] = []
+  private queue: number[] = []
   private stopped = false
   private fails = 0
   readonly state: Accessor<ConnState>
@@ -45,7 +45,12 @@ export class Conn {
       this.backoff = 400
       this.fails = 0
       this.setState('open')
-      for (const m of this.queue.splice(0)) ws.send(m)
+      for (const id of this.queue.splice(0)) {
+        const p = this.pending.get(id)
+        if (!p) continue
+        ws.send(p.text)
+        p.sent = true
+      }
       this.onOpen()
     }
     ws.onmessage = (ev) => {
@@ -63,8 +68,17 @@ export class Conn {
     ws.onclose = () => {
       if (this.ws !== ws) return
       this.setState('closed')
-      for (const p of this.pending.values()) p.reject(new Error('Lost the connection'))
-      this.pending.clear()
+      for (const [id, p] of [...this.pending]) {
+        if (!p.sent && !this.stopped) continue
+        if (p.again && !this.stopped) {
+          p.sent = false
+          this.queue.push(id)
+        } else {
+          this.pending.delete(id)
+          p.reject(new Error('Lost the connection'))
+        }
+      }
+      this.queue.sort((a, b) => a - b)
       if (!opened && ++this.fails === 3) this.onRefused?.()
       if (this.stopped) return
       setTimeout(() => this.open(), this.backoff)
@@ -80,14 +94,17 @@ export class Conn {
   call<T = unknown>(body: AppCall): Promise<T> {
     const id = this.nextId++
     const text = JSON.stringify({ id, ...body })
+    const again = body.op === 'send' && !!body.client_id
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
-      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(text)
-      else if (this.queue.length < 200) this.queue.push(text)
-      else {
-        this.pending.delete(id)
-        reject(new Error('Not connected'))
-      }
+      const p: Pending = { resolve: resolve as (v: unknown) => void, reject, text, sent: false, again }
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.pending.set(id, p)
+        this.ws.send(text)
+        p.sent = true
+      } else if (this.queue.length < 200) {
+        this.pending.set(id, p)
+        this.queue.push(id)
+      } else reject(new Error('Not connected'))
     })
   }
 }

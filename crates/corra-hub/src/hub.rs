@@ -41,7 +41,6 @@ pub struct Hub {
     pub live_status: Mutex<HashMap<ThreadId, serde_json::Map<String, Value>>>,
     pub hub_requests: Mutex<HashMap<String, oneshot::Sender<RequestResponse>>>,
     pub secret_requests: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
-    pub sent: Mutex<std::collections::VecDeque<String>>,
     answered: Mutex<HashMap<String, std::time::Instant>>,
     pub quiet_turns: Mutex<HashMap<ThreadId, std::time::Instant>>,
     context_seen: Mutex<HashMap<ThreadId, (u64, i64)>>,
@@ -158,7 +157,6 @@ impl Hub {
             live_status: Mutex::new(HashMap::new()),
             hub_requests: Mutex::new(HashMap::new()),
             secret_requests: Mutex::new(HashMap::new()),
-            sent: Mutex::new(std::collections::VecDeque::new()),
             answered: Mutex::new(HashMap::new()),
             quiet_turns: Mutex::new(HashMap::new()),
             context_seen: Mutex::new(HashMap::new()),
@@ -1159,15 +1157,7 @@ impl Hub {
     }
 
     pub fn first_send(&self, id: &str) -> bool {
-        let mut sent = self.sent.lock().unwrap();
-        if sent.iter().any(|x| x == id) {
-            return false;
-        }
-        if sent.len() >= 1000 {
-            sent.pop_front();
-        }
-        sent.push_back(id.to_string());
-        true
+        self.db.first_send(id, now_ms()).unwrap_or(true)
     }
 
     pub fn enqueue_front(&self, thread: ThreadId, input: Vec<InputPart>, id: Option<String>) {
@@ -1211,7 +1201,9 @@ impl Hub {
         settings: Option<AgentSettings>,
         queue: bool,
     ) -> Result<()> {
-        self.send_once(thread, input, settings, queue, None).await
+        self.send_once(thread, input, settings, queue, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn send_once(
@@ -1221,15 +1213,15 @@ impl Hub {
         settings: Option<AgentSettings>,
         queue: bool,
         client_id: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(id) = &client_id
             && !self.first_send(id)
         {
-            return Ok(());
+            return Ok(self.queued(thread).iter().any(|q| q.id == *id));
         }
         if queue && self.busy(thread) {
             self.enqueue(thread, input, client_id);
-            return Ok(());
+            return Ok(true);
         }
         let hub = self.clone();
         tokio::spawn(async move {
@@ -1237,9 +1229,15 @@ impl Hub {
                 hub.hub_notice(thread, NoticeLevel::Error, format!("Couldn't send: {e:#}"));
                 let _ = hub.set_thread_status(thread, ThreadStatus::Error);
                 hub.tell_follower_text(thread, &format!("couldn't take a message: {e:#}"));
+                if let Some(client_id) = client_id {
+                    hub.publish(Outbound::Thread(
+                        thread,
+                        HubToApp::NotSent { thread, client_id },
+                    ));
+                }
             }
         });
-        Ok(())
+        Ok(false)
     }
 
     async fn deliver(

@@ -44,7 +44,7 @@ type State = {
   live: Record<string, LiveStatus>
   queues: Record<string, Queued[]>
   usage: { at: number; limits: unknown } | null
-  pending: Record<string, { id: number; parts: InputPart[]; queued: boolean }[]>
+  pending: Record<string, { id: number; parts: InputPart[]; queued: boolean; client?: string }[]>
   restore: Record<string, string[]>
 }
 
@@ -95,10 +95,15 @@ function persistSnapshot(src: Src) {
 
 let pendingId = 0
 
-export function addPending(thread: string, parts: InputPart[], queued = false) {
+export function addPending(thread: string, parts: InputPart[], queued = false, client?: string) {
   const id = ++pendingId
-  setState('pending', thread, (l) => [...(l ?? []), { id, parts, queued }])
+  setState('pending', thread, (l) => [...(l ?? []), { id, parts, queued, client }])
   return id
+}
+
+export function settlePending(thread: string, id: number, queued: boolean) {
+  if (queued) dropPending(thread, id)
+  else setState('pending', thread, (l) => (l ?? []).map((p) => (p.id === id ? { ...p, queued: false } : p)))
 }
 
 export function dropPending(thread: string, id: number) {
@@ -351,6 +356,14 @@ function onMessage(src: Src, m: HubToApp) {
         setState('pending', m.thread, (l) => (l ?? []).filter((p) => !p.queued))
       }
       break
+    case 'not_sent': {
+      const p = state.pending[m.thread]?.find((x) => x.client === m.client_id)
+      if (p) {
+        dropPending(m.thread, p.id)
+        restoreDraft(m.thread, [textOf(p.parts)])
+      }
+      break
+    }
     case 'term_output':
       termListeners.get(m.term)?.data(b64bytes(m.data))
       break

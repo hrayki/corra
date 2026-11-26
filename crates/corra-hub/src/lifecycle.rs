@@ -42,6 +42,7 @@ pub fn spawn(hub: Arc<Hub>) {
             }
             if rounds % 20 == 1 {
                 orphans(&hub).await;
+                let _ = hub.db.forget_sends_before(now_ms() - 24 * 3600 * 1000);
             }
             rounds += 1;
         }
