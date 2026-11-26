@@ -91,7 +91,6 @@ const AGY_MODES: Choice[] = [
   { id: 'accept-edits', name: 'Accept edits' },
   { id: 'plan', name: 'Plan' },
 ]
-const BYPASS = MODES.find((m) => m.value === 'bypassPermissions')!
 const RANKS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 const remembered = (key: string): Choice[] | undefined => {
@@ -107,8 +106,6 @@ export function rememberChoices(v?: { model?: string; models?: Choice[]; modes?:
   if (v?.modes?.length) localStorage.setItem('corra_agy_modes', JSON.stringify(v.modes))
   if (v?.model) localStorage.setItem('corra_agy_default', v.model)
 }
-
-const hintOf = (s?: string) => (s ? s.replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase()) : '')
 
 export function fitEffort(effort: string | undefined, list: Choice[]): string | undefined {
   if (!effort || !list.length || list.some((c) => c.id === effort)) return effort
@@ -126,20 +123,17 @@ export function SettingsPickers(props: {
   models?: Choice[]
   efforts?: Choice[]
   modes?: Choice[]
+  mode?: string
 }) {
   const agy = () => props.agent === 'antigravity'
   const modes = () =>
     agy()
-      ? [
-          ...(props.modes ?? remembered('corra_agy_modes') ?? AGY_MODES).map((m) => ({ value: m.id, label: m.name, hint: hintOf(m.hint) })),
-          BYPASS,
-        ]
+      ? (props.modes ?? remembered('corra_agy_modes') ?? AGY_MODES).map((m) => ({ value: m.id, label: m.name, hint: m.hint ?? '' }))
       : MODES
-  const permission = () => {
+  const mode = () => {
     const p = props.settings.permission_mode ?? 'default'
-    return agy() && p === 'acceptEdits' ? 'accept-edits' : p
+    return modes().find((m) => m.value === p) ?? modes().find((m) => m.value === props.mode) ?? modes()[0]
   }
-  const mode = () => modes().find((m) => m.value === permission()) ?? modes()[0]
   const models = (): Choice[] =>
     agy() ? (props.models ?? remembered('corra_agy_models') ?? []) : MODELS.map((m) => ({ id: m, name: modelLabel(m) }))
   const model = () => props.settings.model ?? (agy() ? (props.model ?? localStorage.getItem('corra_agy_default') ?? undefined) : MODELS[0])
@@ -534,6 +528,9 @@ export function Composer(props: { thread: ThreadX }) {
     },
     get modes() {
       return state.views[props.thread.id]?.modes
+    },
+    get mode() {
+      return state.views[props.thread.id]?.permissionMode
     },
     onChange: (s) => void call({ op: 'update_thread', thread: props.thread.id, settings: s }).catch((e) => setError((e as Error).message)),
   })

@@ -434,6 +434,22 @@ impl Choices {
         }
     }
 
+    fn mode_is(&mut self, now: Option<String>) -> bool {
+        if let (Some(m), Some((_, _, cur))) = (&now, self.mode.as_mut()) {
+            *cur = m.clone();
+        }
+        let changed = now != self.mode_now;
+        self.mode_now = now;
+        changed
+    }
+
+    fn mode_current(&self) -> Option<String> {
+        match &self.mode {
+            Some((_, _, now)) if !now.is_empty() => Some(now.clone()),
+            _ => self.mode_now.clone(),
+        }
+    }
+
     fn mode_ids(&self) -> Vec<String> {
         match &self.mode {
             Some((_, c, _)) => c.iter().map(|c| c.id.clone()).collect(),
@@ -443,18 +459,7 @@ impl Choices {
 }
 
 fn mode_for(permission: &str, available: &[String]) -> Option<String> {
-    if available.iter().any(|a| a == permission) {
-        return Some(permission.to_string());
-    }
-    let want: &[&str] = match permission {
-        "acceptEdits" => &["accept-edits", "accept_edits", "acceptEdits", "auto_edit"],
-        "plan" => &["plan"],
-        "auto" => &["auto"],
-        _ => &["default"],
-    };
-    want.iter()
-        .find(|w| available.iter().any(|a| a == *w))
-        .map(|w| w.to_string())
+    available.iter().find(|a| *a == permission).cloned()
 }
 
 const RANKS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -896,7 +901,7 @@ fn announce(ctx: &SessionCtx, st: &State) {
             cwd: ctx.cwd.to_string_lossy().to_string(),
             tools: vec![],
             slash_commands: st.slash.clone(),
-            permission_mode: st.settings.permission_mode.clone(),
+            permission_mode: st.choices.mode_current(),
             models,
             efforts: pick(&st.choices.effort),
             modes: st.choices.mode_list(),
@@ -948,21 +953,20 @@ async fn apply_settings(
     }
     if let Some(p) = &s.permission_mode
         && (first || Some(p) != st.settings.permission_mode.as_ref())
+        && let Some(mode) = mode_for(p, &st.choices.mode_ids())
     {
-        if let Some(mode) = mode_for(p, &st.choices.mode_ids()) {
-            match st.choices.mode.clone() {
-                Some((id, _, now)) if now != mode => set_option(acp, st, &id, &mode).await?,
-                None if st.choices.mode_now.as_deref() != Some(&mode) => {
-                    let rid = acp
-                        .request(
-                            "session/set_mode",
-                            json!({ "sessionId": st.session, "modeId": mode }),
-                        )
-                        .await?;
-                    st.pending.insert(rid, json!({ "mode": mode }));
-                }
-                _ => {}
+        match st.choices.mode.clone() {
+            Some((id, _, now)) if now != mode => set_option(acp, st, &id, &mode).await?,
+            None if st.choices.mode_now.as_deref() != Some(&mode) => {
+                let rid = acp
+                    .request(
+                        "session/set_mode",
+                        json!({ "sessionId": st.session, "modeId": mode }),
+                    )
+                    .await?;
+                st.pending.insert(rid, json!({ "mode": mode }));
             }
+            _ => {}
         }
         changed.permission_mode = Some(p.clone());
     }
@@ -1315,7 +1319,7 @@ async fn on_message(ctx: &SessionCtx, acp: &mut Acp, st: &mut State, msg: Value)
     match (method.as_deref(), msg.get("id").filter(|v| !v.is_null())) {
         (Some("session/update"), _) => on_update(ctx, st, &msg["params"]["update"]),
         (Some("session/request_permission"), Some(id)) => {
-            on_permission(ctx, acp, st, id.clone(), &msg["params"]).await?
+            on_permission(ctx, st, id.clone(), &msg["params"])
         }
         (Some("elicitation/create"), Some(id)) => {
             acp.reply(id, json!({ "action": "decline" })).await?;
@@ -1399,7 +1403,7 @@ async fn on_message(ctx: &SessionCtx, acp: &mut Acp, st: &mut State, msg: Value)
                 } else {
                     st.choices.read(&msg["result"]);
                     if let Some(m) = what["mode"].as_str() {
-                        st.choices.mode_now = Some(m.to_string());
+                        st.choices.mode_is(Some(m.to_string()));
                     }
                 }
             }
@@ -1568,7 +1572,12 @@ fn on_update(ctx: &SessionCtx, st: &mut State, u: &Value) {
             announce(ctx, st);
         }
         "current_mode_update" => {
-            st.choices.mode_now = u["currentModeId"].as_str().map(String::from);
+            if st
+                .choices
+                .mode_is(u["currentModeId"].as_str().map(String::from))
+            {
+                announce(ctx, st);
+            }
         }
         "config_option_update" | "config_options_update" => {
             st.choices.read(u);
@@ -1608,39 +1617,13 @@ fn complete_tool(ctx: &SessionCtx, st: &mut State, turn: &str, id: &str, failed:
     );
 }
 
-async fn on_permission(
-    ctx: &SessionCtx,
-    acp: &mut Acp,
-    st: &mut State,
-    rpc: Value,
-    p: &Value,
-) -> Result<()> {
+fn on_permission(ctx: &SessionCtx, st: &mut State, rpc: Value, p: &Value) {
     close_text(ctx, st);
     let call = &p["toolCall"];
     let tool_call = call["toolCallId"].as_str().unwrap_or_default().to_string();
     let options: Vec<Value> = p["options"].as_array().cloned().unwrap_or_default();
     let question = tool_call.starts_with("interaction_");
     let kind = call["kind"].as_str().unwrap_or("");
-    let mode = st.settings.permission_mode.clone().unwrap_or_default();
-    let auto = !question
-        && (mode == "bypassPermissions"
-            || (matches!(mode.as_str(), "acceptEdits" | "accept-edits")
-                && matches!(kind, "edit" | "delete" | "move" | "read" | "search")));
-    if auto {
-        let id = options
-            .iter()
-            .find(|o| o["kind"] == "allow_once")
-            .or_else(|| options.iter().find(|o| o["kind"] == "allow_always"))
-            .and_then(|o| o["optionId"].as_str())
-            .unwrap_or("allow_once")
-            .to_string();
-        return acp
-            .reply(
-                &rpc,
-                json!({ "outcome": { "outcome": "selected", "optionId": id } }),
-            )
-            .await;
-    }
     let turn = current(ctx, st);
     st.wake_until = None;
     let id = format!("acp-{}", uuid::Uuid::now_v7());
@@ -1684,7 +1667,6 @@ async fn on_permission(
     );
     emit(ctx, Event::Request { id, turn, request });
     let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Waiting));
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1757,14 +1739,8 @@ mod tests {
             mode_for("accept-edits", &c.mode_ids()).as_deref(),
             Some("accept-edits")
         );
-        assert_eq!(
-            mode_for("acceptEdits", &c.mode_ids()).as_deref(),
-            Some("accept-edits")
-        );
-        assert_eq!(
-            mode_for("bypassPermissions", &c.mode_ids()).as_deref(),
-            Some("default")
-        );
+        assert_eq!(mode_for("acceptEdits", &c.mode_ids()), None);
+        assert_eq!(mode_for("bypassPermissions", &c.mode_ids()), None);
     }
 
     struct Agy {
@@ -2044,6 +2020,83 @@ mod tests {
         );
         agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
         drain(&mut rx, ended).await;
+    }
+
+    #[tokio::test]
+    async fn every_request_goes_to_the_app_and_a_mode_agy_lacks_leaves_it_as_it_is() {
+        for (stored, set) in [
+            ("bypassPermissions", None),
+            ("accept-edits", Some("accept-edits")),
+        ] {
+            let (mut agy, mut rx, _cmd) = start(AgentSettings {
+                permission_mode: Some(stored.into()),
+                ..Default::default()
+            });
+            let init = agy.expect("initialize").await;
+            agy.answer(&init, json!({ "protocolVersion": 1 })).await;
+            let auth = agy.expect("authenticate").await;
+            agy.answer(&auth, json!({})).await;
+            let new = agy.expect("session/new").await;
+            agy.answer(&new, real_session()).await;
+            let next = agy.next().await;
+            let p = match set {
+                Some(mode) => {
+                    assert_eq!(
+                        (
+                            next["method"].as_str(),
+                            next["params"]["configId"].as_str(),
+                            next["params"]["value"].as_str()
+                        ),
+                        (Some("session/set_config_option"), Some("mode"), Some(mode))
+                    );
+                    agy.answer(&next, json!({})).await;
+                    agy.expect("session/prompt").await
+                }
+                None => {
+                    assert_eq!(
+                        next["method"], "session/prompt",
+                        "agy was asked to change its mode"
+                    );
+                    next
+                }
+            };
+            for (n, kind) in ["edit", "read", "execute"].into_iter().enumerate() {
+                agy.send(json!({ "jsonrpc": "2.0", "id": 80 + n, "method": "session/request_permission", "params": {
+                    "sessionId": "s",
+                    "toolCall": { "toolCallId": format!("c{n}"), "title": kind, "kind": kind },
+                    "options": [{ "optionId": "a1", "name": "Allow", "kind": "allow_once" }, { "optionId": "r1", "name": "Deny", "kind": "reject_once" }]
+                } })).await;
+            }
+            let out = drain(&mut rx, |o| {
+                matches!(o, AgentOut::Event(Event::Request { request: AgentRequest::ToolApproval { tool, .. }, .. }) if tool == "acp:execute")
+            })
+            .await;
+            let asked: Vec<&str> = out
+                .iter()
+                .filter_map(|o| match o {
+                    AgentOut::Event(Event::Request {
+                        request: AgentRequest::ToolApproval { tool, .. },
+                        ..
+                    }) => Some(tool.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                asked,
+                ["acp:edit", "acp:read", "acp:execute"],
+                "in {stored}"
+            );
+            let shown = out.iter().find_map(|o| match o {
+                AgentOut::Event(Event::Session {
+                    permission_mode, ..
+                }) => Some(permission_mode.clone()),
+                _ => None,
+            });
+            if set.is_none() {
+                assert_eq!(shown, Some(Some("default".to_string())));
+            }
+            agy.answer(&p, json!({ "stopReason": "cancelled" })).await;
+        }
     }
 
     #[tokio::test]
