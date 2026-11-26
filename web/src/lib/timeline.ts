@@ -135,8 +135,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
       v.sessionId = e.session_id
       v.model = e.model
       v.slashCommands = e.slash_commands
-      if (e.models.length) v.models = e.models
-      if (e.efforts.length) v.efforts = e.efforts
+      if (e.models?.length) v.models = e.models
+      if (e.efforts?.length) v.efforts = e.efforts
       break
     case 'turn_started': {
       const t = ensureTurn(v, e.turn, e.ts)

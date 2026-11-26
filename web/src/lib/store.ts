@@ -458,9 +458,18 @@ export async function openThread(id: string) {
     const cached = await cache.events(id)
     const from = (await cache.get<number | null>(`earlier:${id}`)) ?? null
     if (cached?.length && !raw.has(id)) {
-      raw.set(id, cached)
-      setState('views', id, buildView(cached, from !== null))
-      setState('earlier', id, from)
+      let v: ThreadView | undefined
+      try {
+        v = buildView(cached, from !== null)
+      } catch {
+        void cache.setEvents(id, [])
+        void cache.set(`earlier:${id}`, null)
+      }
+      if (v) {
+        raw.set(id, cached)
+        setState('views', id, v)
+        setState('earlier', id, from)
+      }
     }
   }
   resubscribe(id)
