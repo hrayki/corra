@@ -56,6 +56,7 @@ export type ThreadView = {
   model?: string
   models?: Choice[]
   efforts?: Choice[]
+  modes?: Choice[]
   slashCommands: string[]
   preface: Entry[]
   turns: TurnView[]
@@ -65,6 +66,8 @@ export const isWork = (e: Entry) =>
   (e.type === 'item' && (e.item.body.type === 'tool_call' || e.item.body.type === 'reasoning' || e.item.body.type === 'todos')) ||
   (e.type === 'request' && !!e.request.response)
 
+const isThought = (e: Entry) => e.type === 'item' && e.item.body.type === 'reasoning'
+
 export type Fold = { lead?: Entry; work: Entry[]; rest: Entry[] }
 
 export function folds(turn: string, entries: Entry[]): Fold[] {
@@ -72,11 +75,15 @@ export function folds(turn: string, entries: Entry[]): Fold[] {
   let lead: Entry | undefined
   let cur: Entry[] = []
   const close = () => {
+    let end = cur.length
+    while (end > 0 && isThought(cur[end - 1])) end--
+    const body = end > 0 ? cur.slice(0, end) : []
+    const trailing = cur.slice(end)
     let last = -1
-    cur.forEach((e, i) => {
+    body.forEach((e, i) => {
       if (isWork(e)) last = i
     })
-    out.push({ lead, work: cur.slice(0, last + 1), rest: cur.slice(last + 1) })
+    out.push({ lead, work: [...body.slice(0, last + 1), ...trailing], rest: body.slice(last + 1) })
   }
   for (const e of entries)
     if (e.type === 'item' && e.item.body.type === 'user_message' && e.item.id !== `${turn}:input`) {
@@ -137,6 +144,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
       v.slashCommands = e.slash_commands
       if (e.models?.length) v.models = e.models
       if (e.efforts?.length) v.efforts = e.efforts
+      if (e.modes?.length) v.modes = e.modes
       break
     case 'turn_started': {
       const t = ensureTurn(v, e.turn, e.ts)

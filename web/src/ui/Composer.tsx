@@ -86,13 +86,14 @@ export function useInput(key?: () => string) {
 const pill =
   'inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-lg border border-line px-2 text-[12.5px] text-mute hover:border-faint hover:text-ink max-md:h-9'
 
-const AGY_MODES = MODES.filter((m) => m.value !== 'auto')
-const AGY_EFFORTS: Choice[] = [
-  { id: 'low', name: 'Low' },
-  { id: 'medium', name: 'Medium' },
-  { id: 'high', name: 'High' },
-  { id: 'xhigh', name: 'Extra' },
+const AGY_MODES: Choice[] = [
+  { id: 'default', name: 'Default' },
+  { id: 'accept-edits', name: 'Accept edits' },
+  { id: 'plan', name: 'Plan' },
 ]
+const BYPASS = MODES.find((m) => m.value === 'bypassPermissions')!
+const RANKS = ['low', 'medium', 'high', 'xhigh', 'max']
+
 const remembered = (key: string): Choice[] | undefined => {
   try {
     return JSON.parse(localStorage.getItem(key) ?? 'null') ?? undefined
@@ -101,32 +102,63 @@ const remembered = (key: string): Choice[] | undefined => {
   }
 }
 
-export function rememberChoices(models?: Choice[], efforts?: Choice[]) {
-  if (models?.length) localStorage.setItem('corra_agy_models', JSON.stringify(models))
-  if (efforts?.length) localStorage.setItem('corra_agy_efforts', JSON.stringify(efforts))
+export function rememberChoices(v?: { model?: string; models?: Choice[]; modes?: Choice[] }) {
+  if (v?.models?.length) localStorage.setItem('corra_agy_models', JSON.stringify(v.models))
+  if (v?.modes?.length) localStorage.setItem('corra_agy_modes', JSON.stringify(v.modes))
+  if (v?.model) localStorage.setItem('corra_agy_default', v.model)
+}
+
+const hintOf = (s?: string) => (s ? s.replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase()) : '')
+
+export function fitEffort(effort: string | undefined, list: Choice[]): string | undefined {
+  if (!effort || !list.length || list.some((c) => c.id === effort)) return effort
+  const want = RANKS.indexOf(effort)
+  const ranked = list.map((c) => ({ c, r: RANKS.indexOf(c.id) })).filter((x) => x.r >= 0)
+  const below = ranked.filter((x) => x.r <= want).sort((a, b) => b.r - a.r)[0]
+  return (below ?? ranked.sort((a, b) => a.r - b.r)[0])?.c.id ?? list[0].id
 }
 
 export function SettingsPickers(props: {
   settings: AgentSettings
   onChange: (s: AgentSettings) => void
   agent?: AgentKind
+  model?: string
   models?: Choice[]
   efforts?: Choice[]
+  modes?: Choice[]
 }) {
   const agy = () => props.agent === 'antigravity'
-  const modes = () => (agy() ? AGY_MODES : MODES)
-  const mode = () => modes().find((m) => m.value === (props.settings.permission_mode ?? 'default')) ?? modes()[0]
+  const modes = () =>
+    agy()
+      ? [
+          ...(props.modes ?? remembered('corra_agy_modes') ?? AGY_MODES).map((m) => ({ value: m.id, label: m.name, hint: hintOf(m.hint) })),
+          BYPASS,
+        ]
+      : MODES
+  const permission = () => {
+    const p = props.settings.permission_mode ?? 'default'
+    return agy() && p === 'acceptEdits' ? 'accept-edits' : p
+  }
+  const mode = () => modes().find((m) => m.value === permission()) ?? modes()[0]
   const models = (): Choice[] =>
     agy() ? (props.models ?? remembered('corra_agy_models') ?? []) : MODELS.map((m) => ({ id: m, name: modelLabel(m) }))
-  const efforts = (): Choice[] =>
-    agy() ? (props.efforts ?? remembered('corra_agy_efforts') ?? AGY_EFFORTS) : EFFORTS.map((e) => ({ id: e, name: effortLabel(e) }))
-  const model = () => props.settings.model ?? (agy() ? undefined : MODELS[0])
+  const model = () => props.settings.model ?? (agy() ? (props.model ?? localStorage.getItem('corra_agy_default') ?? undefined) : MODELS[0])
+  const efforts = (): Choice[] => {
+    if (!agy()) return EFFORTS.map((e) => ({ id: e, name: effortLabel(e) }))
+    const m = models().find((c) => c.id === model())
+    return m?.efforts ?? (m && m.id === props.model ? props.efforts : undefined) ?? []
+  }
   const modelName = () => {
     const m = model()
     return m ? (models().find((c) => c.id === m)?.name ?? modelLabel(m)) : 'Default model'
   }
   const effort = () => props.settings.effort ?? 'high'
-  const effortName = () => efforts().find((c) => c.id === effort())?.name ?? effortLabel(effort())
+  const effortName = () => efforts().find((c) => c.id === effort())?.name ?? (agy() ? '' : effortLabel(effort()))
+  const pickModel = (id: string) => {
+    const list = models().find((c) => c.id === id)?.efforts ?? []
+    const e = fitEffort(effort(), list)
+    props.onChange(e && e !== effort() ? { model: id, effort: e } : { model: id })
+  }
   return {
     mode: (
       <Menu
@@ -156,19 +188,25 @@ export function SettingsPickers(props: {
             : models().map((m) => ({
                 label: m.name,
                 checked: model() === m.id,
-                onSelect: () => props.onChange({ model: m.id }),
+                onSelect: () => pickModel(m.id),
               }))),
-          'col' as const,
-          { heading: 'Effort' },
-          ...efforts().map((e) => ({
-            label: e.name,
-            checked: effort() === e.id,
-            onSelect: () => props.onChange({ effort: e.id }),
-          })),
+          ...(efforts().length
+            ? [
+                'col' as const,
+                { heading: 'Effort' },
+                ...efforts().map((e) => ({
+                  label: e.name,
+                  checked: effort() === e.id,
+                  onSelect: () => props.onChange({ effort: e.id }),
+                })),
+              ]
+            : []),
         ]}
       >
         <span>{modelName()}</span>
-        <span class="text-faint @max-xl:hidden">{effortName()}</span>
+        <Show when={effortName()}>
+          <span class="text-faint @max-xl:hidden">{effortName()}</span>
+        </Show>
       </Menu>
     ),
   }
@@ -476,7 +514,7 @@ export function Composer(props: { thread: ThreadX }) {
   }
   createEffect(() => {
     const v = state.views[props.thread.id]
-    if (props.thread.agent === 'antigravity') rememberChoices(v?.models, v?.efforts)
+    if (props.thread.agent === 'antigravity') rememberChoices(v)
   })
   const pickers = SettingsPickers({
     get settings() {
@@ -485,11 +523,17 @@ export function Composer(props: { thread: ThreadX }) {
     get agent() {
       return props.thread.agent
     },
+    get model() {
+      return state.views[props.thread.id]?.model
+    },
     get models() {
       return state.views[props.thread.id]?.models
     },
     get efforts() {
       return state.views[props.thread.id]?.efforts
+    },
+    get modes() {
+      return state.views[props.thread.id]?.modes
     },
     onChange: (s) => void call({ op: 'update_thread', thread: props.thread.id, settings: s }).catch((e) => setError((e as Error).message)),
   })

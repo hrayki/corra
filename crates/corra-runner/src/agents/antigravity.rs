@@ -311,6 +311,8 @@ struct Choices {
     mode: Option<(String, Vec<Choice>, String)>,
     modes: Vec<Choice>,
     mode_now: Option<String>,
+    variants: Vec<Choice>,
+    effort_names: HashMap<String, String>,
 }
 
 fn flat(options: &Value) -> Vec<Choice> {
@@ -322,6 +324,8 @@ fn flat(options: &Value) -> Vec<Choice> {
             out.push(Choice {
                 id: v.to_string(),
                 name: o["name"].as_str().unwrap_or(v).to_string(),
+                hint: o["description"].as_str().map(String::from),
+                efforts: None,
             });
         }
     }
@@ -345,6 +349,9 @@ impl Choices {
                     || id.contains("thought")
                     || id.contains("thinking")
                 {
+                    for c in &entry.1 {
+                        self.effort_names.insert(c.id.clone(), c.name.clone());
+                    }
                     self.effort = Some(entry);
                 } else if cat == "mode" {
                     self.mode = Some(entry);
@@ -358,10 +365,72 @@ impl Choices {
                     Some(Choice {
                         id: m["id"].as_str()?.to_string(),
                         name: m["name"].as_str().unwrap_or_default().to_string(),
+                        hint: m["description"].as_str().map(String::from),
+                        efforts: None,
                     })
                 })
                 .collect();
             self.mode_now = result["modes"]["currentModeId"].as_str().map(String::from);
+        }
+        if let Some(list) = result["models"]["availableModels"].as_array() {
+            self.variants = list
+                .iter()
+                .filter_map(|m| {
+                    Some(Choice {
+                        id: m["modelId"].as_str()?.to_string(),
+                        name: m["name"].as_str().unwrap_or_default().to_string(),
+                        hint: None,
+                        efforts: None,
+                    })
+                })
+                .collect();
+        }
+    }
+
+    fn efforts_of(&self, model: &str) -> Vec<Choice> {
+        if let (Some((_, _, now)), Some((_, list, _))) = (&self.model, &self.effort)
+            && now == model
+        {
+            return list.clone();
+        }
+        let Some(name) = self
+            .model
+            .as_ref()
+            .and_then(|(_, l, _)| l.iter().find(|c| c.id == model))
+            .map(|c| c.name.clone())
+        else {
+            return vec![];
+        };
+        let mut out: Vec<Choice> = self
+            .variants
+            .iter()
+            .filter_map(|v| {
+                let id = v.id.strip_prefix(model)?.strip_prefix('-')?;
+                let label = v
+                    .name
+                    .strip_prefix(name.as_str())?
+                    .strip_prefix(" (")?
+                    .strip_suffix(')')?;
+                Some(Choice {
+                    id: id.to_string(),
+                    name: self
+                        .effort_names
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| label.to_string()),
+                    hint: None,
+                    efforts: None,
+                })
+            })
+            .collect();
+        out.sort_by_key(|c| rank(&c.id).unwrap_or(usize::MAX));
+        out
+    }
+
+    fn mode_list(&self) -> Vec<Choice> {
+        match &self.mode {
+            Some((_, list, _)) => list.clone(),
+            None => self.modes.clone(),
         }
     }
 
@@ -374,6 +443,9 @@ impl Choices {
 }
 
 fn mode_for(permission: &str, available: &[String]) -> Option<String> {
+    if available.iter().any(|a| a == permission) {
+        return Some(permission.to_string());
+    }
     let want: &[&str] = match permission {
         "acceptEdits" => &["accept-edits", "accept_edits", "acceptEdits", "auto_edit"],
         "plan" => &["plan"],
@@ -385,22 +457,30 @@ fn mode_for(permission: &str, available: &[String]) -> Option<String> {
         .map(|w| w.to_string())
 }
 
+const RANKS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn rank(id: &str) -> Option<usize> {
+    RANKS.iter().position(|r| r.eq_ignore_ascii_case(id))
+}
+
 fn effort_for(effort: &str, available: &[Choice]) -> Option<String> {
-    let find = |w: &str| {
-        available
-            .iter()
-            .find(|c| c.id.eq_ignore_ascii_case(w) || c.name.eq_ignore_ascii_case(w))
-            .map(|c| c.id.clone())
-    };
-    match effort {
-        "xhigh" => find("xhigh")
-            .or_else(|| find("extra"))
-            .or_else(|| find("extra high")),
-        "max" => find("max")
-            .or_else(|| find("xhigh"))
-            .or_else(|| find("extra")),
-        other => find(other),
+    if let Some(c) = available
+        .iter()
+        .find(|c| c.id.eq_ignore_ascii_case(effort) || c.name.eq_ignore_ascii_case(effort))
+    {
+        return Some(c.id.clone());
     }
+    let want = rank(effort)?;
+    let ranked: Vec<(usize, &Choice)> = available
+        .iter()
+        .filter_map(|c| Some((rank(&c.id)?, c)))
+        .collect();
+    ranked
+        .iter()
+        .filter(|(r, _)| *r <= want)
+        .max_by_key(|(r, _)| *r)
+        .or_else(|| ranked.iter().min_by_key(|(r, _)| *r))
+        .map(|(_, c)| c.id.clone())
 }
 
 struct Tool {
@@ -793,6 +873,16 @@ fn announce(ctx: &SessionCtx, st: &State) {
     let pick = |c: &Option<(String, Vec<Choice>, String)>| {
         c.as_ref().map(|(_, l, _)| l.clone()).unwrap_or_default()
     };
+    let models = pick(&st.choices.model)
+        .into_iter()
+        .map(|c| {
+            let efforts = st.choices.efforts_of(&c.id);
+            Choice {
+                efforts: (!efforts.is_empty()).then_some(efforts),
+                ..c
+            }
+        })
+        .collect();
     emit(
         ctx,
         Event::Session {
@@ -807,8 +897,9 @@ fn announce(ctx: &SessionCtx, st: &State) {
             tools: vec![],
             slash_commands: st.slash.clone(),
             permission_mode: st.settings.permission_mode.clone(),
-            models: pick(&st.choices.model),
+            models,
             efforts: pick(&st.choices.effort),
+            modes: st.choices.mode_list(),
         },
     );
 }
@@ -832,6 +923,7 @@ async fn apply_settings(
     first: bool,
 ) -> Result<()> {
     let mut changed = AgentSettings::default();
+    let mut switched = None;
     if let (Some(m), Some((id, list, now))) = (&s.model, st.choices.model.clone())
         && (first || Some(m) != st.settings.model.as_ref())
         && m != &now
@@ -839,14 +931,20 @@ async fn apply_settings(
     {
         set_option(acp, st, &id, m).await?;
         changed.model = Some(m.clone());
+        switched = Some(m.clone());
     }
-    if let (Some(e), Some((id, list, now))) = (&s.effort, st.choices.effort.clone())
-        && (first || Some(e) != st.settings.effort.as_ref())
-        && let Some(v) = effort_for(e, &list)
-        && v != now
-    {
-        set_option(acp, st, &id, &v).await?;
-        changed.effort = Some(e.clone());
+    if let (Some(e), Some((id, list, now))) = (&s.effort, st.choices.effort.clone()) {
+        let list = match &switched {
+            Some(m) => st.choices.efforts_of(m),
+            None => list,
+        };
+        if (first || switched.is_some() || Some(e) != st.settings.effort.as_ref())
+            && let Some(v) = effort_for(e, &list)
+            && (switched.is_some() || v != now)
+        {
+            set_option(acp, st, &id, &v).await?;
+            changed.effort = Some(e.clone());
+        }
     }
     if let Some(p) = &s.permission_mode
         && (first || Some(p) != st.settings.permission_mode.as_ref())
@@ -957,35 +1055,38 @@ fn current(ctx: &SessionCtx, st: &mut State) -> String {
 }
 
 fn close_text(ctx: &SessionCtx, st: &mut State) {
+    close_slot(ctx, st, false);
+    close_slot(ctx, st, true);
+}
+
+fn close_slot(ctx: &SessionCtx, st: &mut State, thought: bool) {
     let Some(turn) = st.turn.clone().or_else(|| st.last_turn.clone()) else {
         return;
     };
-    if let Some((id, text)) = st.text.take() {
-        emit(
-            ctx,
-            Event::ItemCompleted {
-                turn: turn.clone(),
-                item: Item {
-                    id,
-                    parent: None,
-                    body: ItemBody::AgentMessage { text },
-                },
+    let slot = if thought {
+        &mut st.thought
+    } else {
+        &mut st.text
+    };
+    let Some((id, text)) = slot.take() else {
+        return;
+    };
+    let body = if thought {
+        ItemBody::Reasoning { text }
+    } else {
+        ItemBody::AgentMessage { text }
+    };
+    emit(
+        ctx,
+        Event::ItemCompleted {
+            turn,
+            item: Item {
+                id,
+                parent: None,
+                body,
             },
-        );
-    }
-    if let Some((id, text)) = st.thought.take() {
-        emit(
-            ctx,
-            Event::ItemCompleted {
-                turn,
-                item: Item {
-                    id,
-                    parent: None,
-                    body: ItemBody::Reasoning { text },
-                },
-            },
-        );
-    }
+        },
+    );
 }
 
 fn finish_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Option<String>) {
@@ -1315,6 +1416,7 @@ fn on_update(ctx: &SessionCtx, st: &mut State, u: &Value) {
                 return;
             };
             let thought = u["sessionUpdate"] == "agent_thought_chunk";
+            close_slot(ctx, st, !thought);
             let turn = current(ctx, st);
             let slot = if thought {
                 &mut st.thought
@@ -1522,7 +1624,7 @@ async fn on_permission(
     let mode = st.settings.permission_mode.clone().unwrap_or_default();
     let auto = !question
         && (mode == "bypassPermissions"
-            || (mode == "acceptEdits"
+            || (matches!(mode.as_str(), "acceptEdits" | "accept-edits")
                 && matches!(kind, "edit" | "delete" | "move" | "read" | "search")));
     if auto {
         let id = options
@@ -1590,6 +1692,80 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::mpsc;
+
+    fn real_session() -> Value {
+        json!({
+            "sessionId": "s",
+            "models": { "currentModelId": "gemini-3.1-pro-low", "availableModels": [
+                { "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" },
+                { "modelId": "gemini-4-neon-xhigh", "name": "Gemini 4 Neon (XHigh)" },
+                { "modelId": "gemini-4-neon-medium", "name": "Gemini 4 Neon (Medium)" },
+                { "modelId": "gemini-4-neon-low", "name": "Gemini 4 Neon (Low)" },
+                { "modelId": "gemini-3.1-pro-high", "name": "Gemini 3.1 Pro (High)" },
+                { "modelId": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)" }
+            ]},
+            "modes": { "currentModeId": "default", "availableModes": [
+                { "id": "default", "name": "Default", "description": "Ask before edits and commands, per your permission settings." },
+                { "id": "accept-edits", "name": "Accept edits", "description": "Approve file edits in the workspace without asking." },
+                { "id": "plan", "name": "Plan", "description": "Plan carefully before executing a task." }
+            ]},
+            "configOptions": [
+                { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gemini-3.1-pro", "options": [
+                    { "value": "gemini-4-neon", "name": "Gemini 4 Neon" },
+                    { "value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+                    { "value": "gpt-oss-120b-medium", "name": "GPT-OSS 120B (Medium)" }
+                ]},
+                { "id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select", "currentValue": "low", "options": [
+                    { "value": "low", "name": "Low" }, { "value": "high", "name": "High" }
+                ]},
+                { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "default", "options": [
+                    { "value": "default", "name": "Default", "description": "Ask before edits and commands, per your permission settings." },
+                    { "value": "accept-edits", "name": "Accept edits", "description": "Approve file edits in the workspace without asking." },
+                    { "value": "plan", "name": "Plan", "description": "Plan carefully before executing a task." }
+                ]}
+            ]
+        })
+    }
+
+    #[test]
+    fn each_model_gets_the_efforts_agy_lists_for_it() {
+        let mut c = Choices::default();
+        c.read(&real_session());
+        let ids = |l: Vec<Choice>| l.into_iter().map(|c| (c.id, c.name)).collect::<Vec<_>>();
+        assert_eq!(
+            ids(c.efforts_of("gemini-4-neon")),
+            [
+                ("low", "Low"),
+                ("medium", "Medium"),
+                ("high", "High"),
+                ("xhigh", "XHigh")
+            ]
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+        assert_eq!(ids(c.efforts_of("gemini-3.1-pro")).len(), 2);
+        assert!(c.efforts_of("gpt-oss-120b-medium").is_empty());
+        let modes = c.mode_list();
+        assert_eq!(modes[1].id, "accept-edits");
+        assert_eq!(
+            modes[1].hint.as_deref(),
+            Some("Approve file edits in the workspace without asking.")
+        );
+        let pro = c.efforts_of("gemini-3.1-pro");
+        assert_eq!(effort_for("xhigh", &pro).as_deref(), Some("high"));
+        assert_eq!(effort_for("medium", &pro).as_deref(), Some("low"));
+        assert_eq!(
+            mode_for("accept-edits", &c.mode_ids()).as_deref(),
+            Some("accept-edits")
+        );
+        assert_eq!(
+            mode_for("acceptEdits", &c.mode_ids()).as_deref(),
+            Some("accept-edits")
+        );
+        assert_eq!(
+            mode_for("bypassPermissions", &c.mode_ids()).as_deref(),
+            Some("default")
+        );
+    }
 
     struct Agy {
         lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
@@ -1701,6 +1877,13 @@ mod tests {
         let new = agy.expect("session/new").await;
         agy.answer(&new, json!({
             "sessionId": "s1",
+            "models": { "currentModelId": "gemini-4-neon-high", "availableModels": [
+                { "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" },
+                { "modelId": "gemini-4-neon-xhigh", "name": "Gemini 4 Neon (XHigh)" },
+                { "modelId": "gemini-4-neon-low", "name": "Gemini 4 Neon (Low)" },
+                { "modelId": "gemini-4-carbon-high", "name": "Gemini 4 Carbon (High)" },
+                { "modelId": "gemini-4-carbon-medium", "name": "Gemini 4 Carbon (Medium)" },
+                { "modelId": "gemini-4-carbon-low", "name": "Gemini 4 Carbon (Low)" } ] },
             "configOptions": [
                 { "id": "model", "name": "Model", "category": "model", "currentValue": "gemini-4-neon", "options": [
                     { "value": "gemini-4-neon", "name": "Gemini 4 Neon" }, { "value": "gemini-4-carbon", "name": "Gemini 4 Carbon" } ] },
@@ -1755,7 +1938,7 @@ mod tests {
                 set2["params"]["configId"].as_str(),
                 set2["params"]["value"].as_str()
             ),
-            (Some("thought_level"), Some("xhigh"))
+            (Some("thought_level"), Some("high"))
         );
         agy.answer(&set2, json!({})).await;
         let p = agy.expect("session/prompt").await;
@@ -1767,6 +1950,7 @@ mod tests {
         agy.update(json!({ "sessionUpdate": "plan", "entries": [{ "content": "Fix the build", "priority": "high", "status": "completed" }] })).await;
         agy.update(json!({ "sessionUpdate": "usage_update", "used": 1200, "size": 1048576 }))
             .await;
+        agy.update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Done, say so." } })).await;
         agy.update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Fixed." } })).await;
         agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
         let out = drain(&mut rx, ended).await;
@@ -1799,6 +1983,15 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["Looking at it.", "Fixed."]);
+        let order: Vec<&str> = done
+            .iter()
+            .filter_map(|i| match &i.body {
+                ItemBody::Reasoning { .. } => Some("thought"),
+                ItemBody::AgentMessage { .. } => Some("text"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["text", "thought", "text"]);
         assert!(done.iter().any(|i| matches!(&i.body, ItemBody::ToolCall { name, status: ToolStatus::Completed, output: Some(o), input, .. }
             if name == "acp:execute" && o.text == "Finished" && input["title"] == "cargo build")));
         assert!(done.iter().any(

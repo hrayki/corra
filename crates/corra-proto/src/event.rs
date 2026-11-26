@@ -34,6 +34,8 @@ pub enum Event {
         models: Vec<crate::Choice>,
         #[serde(default)]
         efforts: Vec<crate::Choice>,
+        #[serde(default)]
+        modes: Vec<crate::Choice>,
     },
     TurnStarted {
         turn: String,
