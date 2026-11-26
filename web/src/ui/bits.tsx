@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, type JSX } from 'solid-js'
 import { Portal } from 'solid-js/web'
 import type { ThreadStatus } from '../proto/ThreadStatus'
+import type { InputPart } from '../proto/InputPart'
 
 export function StatusMark(props: { status: ThreadStatus; class?: string }) {
   return (
@@ -241,6 +242,19 @@ export function Picture(props: { src: string; class?: string }) {
       onClick={() => setViewing(props.src)}
       onKeyDown={(e) => e.key === 'Enter' && setViewing(props.src)}
     />
+  )
+}
+
+export function Thumbs(props: { parts: InputPart[]; class?: string }) {
+  const images = () => props.parts.filter((p) => p.type === 'image')
+  return (
+    <Show when={images().length}>
+      <div class={`flex max-w-[85%] flex-wrap justify-end gap-2 ${props.class ?? ''}`}>
+        <For each={images()}>
+          {(p) => <Picture class="size-14 rounded-lg border border-line object-cover" src={`data:${p.media_type};base64,${p.data}`} />}
+        </For>
+      </div>
+    </Show>
   )
 }
 

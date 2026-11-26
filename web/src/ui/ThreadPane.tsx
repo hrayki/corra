@@ -15,7 +15,7 @@ import { EntryView, TurnBlock, setDraftFor } from './Timeline'
 import type { Queued } from '../proto/Queued'
 import type { InputPart } from '../proto/InputPart'
 import type { TurnView } from '../lib/timeline'
-import { IconBtn, Menu, StatusMark, statusWord, type MenuItem } from './bits'
+import { IconBtn, Menu, StatusMark, Thumbs, statusWord, type MenuItem } from './bits'
 import { SidePanel } from './Panel'
 import { RunningTasks } from './Agents'
 import { threadActions } from './actions'
@@ -33,20 +33,15 @@ function repeatsError(turns: TurnView[], i: number) {
 function Outgoing(props: { parts: InputPart[]; note: string; queued?: boolean; actions?: { label: string; run: () => void }[] }) {
   return (
     <div class="flex flex-col items-end gap-1 pb-4">
-      <div
-        class="max-w-[85%] rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap"
-        classList={{ 'border border-dashed border-faint/70 text-mute': !!props.queued, 'bg-panel opacity-60': !props.queued }}
-      >
-        <For each={props.parts}>
-          {(x) =>
-            x.type === 'text' ? (
-              <span>{x.text}</span>
-            ) : (
-              <img class="my-1 max-h-40 rounded-lg" src={`data:${x.media_type};base64,${x.data}`} />
-            )
-          }
-        </For>
-      </div>
+      <Thumbs parts={props.parts} class={props.queued ? 'mb-1' : 'mb-1 opacity-60'} />
+      <Show when={props.parts.some((x) => x.type === 'text')}>
+        <div
+          class="max-w-[85%] rounded-2xl rounded-br-md px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap"
+          classList={{ 'border border-dashed border-faint/70 text-mute': !!props.queued, 'bg-panel opacity-60': !props.queued }}
+        >
+          <For each={props.parts}>{(x) => x.type === 'text' && <span>{x.text}</span>}</For>
+        </div>
+      </Show>
       <div class="flex items-center gap-2 text-[12px] text-faint">
         <span>{props.note}</span>
         <For each={props.actions ?? []}>
