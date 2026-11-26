@@ -71,6 +71,26 @@ export function toolSummary(name: string, input: JsonValue | null | undefined, l
       return { verb: 'Proposed a plan', detail: '' }
     case '':
       return { verb: 'Working', detail: '' }
+    case 'acp:read':
+      return { verb: 'Read', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:edit':
+      return { verb: 'Edited', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:delete':
+      return { verb: 'Deleted', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:move':
+      return { verb: 'Moved', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:search':
+      return { verb: 'Searched', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:execute':
+      return { verb: 'Ran', detail: String(f('title') ?? ''), full: f('command') ?? f('CommandLine'), plain: true }
+    case 'acp:think':
+      return { verb: 'Thought', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:fetch':
+      return { verb: 'Fetched', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:switch_mode':
+      return { verb: 'Switched mode', detail: String(f('title') ?? ''), plain: true }
+    case 'acp:other':
+      return { verb: String(f('title') ?? 'Tool'), detail: '', plain: true }
     default: {
       const m = name.match(/^mcp__(.+?)__(.+)$/)
       if (m) {
@@ -90,6 +110,11 @@ export function ToolDetail(props: { name: string; input: JsonValue | null | unde
   const i = () => (props.input && typeof props.input === 'object' ? props.input : {}) as Record<string, any>
   const out = () => props.output?.text ?? ''
   const isEdit = () => props.name === 'Edit' || props.name === 'MultiEdit'
+  const shown = () => {
+    if (!props.name.startsWith('acp:')) return props.input && Object.keys(i()).length > 0 ? props.input : undefined
+    const { title: _t, path: _p, ...rest } = i()
+    return Object.keys(rest).length > 0 ? rest : undefined
+  }
   return (
     <div class="space-y-2">
       <Show when={isEdit()}>
@@ -103,8 +128,8 @@ export function ToolDetail(props: { name: string; input: JsonValue | null | unde
       <Show when={props.name === 'Bash'}>
         <Pre text={`$ ${i().command ?? ''}`} />
       </Show>
-      <Show when={!isEdit() && props.name !== 'Write' && props.name !== 'Bash' && props.input && Object.keys(i()).length > 0}>
-        <Pre text={JSON.stringify(props.input, null, 2)} />
+      <Show when={!isEdit() && props.name !== 'Write' && props.name !== 'Bash' && shown()}>
+        <Pre text={JSON.stringify(shown(), null, 2)} />
       </Show>
       <Show when={out() && (!(isEdit() || props.name === 'Write') || props.output?.is_error)}>
         <Pre text={out()} error={props.output?.is_error} />

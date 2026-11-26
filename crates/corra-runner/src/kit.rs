@@ -152,15 +152,36 @@ async fn download(hub_url: &str, token: &str) -> Result<()> {
 
 fn install_shared(shared: &Path) -> Result<()> {
     let claude = home().join(".claude");
+    let gemini = home().join(".gemini");
     std::fs::create_dir_all(&claude)?;
+    std::fs::create_dir_all(&gemini)?;
     let agents = shared.join("AGENTS.md");
     if agents.exists() {
         std::fs::copy(&agents, claude.join("CLAUDE.md"))?;
+        std::fs::copy(&agents, gemini.join("AGENTS.md"))?;
     }
     let skills = shared.join("skills");
-    let dest = claude.join("skills");
-    std::fs::create_dir_all(&dest)?;
-    if let Ok(rd) = std::fs::read_dir(&dest) {
+    link_skills(&skills, &claude.join("skills"))?;
+    link_skills(&skills, &gemini.join("skills"))?;
+    let path = claude.join("settings.json");
+    let mut settings: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(extra) = std::fs::read(shared.join("claude-settings.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    {
+        merge(&mut settings, &extra);
+    }
+    settings["disableClaudeAiConnectors"] = json!(true);
+    std::fs::write(&path, serde_json::to_vec_pretty(&settings)?)?;
+    Ok(())
+}
+
+fn link_skills(skills: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    if let Ok(rd) = std::fs::read_dir(dest) {
         for e in rd.flatten() {
             let p = e.path();
             if let Ok(target) = std::fs::read_link(&p)
@@ -171,7 +192,7 @@ fn install_shared(shared: &Path) -> Result<()> {
             }
         }
     }
-    if let Ok(rd) = std::fs::read_dir(&skills) {
+    if let Ok(rd) = std::fs::read_dir(skills) {
         for e in rd.flatten() {
             if !e.path().is_dir() {
                 continue;
@@ -186,19 +207,6 @@ fn install_shared(shared: &Path) -> Result<()> {
             std::os::unix::fs::symlink(e.path(), &link)?;
         }
     }
-    let path = claude.join("settings.json");
-    let mut settings: Value = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Some(extra) = std::fs::read(shared.join("claude-settings.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-    {
-        merge(&mut settings, &extra);
-    }
-    settings["disableClaudeAiConnectors"] = json!(true);
-    std::fs::write(&path, serde_json::to_vec_pretty(&settings)?)?;
     Ok(())
 }
 

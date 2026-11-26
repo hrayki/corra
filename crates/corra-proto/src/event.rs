@@ -30,6 +30,10 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         permission_mode: Option<String>,
+        #[serde(default)]
+        models: Vec<crate::Choice>,
+        #[serde(default)]
+        efforts: Vec<crate::Choice>,
     },
     TurnStarted {
         turn: String,

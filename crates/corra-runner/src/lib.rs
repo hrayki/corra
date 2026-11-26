@@ -227,6 +227,11 @@ pub fn machine_info() -> MachineInfo {
             version: Some(v),
         });
     }
+    agents.push(AgentAvailability {
+        kind: AgentKind::Antigravity,
+        version: agents::antigravity::installed()
+            .and_then(|p| command_version(&p.to_string_lossy())),
+    });
     MachineInfo {
         hostname,
         os,
@@ -443,6 +448,11 @@ impl Runner {
             },
             HubMsg::Interrupt { thread } => self.cmd(thread, SessionCmd::Interrupt),
             HubMsg::StopTask { thread, tool } => self.cmd(thread, SessionCmd::StopTask { tool }),
+            HubMsg::SignIn {
+                thread,
+                request,
+                code,
+            } => self.cmd(thread, SessionCmd::SignIn { request, code }),
             HubMsg::Respond {
                 thread,
                 request,

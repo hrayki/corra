@@ -275,6 +275,11 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
             Ok(json!(list))
         }
         "threads.start" => {
+            if hub.hands_off(t.agent) {
+                bail!(
+                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+                );
+            }
             let prompt = input["prompt"]
                 .as_str()
                 .ok_or_else(|| anyhow!("prompt is required"))?;

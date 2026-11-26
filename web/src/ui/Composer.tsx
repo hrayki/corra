@@ -8,6 +8,8 @@ import UnfoldVertical from 'lucide-solid/icons/chevrons-up-down'
 import { addPending, call, dropPending, state, type ThreadX } from '../lib/store'
 import type { InputPart } from '../proto/InputPart'
 import type { AgentSettings } from '../proto/AgentSettings'
+import type { AgentKind } from '../proto/AgentKind'
+import type { Choice } from '../proto/Choice'
 import { modelLabel, tokens } from '../lib/format'
 import { Menu, Picture } from './bits'
 import { draftFor, setDraftFor } from './Timeline'
@@ -84,15 +86,54 @@ export function useInput(key?: () => string) {
 const pill =
   'inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-lg border border-line px-2 text-[12.5px] text-mute hover:border-faint hover:text-ink max-md:h-9'
 
-export function SettingsPickers(props: { settings: AgentSettings; onChange: (s: AgentSettings) => void }) {
-  const mode = () => MODES.find((m) => m.value === (props.settings.permission_mode ?? 'default')) ?? MODES[0]
+const AGY_MODES = MODES.filter((m) => m.value !== 'auto')
+const AGY_EFFORTS: Choice[] = [
+  { id: 'low', name: 'Low' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'high', name: 'High' },
+  { id: 'xhigh', name: 'Extra' },
+]
+const remembered = (key: string): Choice[] | undefined => {
+  try {
+    return JSON.parse(localStorage.getItem(key) ?? 'null') ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function rememberChoices(models?: Choice[], efforts?: Choice[]) {
+  if (models?.length) localStorage.setItem('corra_agy_models', JSON.stringify(models))
+  if (efforts?.length) localStorage.setItem('corra_agy_efforts', JSON.stringify(efforts))
+}
+
+export function SettingsPickers(props: {
+  settings: AgentSettings
+  onChange: (s: AgentSettings) => void
+  agent?: AgentKind
+  models?: Choice[]
+  efforts?: Choice[]
+}) {
+  const agy = () => props.agent === 'antigravity'
+  const modes = () => (agy() ? AGY_MODES : MODES)
+  const mode = () => modes().find((m) => m.value === (props.settings.permission_mode ?? 'default')) ?? modes()[0]
+  const models = (): Choice[] =>
+    agy() ? (props.models ?? remembered('corra_agy_models') ?? []) : MODELS.map((m) => ({ id: m, name: modelLabel(m) }))
+  const efforts = (): Choice[] =>
+    agy() ? (props.efforts ?? remembered('corra_agy_efforts') ?? AGY_EFFORTS) : EFFORTS.map((e) => ({ id: e, name: effortLabel(e) }))
+  const model = () => props.settings.model ?? (agy() ? undefined : MODELS[0])
+  const modelName = () => {
+    const m = model()
+    return m ? (models().find((c) => c.id === m)?.name ?? modelLabel(m)) : 'Default model'
+  }
+  const effort = () => props.settings.effort ?? 'high'
+  const effortName = () => efforts().find((c) => c.id === effort())?.name ?? effortLabel(effort())
   return {
     mode: (
       <Menu
         label="Permissions"
         side="top"
         class={pill}
-        items={MODES.map((m) => ({
+        items={modes().map((m) => ({
           label: m.label,
           hint: m.hint,
           checked: m.value === mode().value,
@@ -110,22 +151,24 @@ export function SettingsPickers(props: { settings: AgentSettings; onChange: (s: 
         class={pill}
         items={[
           { heading: 'Model' },
-          ...MODELS.map((m) => ({
-            label: modelLabel(m),
-            checked: (props.settings.model ?? MODELS[0]) === m,
-            onSelect: () => props.onChange({ model: m }),
-          })),
+          ...(agy() && !models().length
+            ? [{ label: 'Default model', hint: 'the list shows once Antigravity has started here', checked: true, onSelect: () => {} }]
+            : models().map((m) => ({
+                label: m.name,
+                checked: model() === m.id,
+                onSelect: () => props.onChange({ model: m.id }),
+              }))),
           'col' as const,
           { heading: 'Effort' },
-          ...EFFORTS.map((e) => ({
-            label: effortLabel(e),
-            checked: (props.settings.effort ?? 'high') === e,
-            onSelect: () => props.onChange({ effort: e }),
+          ...efforts().map((e) => ({
+            label: e.name,
+            checked: effort() === e.id,
+            onSelect: () => props.onChange({ effort: e.id }),
           })),
         ]}
       >
-        <span>{modelLabel(props.settings.model ?? MODELS[0])}</span>
-        <span class="text-faint @max-xl:hidden">{effortLabel(props.settings.effort)}</span>
+        <span>{modelName()}</span>
+        <span class="text-faint @max-xl:hidden">{effortName()}</span>
       </Menu>
     ),
   }
@@ -431,9 +474,22 @@ export function Composer(props: { thread: ThreadX }) {
       if (t && t.type === 'text') input.setText(t.text)
     }
   }
+  createEffect(() => {
+    const v = state.views[props.thread.id]
+    if (props.thread.agent === 'antigravity') rememberChoices(v?.models, v?.efforts)
+  })
   const pickers = SettingsPickers({
     get settings() {
       return props.thread.settings
+    },
+    get agent() {
+      return props.thread.agent
+    },
+    get models() {
+      return state.views[props.thread.id]?.models
+    },
+    get efforts() {
+      return state.views[props.thread.id]?.efforts
     },
     onChange: (s) => void call({ op: 'update_thread', thread: props.thread.id, settings: s }).catch((e) => setError((e as Error).message)),
   })

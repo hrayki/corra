@@ -376,26 +376,28 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
         </div>
         <div class={`${actionRow} justify-end`}>
           <CopyButton text={() => text()?.text ?? ''} />
-          <button
-            type="button"
-            class={actionBtn}
-            disabled={!props.turn.outcome}
-            title="Start a new thread from this point"
-            onClick={() => void forkAt(props.thread, props.turn.id)}
-          >
-            <GitFork size={13} />
-            Fork
-          </button>
-          <button
-            type="button"
-            class={actionBtn}
-            disabled={busy()}
-            title="Remove this message and everything after it, and undo its file changes"
-            onClick={() => void rewindTo(props.thread, props.turn.id, text()?.text ?? '')}
-          >
-            <Undo2 size={13} />
-            Rewind
-          </button>
+          <Show when={state.threads[props.thread]?.agent !== 'antigravity'}>
+            <button
+              type="button"
+              class={actionBtn}
+              disabled={!props.turn.outcome}
+              title="Start a new thread from this point"
+              onClick={() => void forkAt(props.thread, props.turn.id)}
+            >
+              <GitFork size={13} />
+              Fork
+            </button>
+            <button
+              type="button"
+              class={actionBtn}
+              disabled={busy()}
+              title="Remove this message and everything after it, and undo its file changes"
+              onClick={() => void rewindTo(props.thread, props.turn.id, text()?.text ?? '')}
+            >
+              <Undo2 size={13} />
+              Rewind
+            </button>
+          </Show>
         </div>
       </div>
     </Show>
@@ -686,8 +688,20 @@ function approvalTitle(tool: string): string {
     case 'WebFetch':
       return 'Fetch this page?'
     case 'Read':
+    case 'acp:read':
       return 'Read this file?'
+    case 'acp:execute':
+      return 'Run this command?'
+    case 'acp:edit':
+      return 'Edit this file?'
+    case 'acp:delete':
+      return 'Delete this?'
+    case 'acp:move':
+      return 'Move this?'
+    case 'acp:fetch':
+      return 'Fetch this page?'
     default: {
+      if (tool.startsWith('acp:')) return 'Allow this?'
       const m = tool.match(/^mcp__(.+?)__(.+)$/)
       return m ? `Use ${m[2].replace(/_/g, ' ')} from ${m[1]}?` : `Use ${tool}?`
     }
@@ -706,6 +720,7 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
   const req = () => props.r.request
   const pending = () => !props.r.response
   const isSecret = () => req().type === 'hub_action' && (req() as { action: string }).action === 'secret.request'
+  const isSignIn = () => req().type === 'hub_action' && (req() as { action: string }).action === 'agent.sign_in'
   const [error, setError] = createSignal('')
   const [sending, setSending] = createSignal(false)
   let stuck: number | undefined
@@ -722,7 +737,7 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
     })
   }
   let card: HTMLDivElement | undefined
-  const byKey = () => pending() && (req().type === 'tool_approval' || (req().type === 'hub_action' && !isSecret()))
+  const byKey = () => pending() && (req().type === 'tool_approval' || (req().type === 'hub_action' && !isSecret() && !isSignIn()))
   createEffect(() => {
     if (!byKey()) return
     const onKey = (e: KeyboardEvent) => {
@@ -746,14 +761,24 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
       when={pending()}
       fallback={
         <div class="text-[13px] text-mute">
-          <span class="font-medium">{isSecret() ? secretLabel(props.r.response) : resolvedLabel(props.r.response)}</span>{' '}
+          <span class="font-medium">
+            {isSignIn()
+              ? props.r.response?.type === 'allow'
+                ? 'Sent a sign-in code'
+                : 'Sign-in cancelled'
+              : isSecret()
+                ? secretLabel(props.r.response)
+                : resolvedLabel(props.r.response)}
+          </span>{' '}
           <span class="font-mono text-[12px] text-faint">
             {req().type === 'tool_approval'
               ? toolSummary((req() as { tool: string }).tool, (req() as unknown as { input: null }).input, undefined, props.cwd).detail
               : req().type === 'hub_action'
-                ? isSecret()
-                  ? String((req() as { input: { name?: string } }).input?.name ?? '')
-                  : (req() as { action: string }).action
+                ? isSignIn()
+                  ? ''
+                  : isSecret()
+                    ? String((req() as { input: { name?: string } }).input?.name ?? '')
+                    : (req() as { action: string }).action
                 : req().type === 'plan_approval'
                   ? 'the plan'
                   : ''}
@@ -829,6 +854,22 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
               </>
             )}
           </Match>
+          <Match when={isSignIn() && req()}>
+            {(r) => {
+              const x = r() as { input: { agent?: string; url?: string } }
+              return (
+                <SignInForm
+                  agent={String(x.input?.agent ?? 'the agent')}
+                  url={String(x.input?.url ?? '')}
+                  onSend={(code) =>
+                    call({ op: 'answer_secret', thread: props.thread, request: props.r.id, value: code }).catch((e) =>
+                      setError((e as Error).message),
+                    )
+                  }
+                />
+              )
+            }}
+          </Match>
           <Match when={isSecret() && req()}>
             {(r) => {
               const x = r() as { input: { name?: string; why?: string } }
@@ -891,6 +932,52 @@ function secretLabel(r?: RequestResponse) {
   if (r.type === 'allow') return 'Gave the secret'
   if (r.type === 'deny') return 'Declined to give'
   return 'Cancelled'
+}
+
+function SignInForm(props: { agent: string; url: string; onSend: (code: string) => Promise<unknown> }) {
+  const [code, setCode] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  const send = async () => {
+    if (!code().trim() || busy()) return
+    setBusy(true)
+    await props.onSend(code().trim())
+    setBusy(false)
+  }
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        void send()
+      }}
+    >
+      <div class="text-[14px] font-medium">Sign in to {props.agent} on this machine</div>
+      <p class="mt-1 text-[13px] text-mute">Sign in with Google, then paste the code the page shows you, or the address it lands on.</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <a
+          href={props.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex h-8 items-center rounded-lg border border-line bg-raised px-3 text-[13px] font-medium hover:border-faint"
+        >
+          Open Google sign-in
+        </a>
+      </div>
+      <input
+        class={`${inputClass} mt-3 w-full font-mono`}
+        autocomplete="off"
+        spellcheck={false}
+        placeholder="Paste the code here"
+        value={code()}
+        onInput={(e) => setCode(e.currentTarget.value)}
+      />
+      <p class="mt-2 text-[12.5px] text-faint">The code goes straight to this machine and isn't kept in the conversation.</p>
+      <div class="mt-3 flex gap-2">
+        <Btn kind="primary" type="submit" disabled={!code().trim() || busy()}>
+          {busy() ? 'Signing in…' : 'Sign in'}
+        </Btn>
+      </div>
+    </form>
+  )
 }
 
 function SecretForm(props: {

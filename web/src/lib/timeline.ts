@@ -9,6 +9,7 @@ import type { Usage } from '../proto/Usage'
 import type { Delta } from '../proto/Delta'
 import type { NoticeLevel } from '../proto/NoticeLevel'
 import type { RepoCheckpoint } from '../proto/RepoCheckpoint'
+import type { Choice } from '../proto/Choice'
 
 export type ItemView = {
   id: string
@@ -53,6 +54,8 @@ export type ThreadView = {
   partial?: boolean
   sessionId?: string
   model?: string
+  models?: Choice[]
+  efforts?: Choice[]
   slashCommands: string[]
   preface: Entry[]
   turns: TurnView[]
@@ -132,6 +135,8 @@ export function apply(v: ThreadView, e: StoredEvent) {
       v.sessionId = e.session_id
       v.model = e.model
       v.slashCommands = e.slash_commands
+      if (e.models.length) v.models = e.models
+      if (e.efforts.length) v.efforts = e.efforts
       break
     case 'turn_started': {
       const t = ensureTurn(v, e.turn, e.ts)

@@ -522,6 +522,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                         resolve_permission(ctx, st, proc, &request, response).await?;
                     }
                     SessionCmd::Settings(s) => apply_settings(ctx, st, proc, s).await?,
+                    SessionCmd::SignIn { .. } => {}
                     SessionCmd::Stop => {
                         proc.kill().await;
                         finish_open_turn(ctx, st, TurnOutcome::Interrupted, None);
@@ -867,6 +868,8 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                     tools: strings(&msg["tools"]),
                     slash_commands: strings(&msg["slash_commands"]),
                     permission_mode: msg["permissionMode"].as_str().map(String::from),
+                    models: vec![],
+                    efforts: vec![],
                 },
             );
         }

@@ -797,7 +797,15 @@ function Tools() {
 }
 
 function Keys() {
-  const known = new Set(['claude.token', 'anthropic.api_key', 'railway.token', 'cloudflare.token', 'cloudflare.account_id', 'github.token'])
+  const known = new Set([
+    'claude.token',
+    'anthropic.api_key',
+    'gemini.api_key',
+    'railway.token',
+    'cloudflare.token',
+    'cloudflare.account_id',
+    'github.token',
+  ])
   const others = () =>
     (secretNames() ?? []).filter(
       (n) => !known.has(n) && !n.startsWith('backup.') && !providers().some((p) => p.credentials.some((c) => c.name === n)),
@@ -805,12 +813,24 @@ function Keys() {
   return (
     <>
       <Section
-        title="The agent"
+        title="Claude Code"
         hint="What signs Claude Code in on corra's machines. The hub uses the Claude token, and the API key when there's no token."
       >
         <Card>
           <KeyRow name="claude.token" label="Claude token" hint="From claude setup-token: your subscription." />
           <KeyRow name="anthropic.api_key" label="Anthropic API key" hint="Billed per use, from the Anthropic Console." />
+        </Card>
+      </Section>
+      <Section
+        title="Antigravity"
+        hint="Without a key, each machine signs in with Google the first time, and only you can send its Antigravity threads messages."
+      >
+        <Card>
+          <KeyRow
+            name="gemini.api_key"
+            label="Gemini API key"
+            hint="Billed per use, from Google AI Studio. Lets agents message these threads too."
+          />
         </Card>
       </Section>
       <Section title="Full-access projects" hint="Only projects with full access get these, as the usual variables.">

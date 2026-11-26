@@ -29,20 +29,36 @@ pub fn new_id() -> uuid::Uuid {
 #[ts(export)]
 pub enum AgentKind {
     Claude,
+    Antigravity,
 }
 
 impl AgentKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
+            AgentKind::Antigravity => "antigravity",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "claude" => Some(AgentKind::Claude),
+            "antigravity" => Some(AgentKind::Antigravity),
             _ => None,
         }
     }
+    pub fn name(&self) -> &'static str {
+        match self {
+            AgentKind::Claude => "Claude Code",
+            AgentKind::Antigravity => "Antigravity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Choice {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
