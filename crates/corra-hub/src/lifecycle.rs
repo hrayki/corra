@@ -187,6 +187,7 @@ async fn stop_sessions(hub: &Arc<Hub>, machine: MachineId) {
 fn settle_threads(hub: &Arc<Hub>, machine: MachineId, notice: Option<&str>) {
     if let Ok(threads) = hub.db.threads_on_machine(machine) {
         for t in threads {
+            hub.background_gone(t.id);
             if matches!(
                 t.status,
                 ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting

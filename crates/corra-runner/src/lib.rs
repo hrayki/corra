@@ -442,6 +442,7 @@ impl Runner {
                 }
             },
             HubMsg::Interrupt { thread } => self.cmd(thread, SessionCmd::Interrupt),
+            HubMsg::StopTask { thread, tool } => self.cmd(thread, SessionCmd::StopTask { tool }),
             HubMsg::Respond {
                 thread,
                 request,

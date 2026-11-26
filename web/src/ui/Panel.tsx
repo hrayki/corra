@@ -8,6 +8,7 @@ import { lazyPart } from '../lib/version'
 import { panel, panelOverlays, panelWidth, setPanel, setPanelWidth } from '../lib/panel'
 import { parseDiff, type FileDiff } from '../lib/diff'
 import { Markdown } from './Timeline'
+import { AgentPanel } from './Agents'
 import { CodeBlock } from './tools'
 import RotateCw from 'lucide-solid/icons/rotate-cw'
 import { changesOf, refreshChanges, totals, type ChangedFile } from '../lib/changes'
@@ -65,25 +66,31 @@ export function SidePanel(props: { thread: string }) {
     >
       <div class="absolute top-0 bottom-0 -left-1 z-10 w-2 cursor-col-resize max-md:hidden" onPointerDown={startDrag} />
       <div class="flex h-[52px] shrink-0 items-center gap-1 border-b border-line px-3">
-        <Tab active={tab() === 'diff'} onClick={() => setPanel({ kind: 'diff' })}>
-          Changes
-          <Show when={changed() > 0}>
-            <span class="num ml-1.5 text-[11.5px] text-faint">{changed()}</span>
+        <div class="flex min-w-0 flex-1 items-center gap-1 no-scrollbar overflow-x-auto">
+          <Tab active={tab() === 'diff'} onClick={() => setPanel({ kind: 'diff' })}>
+            Changes
+            <Show when={changed() > 0}>
+              <span class="num ml-1.5 text-[11.5px] text-faint">{changed()}</span>
+            </Show>
+          </Tab>
+          <Tab active={tab() === 'files'} onClick={() => setPanel({ kind: 'files' })}>
+            Files
+          </Tab>
+          <Tab active={tab() === 'terminal'} onClick={() => setPanel({ kind: 'terminal' })}>
+            Terminal
+          </Tab>
+          <Tab active={tab() === 'browser'} onClick={() => setPanel({ kind: 'browser' })}>
+            Browser
+          </Tab>
+          <Tab active={tab() === 'phone'} onClick={() => setPanel({ kind: 'phone' })}>
+            Phone
+          </Tab>
+          <Show when={tab() === 'agent'}>
+            <Tab active onClick={() => {}}>
+              Agent
+            </Tab>
           </Show>
-        </Tab>
-        <Tab active={tab() === 'files'} onClick={() => setPanel({ kind: 'files' })}>
-          Files
-        </Tab>
-        <Tab active={tab() === 'terminal'} onClick={() => setPanel({ kind: 'terminal' })}>
-          Terminal
-        </Tab>
-        <Tab active={tab() === 'browser'} onClick={() => setPanel({ kind: 'browser' })}>
-          Browser
-        </Tab>
-        <Tab active={tab() === 'phone'} onClick={() => setPanel({ kind: 'phone' })}>
-          Phone
-        </Tab>
-        <div class="flex-1" />
+        </div>
         <button
           aria-label="Close panel"
           title="Close"
@@ -115,6 +122,9 @@ export function SidePanel(props: { thread: string }) {
             <PhonePanel />
           </Part>
         </Show>
+        <Show when={panel()?.kind === 'agent' && (panel() as { tool: string }).tool} keyed>
+          {(tool) => <AgentPanel thread={props.thread} tool={tool} />}
+        </Show>
       </div>
     </aside>
   )
@@ -123,7 +133,8 @@ export function SidePanel(props: { thread: string }) {
 function Tab(props: { active: boolean; onClick: () => void; children: any }) {
   return (
     <button
-      class="h-8 rounded-lg px-2.5 text-[13px]"
+      ref={(el) => props.active && queueMicrotask(() => el.scrollIntoView({ block: 'nearest', inline: 'nearest' }))}
+      class="h-8 shrink-0 rounded-lg px-2.5 text-[13px] whitespace-nowrap"
       classList={{ 'bg-ink/[0.06] font-medium text-ink': props.active, 'text-mute hover:text-ink': !props.active }}
       onClick={props.onClick}
     >

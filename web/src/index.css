@@ -73,6 +73,10 @@ body {
   scrollbar-color: color-mix(in srgb, var(--ink) 16%, transparent) transparent;
 }
 
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
 ::selection {
   background: color-mix(in srgb, var(--accent) 28%, transparent);
 }

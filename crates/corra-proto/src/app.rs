@@ -156,6 +156,10 @@ pub enum AppCall {
     Interrupt {
         thread: ThreadId,
     },
+    StopAgent {
+        thread: ThreadId,
+        tool: String,
+    },
     Respond {
         thread: ThreadId,
         request: String,

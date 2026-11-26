@@ -530,6 +530,40 @@ async fn a_message_sent_as_a_background_agent_finishes_keeps_its_answer() {
 }
 
 #[tokio::test]
+async fn a_background_agent_shows_as_running_until_it_is_stopped() {
+    let out = replay("stop_agent").await;
+    let turns = turns(&out);
+    let first = &turns[0];
+    let agent = first.items[first.position(|i| tool(i, "Agent"))].id.clone();
+    let lists: Vec<&Vec<String>> = out
+        .iter()
+        .filter_map(|o| match o {
+            AgentOut::Event(Event::Status {
+                agents: Some(a), ..
+            }) => Some(a),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        lists.iter().any(|l| **l == [agent.clone()]),
+        "the agent never showed as running: {lists:?}"
+    );
+    assert!(
+        lists.last().is_some_and(|l| l.is_empty()),
+        "it still shows as running after it was stopped: {lists:?}"
+    );
+    assert!(
+        first.items.iter().any(|i| i.parent.as_ref() == Some(&agent)
+            && matches!(&i.body, ItemBody::AgentMessage { text } if text == "Background agent stopped: Wait a minute")),
+        "{first:#?}"
+    );
+    assert_eq!(
+        turns.last().unwrap().cause.as_deref(),
+        Some("Background agent stopped: Wait a minute")
+    );
+}
+
+#[tokio::test]
 async fn a_usage_limit_shows_once_with_its_reset_time() {
     let out = replay("usage_limit").await;
     let turns = turns(&out);
@@ -580,6 +614,7 @@ async fn an_approval_lets_the_tool_run_and_an_interrupt_ends_the_turn() {
 }
 
 enum Then {
+    StopAgent,
     Send(&'static str),
     SendIn(&'static str, &'static str),
     Allow,
@@ -680,6 +715,7 @@ async fn record_with(
     let mut steps = steps.into_iter();
     let mut step = steps.next();
     let mut last_request = None;
+    let mut last_agent: Option<String> = None;
     let mut done_at: Option<tokio::time::Instant> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     loop {
@@ -703,9 +739,17 @@ async fn record_with(
         if let AgentOut::Event(Event::Request { id, .. }) = &o {
             last_request = Some(id.clone());
         }
+        if let AgentOut::Event(Event::ItemCompleted { item, .. }) = &o
+            && tool(item, "Agent")
+        {
+            last_agent = Some(item.id.clone());
+        }
         if let Some(s) = &step {
             if (s.when)(&o) {
                 let cmd = match &s.then {
+                    Then::StopAgent => SessionCmd::StopTask {
+                        tool: last_agent.clone().unwrap(),
+                    },
                     Then::Send(t) => SessionCmd::Send {
                         input: vec![InputPart::Text { text: (*t).into() }],
                         settings: None,
@@ -779,6 +823,22 @@ async fn record_background_agent() {
         haiku(),
         vec![],
         40,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn record_stop_agent() {
+    record(
+        "stop_agent",
+        "Use the Agent tool with run_in_background set to true to start one background agent, described as \"Wait a minute\", whose only job is to run `sleep 60 && echo BG_DONE` with Bash and reply BG_DONE. Don't wait for it: as soon as it has started, reply with exactly STARTED and end your turn. If you're told it stopped, reply with exactly STOPPED.",
+        haiku(),
+        vec![Step {
+            when: idle,
+            then: Then::StopAgent,
+        }],
+        25,
     )
     .await;
 }
