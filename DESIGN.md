@@ -144,7 +144,8 @@ and the thread stays idle, with a line saying an agent is still working. A messa
 where it was sent. The hub remembers Claude Code's latest usage report and sends it to every app. Drafts and read marks
 are kept per device, in the browser.
 
-A command or agent that finishes in the background can wake Claude Code, which answers in a turn of its own.
+A command or agent that finishes in the background can wake Claude Code, which answers in a turn of its own that says
+what woke it.
 
 A turn that hits a usage limit fails once, with the time the limit resets, and the thread shows as limited. A minute
 after the reset the hub sends it "Your usage limit has reset. Continue where you left off.", unless it's in the trash,
