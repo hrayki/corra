@@ -165,8 +165,8 @@ message carries an id from the app, so one sent twice goes once.
 
 A thread can follow another: when the followed thread finishes a turn, stops with an error or waits on me, the hub
 sends a short message into the follower, which wakes it. A thread started with `threads.start` is followed by the
-thread that started it. A thread has one follower, following can't go in a circle, and a stop the follower asked for
-isn't reported back to it.
+thread that started it, and shows under it in the sidebar. A thread has one follower, following can't go in a circle,
+and a stop the follower asked for isn't reported back to it.
 
 When a thread waits on me, finishes or fails, the hub notifies me, unless one of my apps is open and focused. It sends
 Web Push to each browser where I turned it on in Settings, and the desktop app shows them itself. Pushes are signed with
