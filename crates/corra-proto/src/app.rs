@@ -22,6 +22,13 @@ pub enum AppCall {
     Subscribe {
         thread: ThreadId,
         after_seq: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tail: Option<u32>,
+    },
+    Earlier {
+        thread: ThreadId,
+        before_seq: i64,
     },
     Unsubscribe {
         thread: ThreadId,
@@ -361,6 +368,12 @@ pub enum HubToApp {
     Events {
         thread: ThreadId,
         events: Vec<StoredEvent>,
+    },
+    Window {
+        thread: ThreadId,
+        events: Vec<StoredEvent>,
+        from_seq: i64,
+        earlier: bool,
     },
     Delta {
         delta: LiveDelta,

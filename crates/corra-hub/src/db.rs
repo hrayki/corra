@@ -823,6 +823,37 @@ impl Db {
         )
     }
 
+    pub fn turn_starts_before(&self, thread: ThreadId, before: i64, n: i64) -> Result<Vec<i64>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started' AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+            )?;
+            st.query_map(params![thread.to_string(), before, n], |r| r.get(0))?
+                .collect()
+        })
+    }
+
+    pub fn events_between(&self, thread: ThreadId, from: i64, to: i64) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events WHERE thread = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq",
+            params![thread.to_string(), from, to],
+        )
+    }
+
+    pub fn last_of_kind_before(
+        &self,
+        thread: ThreadId,
+        kind: &str,
+        before: i64,
+    ) -> Result<Option<StoredEvent>> {
+        Ok(self
+            .stored_events(
+                "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = ?2 AND seq < ?3 ORDER BY seq DESC LIMIT 1",
+                params![thread.to_string(), kind, before],
+            )?
+            .pop())
+    }
+
     pub fn last_turns_started(&self, thread: ThreadId, n: i64) -> Result<Vec<StoredEvent>> {
         self.stored_events(
             "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started' ORDER BY seq DESC LIMIT ?2",

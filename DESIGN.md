@@ -142,7 +142,7 @@ every device.
 A background agent that keeps working after a turn ends doesn't open a new turn: its steps join the turn that started it
 and the thread stays idle, with a line saying an agent is still working. A message sent mid-turn is placed in the thread
 where it was sent. The hub remembers Claude Code's latest usage report and sends it to every app. Drafts and read marks
-are kept per device, in the browser.
+are kept per device, in the browser. A thread opens on its last four turns; earlier ones load as you scroll up.
 
 A command or agent that finishes in the background can wake Claude Code, which answers in a turn of its own that says
 what woke it.

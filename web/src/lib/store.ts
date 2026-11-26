@@ -1,12 +1,12 @@
 import { batch } from 'solid-js'
 import type { Queued } from '../proto/Queued'
 import type { InputPart } from '../proto/InputPart'
-import { createStore, produce } from 'solid-js/store'
+import { createStore, produce, reconcile } from 'solid-js/store'
 import { Conn, type ConnState } from './conn'
 import { cache } from './cache'
 import { checkBuild } from './version'
 import { setOmarchyTheme } from './theme'
-import { apply, applyDelta, emptyView, type ThreadView } from './timeline'
+import { apply, applyDelta, buildView, emptyView, type ThreadView } from './timeline'
 import type { Project } from '../proto/Project'
 import type { Machine } from '../proto/Machine'
 import type { Thread } from '../proto/Thread'
@@ -39,6 +39,7 @@ type State = {
   machines: Record<string, MachineX>
   threads: Record<string, ThreadX>
   views: Record<string, ThreadView>
+  earlier: Record<string, number | null>
   live: Record<string, LiveStatus>
   queues: Record<string, Queued[]>
   usage: { at: number; limits: unknown } | null
@@ -57,6 +58,7 @@ const [state, setState] = createStore<State>({
   machines: {},
   threads: {},
   views: {},
+  earlier: {},
   live: {},
   queues: {},
   usage: null,
@@ -67,6 +69,8 @@ export { state }
 const conns: Partial<Record<Src, Conn>> = {}
 const raw = new Map<string, StoredEvent[]>()
 const subscribed = new Map<string, Src | null>()
+const catching = new Map<string, StoredEvent[]>()
+const TAIL = 4
 const saveTimers = new Map<string, number>()
 
 function persistEvents(thread: string) {
@@ -132,7 +136,78 @@ function addEvents(thread: string, events: StoredEvent[]) {
 function resetThread(thread: string) {
   raw.delete(thread)
   void cache.setEvents(thread, [])
+  setEarlier(thread, null)
   setState('views', thread, emptyView())
+}
+
+function setEarlier(thread: string, from: number | null) {
+  setState('earlier', thread, from)
+  void cache.set(`earlier:${thread}`, from)
+}
+
+function keepLive(from: ThreadView | undefined, to: ThreadView) {
+  const last = from?.turns.at(-1)
+  if (!last || last.outcome) return
+  const t = to.turns.find((x) => x.id === last.id)
+  if (!t) return
+  for (const e of last.entries) {
+    if (e.type !== 'item' || (!e.item.live && !e.item.liveInput)) continue
+    const it = t.entries.find((x) => x.type === 'item' && x.item.id === e.item.id)
+    if (it?.type === 'item' && !it.item.done) {
+      it.item.live = e.item.live
+      it.item.liveInput = e.item.liveInput
+    }
+  }
+}
+
+function showHistory(thread: string, events: StoredEvent[], earlier: number | null) {
+  raw.set(thread, events)
+  const v = buildView(events, earlier !== null)
+  keepLive(state.views[thread], v)
+  setState('views', thread, reconcile(v, { key: 'id', merge: false }))
+  setEarlier(thread, earlier)
+  persistEvents(thread)
+}
+
+function subscribe(src: Src, id: string) {
+  const c = conns[src]
+  if (!c) return
+  if (!catching.has(id)) catching.set(id, [])
+  void c
+    .call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0, tail: TAIL })
+    .catch(() => {})
+    .finally(() => {
+      const caught = catching.get(id)
+      catching.delete(id)
+      if (caught?.length)
+        addEvents(
+          id,
+          caught.sort((a, b) => a.seq - b.seq),
+        )
+    })
+}
+
+const fetching = new Set<string>()
+
+export async function loadEarlier(id: string) {
+  const from = state.earlier[id]
+  const src = state.threads[id]?.src
+  if (from == null || !src || fetching.has(id)) return
+  fetching.add(id)
+  try {
+    const r = await callOn<{ events: StoredEvent[]; from_seq: number; earlier: boolean }>(src, {
+      op: 'earlier',
+      thread: id,
+      before_seq: from,
+    })
+    if (state.earlier[id] !== from) return
+    const have = raw.get(id) ?? []
+    const seen = new Set(have.map((e) => e.seq))
+    const merged = [...r.events.filter((e) => !seen.has(e.seq)), ...have].sort((a, b) => a.seq - b.seq)
+    showHistory(id, merged, r.earlier ? r.from_seq : null)
+  } finally {
+    fetching.delete(id)
+  }
 }
 
 function putThread(src: Src, t: Thread) {
@@ -187,11 +262,16 @@ function onMessage(src: Src, m: HubToApp) {
     case 'reset':
       if (state.threads[m.thread]?.src === src || !state.threads[m.thread]) {
         resetThread(m.thread)
-        if (subscribed.has(m.thread)) void conns[src]?.call({ op: 'subscribe', thread: m.thread, after_seq: 0 })
+        if (subscribed.has(m.thread)) subscribe(src, m.thread)
       }
       break
     case 'events':
-      if (state.threads[m.thread]?.src === src) addEvents(m.thread, m.events)
+      if (state.threads[m.thread]?.src !== src) break
+      if (catching.has(m.thread)) catching.get(m.thread)!.push(...m.events)
+      else addEvents(m.thread, m.events)
+      break
+    case 'window':
+      if (state.threads[m.thread]?.src === src) showHistory(m.thread, [...m.events], m.earlier ? m.from_seq : null)
       break
     case 'delta': {
       const d = m.delta
@@ -269,9 +349,7 @@ function startConn(src: Src, url: () => string, onRefused?: () => void) {
     url,
     (m) => onMessage(src, m),
     () => {
-      for (const [t, s] of subscribed) {
-        if (s === src) void c.call({ op: 'subscribe', thread: t, after_seq: raw.get(t)?.at(-1)?.seq ?? 0 })
-      }
+      for (const [t, s] of subscribed) if (s === src) subscribe(src, t)
     },
     onRefused,
   )
@@ -369,7 +447,7 @@ function resubscribe(id: string) {
   if (!subscribed.has(id)) return
   const src = state.threads[id]?.src ?? null
   subscribed.set(id, src)
-  if (src) void conns[src]?.call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0 }).catch(() => {})
+  if (src) subscribe(src, id)
 }
 
 export async function openThread(id: string) {
@@ -377,19 +455,11 @@ export async function openThread(id: string) {
   subscribed.set(id, null)
   if (!raw.has(id)) {
     const cached = await cache.events(id)
+    const from = (await cache.get<number | null>(`earlier:${id}`)) ?? null
     if (cached?.length && !raw.has(id)) {
-      raw.set(id, [])
-      const list: StoredEvent[] = []
-      raw.set(id, list)
-      if (!state.views[id]) setState('views', id, emptyView())
-      setState(
-        'views',
-        id,
-        produce((v) => {
-          for (const e of cached) apply(v, e)
-        }),
-      )
-      list.push(...cached)
+      raw.set(id, cached)
+      setState('views', id, buildView(cached, from !== null))
+      setState('earlier', id, from)
     }
   }
   resubscribe(id)
