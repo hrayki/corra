@@ -111,8 +111,9 @@ their thread. An answer goes only to a request that still waits, and only once, 
 refused. Pull requests, checks, issues and merging are hub tools. A workflow that runs on any branch still runs that
 branch's code with the repo's secrets, so secrets belong in workflows that run on the default branch or tags.
 
-What an agent may do is Claude Code's own permission mode, picked per thread, plus the rules in the kit's
-`claude-settings.json`.
+What an agent may do is its own permission mode, Claude Code's or Antigravity's, picked per thread, plus for Claude Code
+the rules in the kit's `claude-settings.json`. Corra adds no approvals of its own: every request the agent makes comes
+to me.
 
 A thread's keys, env vars and tools are fixed when its Claude Code process starts. When they've changed, the next
 message to an idle thread restarts the process on the same session; a thread that's mid-turn keeps the old ones until
@@ -142,6 +143,10 @@ long goes with its events, session files, saved work and settings, unless a fork
 A thread can move between machines with its uncommitted work, fork from any turn, or rewind to before one, which puts
 back the files it changed since. Any Claude Code session on a machine can come in as a thread, with its history; the
 next message resumes the same session.
+
+The model, effort and mode pickers show each agent's own ids and names: Claude Code's models and efforts from its
+`initialize` reply, Antigravity's from its session. Claude Code reports only its current mode, so corra lists its mode
+ids with Claude Code's own titles. The new-thread page uses the last list it saw for each agent.
 
 A message sent while the agent is mid-turn goes one of two ways. Sent now, it reaches Claude Code at once, which reads
 it at its next step. Queued, the hub holds it and sends it when the turn completes, one queued message per turn, in

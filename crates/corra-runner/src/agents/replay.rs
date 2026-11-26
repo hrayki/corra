@@ -579,6 +579,55 @@ async fn a_background_agent_shows_as_running_until_it_is_stopped() {
 }
 
 #[tokio::test]
+async fn the_session_offers_claude_codes_own_models_and_efforts() {
+    let out = replay("approval_and_interrupt").await;
+    let models = out
+        .iter()
+        .find_map(|o| match o {
+            AgentOut::Event(Event::Session { models, .. }) => Some(models.clone()),
+            _ => None,
+        })
+        .expect("no session");
+    let ids: Vec<(&str, &str)> = models
+        .iter()
+        .map(|m| (m.id.as_str(), m.name.as_str()))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            ("default", "Default (recommended)"),
+            ("sonnet", "Sonnet"),
+            ("fable", "Fable"),
+            ("opus", "Opus"),
+            ("haiku", "Haiku")
+        ]
+    );
+    let opus = &models[3];
+    assert_eq!(opus.resolved_model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(
+        opus.hint.as_deref(),
+        Some("Opus 5.5 \u{b7} Best for everyday, complex tasks")
+    );
+    assert_eq!(opus.supports_auto_mode, Some(true));
+    let efforts: Vec<(&str, &str)> = opus
+        .efforts
+        .iter()
+        .flatten()
+        .map(|e| (e.id.as_str(), e.name.as_str()))
+        .collect();
+    assert_eq!(
+        efforts,
+        [
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "xHigh"),
+            ("max", "Max")
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_usage_limit_shows_once_with_its_reset_time() {
     let out = replay("usage_limit").await;
     let turns = turns(&out);

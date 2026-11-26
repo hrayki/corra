@@ -31,13 +31,6 @@ export function tokens(n: number): string {
   return String(n)
 }
 
-export function modelLabel(id?: string): string {
-  if (!id) return 'Default'
-  const m = id.match(/claude-([a-z]+)-(\d+)-(\d+)/)
-  if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`
-  return id
-}
-
 export function clock(ms: number): string {
   return ms - Date.now() > 20 * 3600_000
     ? new Date(ms).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })
