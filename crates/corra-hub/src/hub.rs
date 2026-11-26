@@ -998,6 +998,7 @@ impl Hub {
             pinned_at: None,
             settled_at: None,
             hidden_at: None,
+            started_by: None,
         };
         self.db.insert_thread(&t)?;
         self.publish_thread(&t);
@@ -1449,6 +1450,13 @@ impl Hub {
             .kv_get(&format!("thread:{thread}:{key}"))
             .ok()
             .flatten()
+    }
+
+    pub fn mark_started_by(&self, thread: ThreadId, parent: ThreadId) {
+        self.set_thread_kv(thread, "started_by", &parent.to_string());
+        if let Ok(Some(t)) = self.db.thread(thread) {
+            self.publish_thread(&t);
+        }
     }
 
     pub fn set_thread_kv(&self, thread: ThreadId, key: &str, value: &str) {

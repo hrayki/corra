@@ -18,8 +18,8 @@ import { clock, duration } from '../lib/format'
 import { openFile, setPanel } from '../lib/panel'
 import { Btn, Picture, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
-import { AgentRow } from './Agents'
-import { isAgentCall } from '../lib/agents'
+import { AgentRow, ThreadRow } from './Agents'
+import { isAgentCall, startedThread } from '../lib/agents'
 
 export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean; cwd?: string }) {
   const top = createMemo(() => props.turn.entries.filter((e) => !(e.type === 'item' && e.item.parent)))
@@ -199,7 +199,7 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
   )
 }
 
-const agentsIn = (es: Entry[]) => es.filter((e) => e.type === 'item' && isAgentCall(e.item))
+const agentsIn = (es: Entry[]) => es.filter((e) => e.type === 'item' && (isAgentCall(e.item) || !!startedThread(e.item)))
 
 function Fold(props: { label: string; steps: number; entries: Entry[]; render: (e: Entry) => JSX.Element }) {
   const [open, setOpen] = createSignal(false)
@@ -476,6 +476,9 @@ function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, 
       </Match>
       <Match when={b().type === 'reasoning'}>
         <Reasoning item={props.item} />
+      </Match>
+      <Match when={b().type === 'tool_call' && startedThread(props.item)}>
+        <ThreadRow item={props.item} />
       </Match>
       <Match when={b().type === 'tool_call' && isAgentCall(props.item)}>
         <AgentRow thread={props.thread} item={props.item} kids={props.kids} cwd={props.cwd} />

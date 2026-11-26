@@ -36,6 +36,7 @@ fn setup(dir: &std::path::Path) -> (HubRef, ThreadId, MachineId) {
         pinned_at: None,
         settled_at: None,
         hidden_at: None,
+        started_by: None,
     };
     hub.db.insert_thread(&t).unwrap();
     (hub, t.id, machine)

@@ -3,4 +3,4 @@ import type { AgentKind } from "./AgentKind";
 import type { AgentSettings } from "./AgentSettings";
 import type { ThreadStatus } from "./ThreadStatus";
 
-export type Thread = { id: string, project: string, title: string, agent: AgentKind, machine?: string, session_id?: string, cwd: string, settings: AgentSettings, status: ThreadStatus, last_seq: number, created_at: number, updated_at: number, pinned_at?: number, settled_at?: number, hidden_at?: number, };
+export type Thread = { id: string, project: string, title: string, agent: AgentKind, machine?: string, session_id?: string, cwd: string, settings: AgentSettings, status: ThreadStatus, last_seq: number, created_at: number, updated_at: number, pinned_at?: number, settled_at?: number, hidden_at?: number, started_by?: string, };

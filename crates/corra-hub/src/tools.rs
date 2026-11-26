@@ -293,6 +293,7 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
                     }],
                 )
                 .await?;
+            hub.mark_started_by(n.id, t.id);
             Ok(json!({ "thread": n.id, "title": n.title }))
         }
         a if a.starts_with("github.") => crate::github::run(hub, p, a, &input).await,

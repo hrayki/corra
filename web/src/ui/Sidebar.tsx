@@ -66,9 +66,18 @@ export function Sidebar() {
       .map((name) => {
         const ts = rest.filter((t) => projectName(t) === name).sort((a, b) => b.updated_at - a.updated_at)
         const all = threads().filter((t) => projectName(t) === name)
+        const open = ts.filter((t) => !t.settled_at)
+        const here = new Set(open.map((t) => t.id))
+        const kids = new Map<string, ThreadX[]>()
+        for (const t of open)
+          if (t.started_by && here.has(t.started_by) && t.started_by !== t.id)
+            kids.set(t.started_by, [...(kids.get(t.started_by) ?? []), t])
+        const latest = (t: ThreadX, seen = new Set<string>()): number =>
+          seen.has(t.id) ? t.updated_at : Math.max(t.updated_at, ...(kids.get(t.id) ?? []).map((k) => latest(k, new Set([...seen, t.id]))))
         return {
           name,
-          open: ts.filter((t) => !t.settled_at),
+          kids,
+          open: open.filter((t) => !t.started_by || !here.has(t.started_by)).sort((a, b) => latest(b) - latest(a)),
           settled: ts.filter((t) => t.settled_at),
           latest: all.reduce((m, t) => Math.max(m, t.updated_at), 0),
           any: all.length > 0,
@@ -143,7 +152,7 @@ export function Sidebar() {
                       </Show>
                     }
                   >
-                    {(t) => <Row t={t} active={current() === t.id} />}
+                    {(t) => <Tree t={t} kids={g.kids} current={current()} depth={0} />}
                   </For>
                   <Show when={hidden() > 0 || more()[g.name]}>
                     <button
@@ -298,7 +307,20 @@ function Mark(props: { kind: string; label: string }) {
   )
 }
 
-function Row(props: { t: ThreadX; active: boolean; project?: string }) {
+function Tree(props: { t: ThreadX; kids: Map<string, ThreadX[]>; current?: string; depth: number }) {
+  return (
+    <>
+      <Row t={props.t} active={props.current === props.t.id} depth={props.depth} />
+      <Show when={props.depth < 4}>
+        <For each={props.kids.get(props.t.id) ?? []}>
+          {(k) => <Tree t={k} kids={props.kids} current={props.current} depth={props.depth + 1} />}
+        </For>
+      </Show>
+    </>
+  )
+}
+
+function Row(props: { t: ThreadX; active: boolean; project?: string; depth?: number }) {
   const limited = () => props.t.status === 'error' && limitedNow(state.usage)
   const mark = () => {
     const s = props.t.status
@@ -318,7 +340,8 @@ function Row(props: { t: ThreadX; active: boolean; project?: string }) {
           threadActions(props.t, (m) => alert(m)),
         )
       }
-      class="flex h-[30px] items-center gap-2 rounded-lg pr-2 pl-2 max-md:h-10"
+      class="flex h-[30px] items-center gap-2 rounded-lg pr-2 max-md:h-10"
+      style={{ 'padding-left': `${8 + (props.depth ?? 0) * 16}px` }}
       classList={{ 'bg-ink/[0.06]': props.active, 'hover:bg-ink/[0.03]': !props.active }}
       title={props.project ? `${props.t.title} · ${props.project}` : undefined}
     >

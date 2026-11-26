@@ -46,6 +46,7 @@ fn thread(title: &str, status: ThreadStatus) -> Thread {
         pinned_at: None,
         settled_at: None,
         hidden_at: None,
+        started_by: None,
     }
 }
 

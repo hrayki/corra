@@ -51,6 +51,7 @@ async fn an_approval_left_open_by_a_restart_is_closed_with_a_notice() {
             pinned_at: None,
             settled_at: None,
             hidden_at: None,
+            started_by: None,
         };
         hub.db.insert_thread(&t).unwrap();
         for e in [

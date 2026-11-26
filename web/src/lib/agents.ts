@@ -19,6 +19,17 @@ type ToolBody = Extract<ItemView['body'], { type: 'tool_call' }>
 
 export const isAgentCall = (it: ItemView) => it.body.type === 'tool_call' && (it.body.name === 'Agent' || it.body.name === 'Task')
 
+export function startedThread(it: ItemView): string | undefined {
+  const b = it.body
+  if (b.type !== 'tool_call' || b.name !== 'mcp__corra__threads_start' || b.status !== 'completed') return undefined
+  try {
+    const v = JSON.parse(b.output?.text ?? '') as { thread?: unknown }
+    return typeof v.thread === 'string' ? v.thread : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export const isTaskCall = (it: ItemView) =>
   isAgentCall(it) || (it.body.type === 'tool_call' && it.body.name === 'Bash' && field(it.body, 'run_in_background') === true)
 

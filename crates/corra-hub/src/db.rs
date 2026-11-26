@@ -883,7 +883,7 @@ impl Db {
     }
 }
 
-const THREAD_SELECT: &str = "SELECT id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at, pinned_at, settled_at, hidden_at FROM threads";
+const THREAD_SELECT: &str = "SELECT id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at, pinned_at, settled_at, hidden_at, (SELECT value FROM kv WHERE kv.key = 'thread:' || threads.id || ':started_by') FROM threads";
 
 fn row_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -938,5 +938,6 @@ fn row_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         pinned_at: r.get(12)?,
         settled_at: r.get(13)?,
         hidden_at: r.get(14)?,
+        started_by: opt_uuid(r.get(15)?),
     })
 }

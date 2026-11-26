@@ -32,6 +32,7 @@ fn thread(hub: &HubRef, project: ProjectId, hidden_days_ago: Option<i64>, now: i
         pinned_at: None,
         settled_at: None,
         hidden_at: hidden_days_ago.map(|d| now - d * DAY),
+        started_by: None,
     };
     hub.db.insert_thread(&t).unwrap();
     hub.db.update_thread(&t).unwrap();
