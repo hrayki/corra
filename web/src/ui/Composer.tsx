@@ -197,10 +197,10 @@ export function InputBox(props: {
     if (!ta) return
     const top = ta.scrollTop
     ta.style.height = 'auto'
-    ta.style.height = Math.min(ta.scrollHeight, 320) + 'px'
+    ta.style.height = ta.scrollHeight + 'px'
     ta.scrollTop = document.activeElement === ta && ta.selectionEnd === ta.value.length ? ta.scrollHeight : top
   }
-  createEffect(on(props.input.text, () => queueMicrotask(resize)))
+  createEffect(on([props.input.text, props.input.images], () => queueMicrotask(resize)))
   onMount(() => props.autofocus && requestAnimationFrame(() => ta?.focus()))
   const matches = createMemo(() => {
     const t = props.input.text()
@@ -228,15 +228,15 @@ export function InputBox(props: {
         </div>
       </Show>
       <div
-        class="rounded-2xl border border-line bg-raised shadow-[0_1px_2px_rgb(0_0_0/0.04)] transition-colors duration-100 focus-within:border-faint"
+        class="flex max-h-[40dvh] flex-col rounded-2xl border border-line bg-raised shadow-[0_1px_2px_rgb(0_0_0/0.04)] transition-colors duration-100 focus-within:border-faint"
         onDrop={props.input.onDrop}
         onDragOver={(e) => e.preventDefault()}
       >
         <Show when={props.input.images().length}>
-          <div class="flex flex-wrap gap-2 px-3 pt-3">
+          <div class="flex shrink-0 gap-2 overflow-x-auto px-3 pt-3">
             <For each={props.input.images()}>
               {(im, i) => (
-                <div class="relative">
+                <div class="relative shrink-0">
                   <Picture class="size-14 rounded-lg border border-line object-cover" src={`data:${im.media_type};base64,${im.data}`} />
                   <button
                     aria-label="Remove image"
@@ -255,7 +255,7 @@ export function InputBox(props: {
           data-composer
           autofocus={props.autofocus}
           rows={1}
-          class="block max-h-80 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] leading-relaxed placeholder:text-faint"
+          class="block min-h-0 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[14px] leading-relaxed placeholder:text-faint"
           placeholder={props.placeholder}
           value={props.input.text()}
           onInput={(e) => props.input.setText(e.currentTarget.value)}
@@ -293,7 +293,7 @@ export function InputBox(props: {
             ta.selectionStart = ta.selectionEnd = list.caret
           }}
         />
-        <div class="@container flex items-center gap-1.5 px-2 pt-0.5 pb-2">
+        <div class="@container flex shrink-0 items-center gap-1.5 px-2 pt-0.5 pb-2">
           <label
             class="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-mute hover:bg-ink/5 hover:text-ink max-md:size-9"
             title="Attach an image"
