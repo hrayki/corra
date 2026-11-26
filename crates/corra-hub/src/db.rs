@@ -861,6 +861,41 @@ impl Db {
         )
     }
 
+    pub fn open_requests(&self, thread: ThreadId) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'request' AND json_extract(data, '$.id') NOT IN (SELECT json_extract(data, '$.id') FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'request_resolved' AND json_extract(data, '$.id') IS NOT NULL) ORDER BY seq",
+            params![thread.to_string()],
+        )
+    }
+
+    pub fn open_turn(&self, thread: ThreadId) -> Result<Option<String>> {
+        let Some(Event::TurnStarted { turn, .. }) =
+            self.last_turns_started(thread, 1)?.pop().map(|e| e.event)
+        else {
+            return Ok(None);
+        };
+        let ended = self.stored_events(
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_completed' AND seq > (SELECT MAX(seq) FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started') ORDER BY seq",
+            params![thread.to_string()],
+        )?;
+        Ok((!ended
+            .iter()
+            .any(|e| matches!(&e.event, Event::TurnCompleted { turn: t, .. } if *t == turn)))
+        .then_some(turn))
+    }
+
+    pub fn last_outcome(&self, thread: ThreadId) -> Result<Option<TurnOutcome>> {
+        Ok(
+            match self
+                .last_of_kind_before(thread, "turn_completed", i64::MAX)?
+                .map(|e| e.event)
+            {
+                Some(Event::TurnCompleted { outcome, .. }) => Some(outcome),
+                _ => None,
+            },
+        )
+    }
+
     fn stored_events(&self, sql: &str, p: impl rusqlite::Params) -> Result<Vec<StoredEvent>> {
         self.with(|c| {
             let mut st = c.prepare(sql)?;
