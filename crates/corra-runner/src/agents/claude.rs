@@ -870,6 +870,7 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                     permission_mode: msg["permissionMode"].as_str().map(String::from),
                     models: vec![],
                     efforts: vec![],
+                    modes: vec![],
                 },
             );
         }

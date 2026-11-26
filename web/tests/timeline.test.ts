@@ -75,6 +75,20 @@ test('a turn without one folds its work once, as before', () => {
   assert.deepEqual([ids(f[0].work), ids(f[0].rest)], [['a'], ['m']])
 })
 
+test('a thought saved after the reply folds with the work and leaves the reply out', () => {
+  const thought = (turn: string, id: string, ts: number) =>
+    ev(ts, { kind: 'item_completed', turn, item: { id, type: 'reasoning', text: 'hmm' } })
+  const t = turnOf([
+    ev(1000, { kind: 'turn_started', turn: 't1', input: [{ type: 'text', text: 'go' }], settings: {} }),
+    tool('t1', 'a', 2000),
+    answer('t1', 'm', 3000, 'done'),
+    thought('t1', 'r', 3000),
+    ev(3000, { kind: 'turn_completed', turn: 't1', outcome: 'completed' }),
+  ])
+  const f = folds(t.id, t.entries)
+  assert.deepEqual([ids(f[0].work), ids(f[0].rest)], [['a', 'r'], ['m']])
+})
+
 test('a thread opened on its last turns ignores steps of earlier turns until those load', () => {
   const start = (turn: string, ts: number) => ev(ts, { kind: 'turn_started', turn, input: [{ type: 'text', text: turn }], settings: {} })
   const done = (turn: string, ts: number) => ev(ts, { kind: 'turn_completed', turn, outcome: 'completed' })
