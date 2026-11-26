@@ -81,38 +81,51 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
       class="group/turn pb-7"
       style={{ 'content-visibility': props.last ? 'visible' : 'auto', 'contain-intrinsic-size': 'auto 220px' }}
     >
-      <Show when={props.turn.input.length > 0}>
+      <Show
+        when={props.turn.input.length > 0}
+        fallback={
+          <div class="mb-4">
+            <HubNote text={props.turn.cause ?? 'Continued on its own.'} />
+          </div>
+        }
+      >
         <UserMessage thread={props.thread} turn={props.turn} />
       </Show>
-      <div class="mt-4 space-y-3">
-        <Show
-          when={done()}
-          fallback={
-            <>
-              <For each={segments()}>
-                {(seg, i) =>
-                  'steps' in seg ? <Steps entries={seg.steps} current={i() === segments().length - 1} render={render} /> : render(seg.entry)
-                }
-              </For>
-              <Show when={props.last && segments().length === 0}>
-                <Working />
-              </Show>
-            </>
-          }
-        >
-          <For each={parts()}>
-            {(p, i) => (
+      <Show when={!done() || top().length > 0}>
+        <div class="space-y-3">
+          <Show
+            when={done()}
+            fallback={
               <>
-                <Show when={p.lead}>{(l) => render(l())}</Show>
-                <Show when={p.work.length > 0}>
-                  <Fold label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
+                <For each={segments()}>
+                  {(seg, i) =>
+                    'steps' in seg ? (
+                      <Steps entries={seg.steps} current={i() === segments().length - 1} render={render} />
+                    ) : (
+                      render(seg.entry)
+                    )
+                  }
+                </For>
+                <Show when={props.last && segments().length === 0}>
+                  <Working />
                 </Show>
-                <For each={p.rest}>{render}</For>
               </>
-            )}
-          </For>
-        </Show>
-      </div>
+            }
+          >
+            <For each={parts()}>
+              {(p, i) => (
+                <>
+                  <Show when={p.lead}>{(l) => render(l())}</Show>
+                  <Show when={p.work.length > 0}>
+                    <Fold label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
+                  </Show>
+                  <For each={p.rest}>{render}</For>
+                </>
+              )}
+            </For>
+          </Show>
+        </div>
+      </Show>
       <For each={secrets()}>
         {(s) => (
           <div class="mt-3 flex items-center gap-2 text-[12.5px] text-mute">
@@ -174,7 +187,7 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
           </div>
         )}
       </Show>
-      <Show when={done() && firstFold() < 0 && took()}>
+      <Show when={done() && firstFold() < 0 && top().length > 0 && took()}>
         <div class="mt-2 text-[12px] text-faint">
           {props.turn.outcome === 'interrupted' ? 'Stopped · ' : ''}
           {took()}
@@ -315,8 +328,15 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
     return props.turn.input.length === 1 && t?.startsWith(NOTE) ? t.slice(NOTE.length) : null
   }
   return (
-    <Show when={note() === null} fallback={<HubNote text={note()!} />}>
-      <div class="flex flex-col items-end gap-1">
+    <Show
+      when={note() === null}
+      fallback={
+        <div class="mb-4">
+          <HubNote text={note()!} />
+        </div>
+      }
+    >
+      <div class="mb-2 flex flex-col items-end gap-1">
         <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap">
           <div
             classList={{
