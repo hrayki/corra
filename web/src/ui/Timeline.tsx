@@ -16,7 +16,7 @@ import type { InputPart } from '../proto/InputPart'
 import type { RequestResponse } from '../proto/RequestResponse'
 import { clock, duration } from '../lib/format'
 import { openFile, setPanel } from '../lib/panel'
-import { Btn, Picture, inputClass } from './bits'
+import { Btn, Thumbs, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
 import { AgentRow, ThreadRow } from './Agents'
 import { isAgentCall, startedThread } from '../lib/agents'
@@ -329,6 +329,7 @@ function HubNote(props: { text: string }) {
 
 function UserMessage(props: { thread: string; turn: TurnView }) {
   const text = () => props.turn.input.find((p) => p.type === 'text') as Extract<InputPart, { type: 'text' }> | undefined
+  const texts = () => props.turn.input.filter((p) => p.type === 'text')
   const busy = () => {
     const s = state.threads[props.thread]?.status
     return s === 'running' || s === 'waiting' || s === 'starting'
@@ -352,28 +353,23 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
       }
     >
       <div class="mb-2 flex flex-col items-end gap-1">
-        <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap">
-          <div
-            classList={{
-              'max-h-[15.5rem] overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]': long() && !whole(),
-            }}
-          >
-            <For each={props.turn.input}>
-              {(p) =>
-                p.type === 'text' ? (
-                  <span>{p.text}</span>
-                ) : (
-                  <Picture class="my-1 max-h-60 rounded-lg" src={`data:${p.media_type};base64,${p.data}`} />
-                )
-              }
-            </For>
+        <Thumbs parts={props.turn.input} class="mb-1" />
+        <Show when={texts().length}>
+          <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap">
+            <div
+              classList={{
+                'max-h-[15.5rem] overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]': long() && !whole(),
+              }}
+            >
+              <For each={texts()}>{(p) => <span>{p.text}</span>}</For>
+            </div>
+            <Show when={long()}>
+              <button class="mt-1 text-[12.5px] font-medium text-mute hover:text-ink" onClick={() => setWhole(!whole())}>
+                {whole() ? 'Show less' : 'Show more'}
+              </button>
+            </Show>
           </div>
-          <Show when={long()}>
-            <button class="mt-1 text-[12.5px] font-medium text-mute hover:text-ink" onClick={() => setWhole(!whole())}>
-              {whole() ? 'Show less' : 'Show more'}
-            </button>
-          </Show>
-        </div>
+        </Show>
         <div class={`${actionRow} justify-end`}>
           <CopyButton text={() => text()?.text ?? ''} />
           <Show when={state.threads[props.thread]?.agent !== 'antigravity'}>
