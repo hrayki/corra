@@ -10,7 +10,7 @@ const [mode, setMode] = createSignal<'light' | 'dark'>('light')
 export { choice, omarchy, mode }
 
 const media = matchMedia('(prefers-color-scheme: dark)')
-const VARS = ['--bg', '--panel', '--raised', '--line', '--ink', '--mute', '--faint', '--accent', '--ok', '--warn', '--bad']
+const VARS = ['--bg', '--panel', '--raised', '--line', '--ink', '--mute', '--faint', '--accent', '--ok', '--warn', '--bad', '--done']
 
 function apply() {
   const root = document.documentElement
@@ -34,6 +34,7 @@ function apply() {
       '--ok': k.color2 ?? '#69db7c',
       '--warn': k.color3 ?? '#fcc419',
       '--bad': k.color1 ?? '#ff8787',
+      '--done': k.color4 ?? '#74c0fc',
     }
     for (const [name, v] of Object.entries(set)) root.style.setProperty(name, v)
     root.dataset.theme = o.mode

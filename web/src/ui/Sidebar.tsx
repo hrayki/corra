@@ -3,7 +3,6 @@ import Plus from 'lucide-solid/icons/plus'
 import SquarePen from 'lucide-solid/icons/square-pen'
 import PanelLeftClose from 'lucide-solid/icons/panel-left-close'
 import Settings from 'lucide-solid/icons/settings'
-import Bell from 'lucide-solid/icons/bell'
 import Search from 'lucide-solid/icons/search'
 import ChevronRight from 'lucide-solid/icons/chevron-right'
 import ChevronUp from 'lucide-solid/icons/chevron-up'
@@ -11,12 +10,14 @@ import Pin from 'lucide-solid/icons/pin'
 import FolderPlus from 'lucide-solid/icons/folder-plus'
 import SlidersHorizontal from 'lucide-solid/icons/sliders-horizontal'
 import { state, type ThreadX } from '../lib/store'
-import { openContextMenu } from './bits'
+import { StatusMark, openContextMenu, statusWord } from './bits'
 import { threadActions } from './actions'
 import { ago } from '../lib/format'
 import { route } from '../lib/route'
 import { knowThreads, limitedNow, markSeen, unread } from '../lib/seen'
 import { toggleSidebar } from '../lib/layout'
+import { AGENT_NAMES } from '../lib/choices'
+import { mostUrgent, needsYou, shownStatus, type Shown } from '../lib/status'
 
 const FOLDED = 'corra:sidebar-folded'
 const SHOWN = 5
@@ -47,21 +48,16 @@ export function Sidebar() {
     const t = current() ? state.threads[current()!] : undefined
     if (t && t.status === 'idle') markSeen(t.id, t.last_seq)
   })
-  const needsMe = (t: ThreadX) => t.status === 'waiting' || t.status === 'error' || (unread(t) && t.id !== current())
-  const attention = createMemo(() =>
-    threads()
-      .filter((t) => needsMe(t) && !t.settled_at)
-      .sort((a, b) => b.updated_at - a.updated_at),
-  )
+  const shown = (t: ThreadX) => shownStatus(t.status, unread(t), t.id === current())
   const pinned = createMemo(() =>
     threads()
-      .filter((t) => t.pinned_at && !attention().includes(t))
+      .filter((t) => t.pinned_at)
       .sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0)),
   )
   const groups = createMemo(() => {
     const names = new Set<string>(Object.values(state.projects).map((p) => p.name))
     for (const t of threads()) names.add(projectName(t))
-    const rest = threads().filter((t) => !t.pinned_at && !attention().includes(t))
+    const rest = threads().filter((t) => !t.pinned_at)
     return [...names]
       .map((name) => {
         const ts = rest.filter((t) => projectName(t) === name).sort((a, b) => b.updated_at - a.updated_at)
@@ -74,9 +70,14 @@ export function Sidebar() {
             kids.set(t.started_by, [...(kids.get(t.started_by) ?? []), t])
         const latest = (t: ThreadX, seen = new Set<string>()): number =>
           seen.has(t.id) ? t.updated_at : Math.max(t.updated_at, ...(kids.get(t.id) ?? []).map((k) => latest(k, new Set([...seen, t.id]))))
+        const keep = (t: ThreadX, seen = new Set<string>()): boolean =>
+          !seen.has(t.id) &&
+          (needsYou(shown(t)) || t.id === current() || (kids.get(t.id) ?? []).some((k) => keep(k, new Set([...seen, t.id]))))
         return {
           name,
           kids,
+          keep,
+          flag: mostUrgent(open.map(shown)),
           open: open.filter((t) => !t.started_by || !here.has(t.started_by)).sort((a, b) => latest(b) - latest(a)),
           settled: ts.filter((t) => t.settled_at),
           latest: all.reduce((m, t) => Math.max(m, t.updated_at), 0),
@@ -119,25 +120,21 @@ export function Sidebar() {
         </label>
       </div>
       <nav class="min-h-0 overflow-y-auto px-2 pt-1 pb-3" classList={{ 'flex-1': !settledOpen(), 'shrink grow-0': settledOpen() }}>
-        <Show when={attention().length}>
-          <Group title="Needs you" icon={<Bell size={13} />}>
-            <For each={attention()}>{(t) => <Row t={t} active={current() === t.id} project={projectName(t)} />}</For>
-          </Group>
-        </Show>
         <Show when={pinned().length}>
           <Group title="Pinned" icon={<Pin size={13} />}>
-            <For each={pinned()}>{(t) => <Row t={t} active={current() === t.id} project={projectName(t)} />}</For>
+            <For each={pinned()}>{(t) => <Card t={t} active={current() === t.id} project={projectName(t)} />}</For>
           </Group>
         </Show>
         <For each={groups()}>
           {(g) => {
             const open = () => !folded()[g.name] || g.open.some((t) => t.id === current())
-            const shown = () => (more()[g.name] ? g.open : g.open.slice(0, SHOWN))
-            const hidden = () => g.open.length - shown().length
+            const listed = () => (more()[g.name] ? g.open : g.open.filter((t, i) => i < SHOWN || g.keep(t)))
+            const hidden = () => g.open.length - listed().length
             return (
               <Group
                 title={g.name}
                 folded={!open()}
+                flag={open() ? undefined : g.flag}
                 onFold={() => setFolded((f) => ({ ...f, [g.name]: !f[g.name] }))}
                 newHref={`#/new/${encodeURIComponent(g.name)}`}
                 settingsHref={hubProject(g.name) ? `#/project/${hubProject(g.name)!.id}` : undefined}
@@ -145,10 +142,10 @@ export function Sidebar() {
               >
                 <Show when={open()}>
                   <For
-                    each={shown()}
+                    each={listed()}
                     fallback={
                       <Show when={!g.any}>
-                        <div class="flex h-[30px] items-center pl-8 text-[12.5px] text-faint">No threads yet</div>
+                        <div class="flex h-[30px] items-center pl-2.5 text-[12.5px] text-faint">No threads yet</div>
                       </Show>
                     }
                   >
@@ -156,7 +153,7 @@ export function Sidebar() {
                   </For>
                   <Show when={hidden() > 0 || more()[g.name]}>
                     <button
-                      class="flex h-[30px] w-full items-center rounded-lg pl-8 text-[12.5px] text-faint hover:text-mute"
+                      class="flex h-[30px] w-full items-center rounded-lg pl-2.5 text-[12.5px] text-faint hover:text-mute max-md:h-10"
                       onClick={() => setMore((m) => ({ ...m, [g.name]: !m[g.name] }))}
                     >
                       {more()[g.name] ? 'Show fewer' : `Show ${hidden()} more`}
@@ -175,7 +172,7 @@ export function Sidebar() {
         <div class="flex min-h-40 flex-1 flex-col justify-end overflow-hidden border-t border-line">
           <div class="min-h-0 overflow-y-auto px-2 py-2">
             <For each={settled()} fallback={<p class="px-2 py-1.5 text-[12.5px] text-faint">Nothing settled.</p>}>
-              {(t) => <Row t={t} active={current() === t.id} project={projectName(t)} />}
+              {(t) => <Card t={t} active={current() === t.id} project={projectName(t)} />}
             </For>
           </div>
         </div>
@@ -241,6 +238,7 @@ function Group(props: {
   newHref?: string
   settingsHref?: string
   trusted?: boolean
+  flag?: Shown
   children: JSX.Element
 }) {
   return (
@@ -260,6 +258,14 @@ function Group(props: {
             <span class="shrink-0 text-[11px] text-warn" title="Manager: the hub's own keys, every repo, and the tools that manage corra">
               manager
             </span>
+          </Show>
+          <Show when={props.flag && FLAG[props.flag]}>
+            {(label) => (
+              <span class="flex shrink-0" title={label()}>
+                <StatusMark status={props.flag!} class="-mx-[3px]" />
+                <span class="sr-only">{label()}</span>
+              </span>
+            )}
           </Show>
           <Show when={props.onFold}>
             <ChevronRight
@@ -285,32 +291,25 @@ function Group(props: {
   )
 }
 
-function Mark(props: { kind: string; label: string }) {
-  return (
-    <span class="flex size-4 shrink-0 items-center justify-center" title={props.label} aria-label={props.label}>
-      <Show
-        when={props.kind === 'working'}
-        fallback={
-          <span
-            class="size-[7px] rounded-full"
-            classList={{
-              'bg-warn': props.kind === 'needs',
-              'bg-bad': props.kind === 'failed',
-              'bg-[oklch(0.62_0.16_250)]': props.kind === 'done',
-            }}
-          />
-        }
-      >
-        <span class="size-[10px] animate-spin rounded-full border-[1.5px] border-accent border-t-transparent" />
-      </Show>
-    </span>
-  )
+const TONE: Record<Shown, string> = {
+  waiting: 'text-warn',
+  error: 'text-bad',
+  running: 'text-accent',
+  starting: 'text-accent',
+  done: 'text-done',
+  idle: '',
+}
+
+const FLAG: Partial<Record<Shown, string>> = {
+  waiting: 'A thread here needs you',
+  error: 'A thread here failed',
+  done: 'A thread here is done',
 }
 
 function Tree(props: { t: ThreadX; kids: Map<string, ThreadX[]>; current?: string; depth: number }) {
   return (
     <>
-      <Row t={props.t} active={props.current === props.t.id} depth={props.depth} />
+      <Card t={props.t} active={props.current === props.t.id} depth={props.depth} />
       <Show when={props.depth < 4}>
         <For each={props.kids.get(props.t.id) ?? []}>
           {(k) => <Tree t={k} kids={props.kids} current={props.current} depth={props.depth + 1} />}
@@ -320,17 +319,10 @@ function Tree(props: { t: ThreadX; kids: Map<string, ThreadX[]>; current?: strin
   )
 }
 
-function Row(props: { t: ThreadX; active: boolean; project?: string; depth?: number }) {
-  const limited = () => props.t.status === 'error' && limitedNow(state.usage)
-  const mark = () => {
-    const s = props.t.status
-    if (s === 'waiting') return { kind: 'needs', label: 'Needs you' }
-    if (s === 'error') return { kind: 'failed', label: limited() ? 'Limited' : 'Failed' }
-    if (s === 'running' || s === 'starting') return { kind: 'working', label: s === 'running' ? 'Working' : 'Starting' }
-    if (unread(props.t) && !props.active) return { kind: 'done', label: 'Finished' }
-    return null
-  }
-  const strong = () => props.t.status === 'waiting' || (unread(props.t) && !props.active)
+function Card(props: { t: ThreadX; active: boolean; project?: string; depth?: number }) {
+  const shown = () => shownStatus(props.t.status, unread(props.t), props.active)
+  const word = () => (shown() === 'error' && limitedNow(state.usage) ? 'Limited' : statusWord[shown()])
+  const strong = () => shown() === 'waiting' || shown() === 'done'
   return (
     <a
       href={`#/t/${props.t.id}`}
@@ -340,26 +332,35 @@ function Row(props: { t: ThreadX; active: boolean; project?: string; depth?: num
           threadActions(props.t, (m) => alert(m)),
         )
       }
-      class="flex h-[30px] items-center gap-2 rounded-lg pr-2 max-md:h-10"
-      style={{ 'padding-left': `${8 + (props.depth ?? 0) * 16}px` }}
+      aria-current={props.active ? 'page' : undefined}
+      class="flex min-w-0 flex-col gap-px rounded-lg py-1.5 pr-2 max-md:py-2"
+      style={{ 'padding-left': `${10 + (props.depth ?? 0) * 14}px` }}
       classList={{ 'bg-ink/[0.06]': props.active, 'hover:bg-ink/[0.03]': !props.active }}
       title={props.project ? `${props.t.title} · ${props.project}` : undefined}
     >
-      <span class="flex size-4 shrink-0 items-center justify-center">{mark() && <Mark {...mark()!} />}</span>
       <span
-        class="min-w-0 flex-1 truncate text-[13px]"
+        class="truncate text-[13px] leading-[18px]"
         classList={{
-          'text-faint': !!props.t.settled_at,
+          'text-faint': !!props.t.settled_at && !props.active,
           'font-medium text-ink': strong() || props.active,
           'text-ink/80': !props.t.settled_at && !strong() && !props.active,
         }}
       >
         {props.t.title}
       </span>
-      <Show when={props.project}>
-        <span class="max-w-[35%] shrink-0 truncate text-[11.5px] text-faint">{props.project}</span>
-      </Show>
-      <span class="num shrink-0 text-[11px] text-faint">{ago(props.t.updated_at)}</span>
+      <span class="flex min-w-0 items-center text-[11.5px] leading-4 text-faint">
+        <Show when={word()}>
+          <StatusMark status={shown()} class="-ml-[3px] mr-px" />
+          <span class={`shrink-0 font-medium ${TONE[shown()]}`}>{word()}</span>
+          <span class="shrink-0 px-1">·</span>
+        </Show>
+        <span class="min-w-0 truncate">
+          {AGENT_NAMES[props.t.agent]}
+          {props.project ? ` · ${props.project}` : ''}
+        </span>
+        <span class="shrink-0 px-1">·</span>
+        <span class="num shrink-0">{ago(props.t.updated_at)}</span>
+      </span>
     </a>
   )
 }

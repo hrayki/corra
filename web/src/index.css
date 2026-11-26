@@ -16,6 +16,7 @@
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-bad: var(--bad);
+  --color-done: var(--done);
 }
 
 :root {
@@ -30,6 +31,7 @@
   --ok: #2b8a3e;
   --warn: #c2700a;
   --bad: #c92a2a;
+  --done: oklch(0.56 0.16 250);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 6px 24px -8px rgb(0 0 0 / 0.1);
   color-scheme: light;
 }
@@ -46,6 +48,7 @@
   --ok: #69db7c;
   --warn: #fcc419;
   --bad: #ff8787;
+  --done: oklch(0.72 0.13 250);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 28px -8px rgb(0 0 0 / 0.6);
   color-scheme: dark;
 }
