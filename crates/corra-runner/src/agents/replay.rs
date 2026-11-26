@@ -281,6 +281,7 @@ fn check(name: &str, out: &[AgentOut]) {
 struct Turn {
     id: String,
     input: String,
+    cause: Option<String>,
     items: Vec<Item>,
     requests: Vec<(AgentRequest, Option<RequestResponse>)>,
     outcome: Option<TurnOutcome>,
@@ -325,9 +326,12 @@ fn turns(out: &[AgentOut]) -> Vec<Turn> {
     for o in out {
         let AgentOut::Event(e) = o else { continue };
         match e {
-            Event::TurnStarted { turn, input, .. } => turns.push(Turn {
+            Event::TurnStarted {
+                turn, input, cause, ..
+            } => turns.push(Turn {
                 id: turn.clone(),
                 input: text_of(input),
+                cause: cause.clone(),
                 ..Default::default()
             }),
             Event::TurnCompleted {
@@ -414,6 +418,11 @@ async fn a_background_agent_joins_its_turn_and_wakes_the_thread_once() {
         "the agent's own steps left the turn that started it"
     );
     assert_eq!(wake.input, "", "the wake looks like a message from me");
+    assert_eq!(
+        wake.cause.as_deref(),
+        Some("Background agent finished: Run delayed echo check"),
+        "the wake doesn't say what woke it"
+    );
     let tasks: Vec<&Item> = turns
         .iter()
         .flat_map(|t| &t.items)
@@ -426,6 +435,13 @@ async fn a_background_agent_joins_its_turn_and_wakes_the_thread_once() {
     );
     assert!(
         matches!(&tasks[0].body, ItemBody::AgentMessage { text } if text == "Background agent completed: BG_DONE")
+    );
+    assert!(
+        first
+            .items
+            .iter()
+            .any(|i| i.id == tasks[0].id && i.parent.as_ref() == Some(agent)),
+        "the agent's result left the call that started it"
     );
     assert_eq!(wake.texts(), ["WAKE_DONE"]);
     let last_background = out.iter().rev().find_map(|o| match o {
@@ -443,16 +459,22 @@ async fn a_background_command_wakes_the_thread_with_its_own_words() {
     let out = replay("background_bash_wake").await;
     let turns = turns(&out);
     assert_eq!(turns.len(), 3, "{turns:#?}");
-    let wake = &turns[2];
+    let (ran, wake) = (&turns[1], &turns[2]);
     assert_eq!(wake.input, "");
-    let task = wake
-        .items
-        .iter()
-        .find(|i| i.id.starts_with("task:"))
-        .unwrap();
+    assert_eq!(
+        wake.cause.as_deref(),
+        Some("Background command \"Pause for 60 seconds in background\" completed (exit code 0)")
+    );
+    let bash = &ran.items[ran.position(|i| {
+        tool(i, "Bash")
+            && matches!(&i.body, ItemBody::ToolCall { input, .. } if input["run_in_background"] == true)
+    })]
+    .id;
     assert!(
-        matches!(&task.body, ItemBody::AgentMessage { text } if text.starts_with("Background command \"Pause for 60 seconds in background\" completed")),
-        "{task:?}"
+        ran.items
+            .iter()
+            .any(|i| i.id.starts_with("task:") && i.parent.as_ref() == Some(bash)),
+        "the command's result left the call that started it: {ran:#?}"
     );
     assert_eq!(wake.texts(), ["SLEPT"]);
 }
@@ -480,6 +502,31 @@ async fn a_message_sent_mid_turn_stays_where_it_was_sent() {
         !t.items.iter().any(|i| i.id.starts_with("task:")),
         "a foreground command showed as a background agent"
     );
+}
+
+#[tokio::test]
+async fn a_message_sent_as_a_background_agent_finishes_keeps_its_answer() {
+    let out = replay("message_at_wake").await;
+    let turns = turns(&out);
+    let mine = turns
+        .iter()
+        .find(|t| t.input.contains("MINE"))
+        .expect("my message has no turn");
+    assert!(
+        mine.texts().iter().any(|t| t.contains("MINE")),
+        "my turn ended without its answer: {turns:#?}"
+    );
+    for t in &turns {
+        assert!(
+            !t.input.is_empty() || t.cause.is_some(),
+            "a turn shows no reason it started: {t:#?}"
+        );
+        assert!(
+            t.input.contains("MINE") || !t.texts().iter().any(|x| x.contains("MINE")),
+            "my answer landed in another turn: {t:#?}"
+        );
+        assert!(t.outcome.is_some(), "a turn never ended: {t:#?}");
+    }
 }
 
 #[tokio::test]
@@ -732,6 +779,22 @@ async fn record_background_agent() {
         haiku(),
         vec![],
         40,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn record_message_at_wake() {
+    record(
+        "message_at_wake",
+        "Use the Agent tool with run_in_background set to true to start one background agent whose only job is to run `sleep 10 && echo BG_DONE` with Bash and reply BG_DONE. Don't wait for it: as soon as it has started, reply with exactly STARTED and end your turn. When you're told it finished, reply with exactly WAKE_DONE.",
+        haiku(),
+        vec![Step {
+            when: |o| matches!(o, AgentOut::Event(Event::ItemCompleted { item, .. }) if item.id.starts_with("task:")),
+            then: Then::Send("Reply with exactly MINE."),
+        }],
+        30,
     )
     .await;
 }

@@ -35,6 +35,7 @@ export type Entry =
 export type TurnView = {
   id: string
   input: InputPart[]
+  cause?: string
   settings: AgentSettings
   started: number
   entries: Entry[]
@@ -122,6 +123,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
     case 'turn_started': {
       const t = ensureTurn(v, e.turn, e.ts)
       t.input = e.input
+      t.cause = e.cause
       t.settings = e.settings
       t.started = e.ts
       break

@@ -318,11 +318,22 @@ struct StreamState {
     block_count: usize,
 }
 
+struct BackgroundTask {
+    id: String,
+    turn: String,
+    kind: String,
+    description: String,
+}
+
 struct State {
     turn: Option<String>,
     last_turn: Option<String>,
+    user_turn: bool,
+    turn_began: bool,
+    knows_users: bool,
     background_said: Option<std::time::Instant>,
-    held: Vec<Item>,
+    background_tasks: HashMap<String, BackgroundTask>,
+    wake_causes: Vec<String>,
     queued_turns: VecDeque<(String, Vec<InputPart>)>,
     tasks: Vec<(String, Todo)>,
     context_window: Option<u64>,
@@ -353,8 +364,12 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
     let mut st = State {
         turn: None,
         last_turn: None,
+        user_turn: false,
+        turn_began: false,
+        knows_users: false,
         background_said: None,
-        held: vec![],
+        background_tasks: HashMap::new(),
+        wake_causes: vec![],
         queued_turns: VecDeque::new(),
         tasks: Vec::new(),
         context_window: None,
@@ -592,6 +607,7 @@ fn start_turn(ctx: &SessionCtx, st: &mut State, turn: String, input: Vec<InputPa
             turn: turn.clone(),
             input: input.clone(),
             settings: st.settings.clone(),
+            cause: None,
         },
     );
     emit(
@@ -606,10 +622,12 @@ fn start_turn(ctx: &SessionCtx, st: &mut State, turn: String, input: Vec<InputPa
         },
     );
     st.last_turn = Some(turn.clone());
-    st.turn = Some(turn.clone());
+    st.turn = Some(turn);
+    st.user_turn = true;
+    st.turn_began = false;
+    st.wake_causes.clear();
     st.api_error = None;
     let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Running));
-    flush_held(ctx, st, &turn);
 }
 
 fn finish_open_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Option<String>) {
@@ -640,6 +658,7 @@ fn finish_open_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, erro
                 turn: turn.clone(),
                 input,
                 settings: st.settings.clone(),
+                cause: None,
             },
         );
         emit(
@@ -685,26 +704,33 @@ fn close_running_tools(ctx: &SessionCtx, st: &mut State, turn: &str) {
 fn current_turn(ctx: &SessionCtx, st: &mut State) -> String {
     if st.turn.is_none() {
         let t = st.new_turn_id();
+        let causes = std::mem::take(&mut st.wake_causes);
         emit(
             ctx,
             Event::TurnStarted {
                 turn: t.clone(),
                 input: vec![],
                 settings: st.settings.clone(),
+                cause: (!causes.is_empty()).then(|| causes.join("\n")),
             },
         );
         st.last_turn = Some(t.clone());
-        st.turn = Some(t.clone());
+        st.turn = Some(t);
+        st.user_turn = false;
+        st.turn_began = true;
         let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Running));
-        flush_held(ctx, st, &t);
     }
     st.turn.clone().unwrap()
 }
 
 fn turn_for(ctx: &SessionCtx, st: &mut State, parent: &Option<String>) -> String {
+    let home = parent
+        .as_ref()
+        .and_then(|p| st.background_tasks.get(p))
+        .map(|t| t.turn.clone());
     if st.turn.is_none()
         && parent.is_some()
-        && let Some(last) = st.last_turn.clone()
+        && let Some(last) = home.clone().or_else(|| st.last_turn.clone())
     {
         if st
             .background_said
@@ -714,6 +740,9 @@ fn turn_for(ctx: &SessionCtx, st: &mut State, parent: &Option<String>) -> String
             background(ctx, now_ms());
         }
         return last;
+    }
+    if let Some(home) = home {
+        return home;
     }
     current_turn(ctx, st)
 }
@@ -731,7 +760,11 @@ fn background(ctx: &SessionCtx, at: i64) {
 
 async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Value) -> Result<()> {
     let ty = msg["type"].as_str().unwrap_or("");
+    if msg["user_message_uuids"].is_array() {
+        st.knows_users = true;
+    }
     match ty {
+        "command_lifecycle" => on_lifecycle(ctx, st, &msg),
         "system" => on_system(ctx, st, &msg),
         "stream_event" => on_stream(ctx, st, &msg),
         "assistant" => on_assistant(ctx, st, &msg),
@@ -854,10 +887,31 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             }
         }
         "task_started" => {
-            if msg["is_backgrounded"] == false
-                && let Some(id) = msg["task_id"].as_str()
-            {
-                st.foreground_tasks.insert(id.to_string());
+            let id = msg["task_id"].as_str().unwrap_or_default().to_string();
+            let owner = msg["parent_task_id"].as_str().and_then(|p| {
+                st.background_tasks
+                    .values()
+                    .find(|t| t.id == p)
+                    .map(|t| t.turn.clone())
+            });
+            if msg["is_backgrounded"] == false {
+                st.foreground_tasks.insert(id.clone());
+            }
+            let turn = owner.clone().or_else(|| {
+                (msg["is_backgrounded"] != false)
+                    .then(|| st.turn.clone().or_else(|| st.last_turn.clone()))
+                    .flatten()
+            });
+            if let (Some(tool), Some(turn)) = (msg["tool_use_id"].as_str(), turn) {
+                st.background_tasks.insert(
+                    tool.to_string(),
+                    BackgroundTask {
+                        id,
+                        turn,
+                        kind: msg["task_type"].as_str().unwrap_or_default().to_string(),
+                        description: msg["description"].as_str().unwrap_or_default().to_string(),
+                    },
+                );
             }
         }
         "background_tasks_changed" => {
@@ -868,12 +922,13 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
         }
         "task_notification" => {
             let task = msg["task_id"].as_str().unwrap_or_default();
+            let tool = msg["tool_use_id"].as_str().map(String::from);
+            let info = tool.as_ref().and_then(|t| st.background_tasks.remove(t));
             if st.foreground_tasks.remove(task) {
                 return;
             }
             let summary = msg["summary"].as_str().unwrap_or_default();
             let status = msg["status"].as_str().unwrap_or("completed");
-            let tool = msg["tool_use_id"].as_str().map(String::from);
             st.background_said = None;
             background(ctx, 0);
             let item = Item {
@@ -889,24 +944,58 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                     },
                 },
             };
-            match st.turn.clone() {
-                Some(turn) => emit(ctx, Event::ItemCompleted { turn, item }),
-                None => st.held.push(item),
+            if st.turn.is_none() {
+                st.wake_causes
+                    .push(wake_cause(info.as_ref(), summary, status));
+            }
+            if let Some(turn) = info
+                .map(|t| t.turn)
+                .or_else(|| st.turn.clone())
+                .or_else(|| st.last_turn.clone())
+            {
+                emit(ctx, Event::ItemCompleted { turn, item });
             }
         }
         _ => {}
     }
 }
 
-fn flush_held(ctx: &SessionCtx, st: &mut State, turn: &str) {
-    for item in std::mem::take(&mut st.held) {
-        emit(
-            ctx,
-            Event::ItemCompleted {
-                turn: turn.to_string(),
-                item,
-            },
-        );
+fn wake_cause(task: Option<&BackgroundTask>, summary: &str, status: &str) -> String {
+    let what = match task {
+        Some(t) if t.kind == "local_agent" && !t.description.is_empty() => {
+            return format!(
+                "Background agent {}: {}",
+                match status {
+                    "completed" => "finished",
+                    "stopped" | "killed" => "stopped",
+                    other => other,
+                },
+                t.description
+            );
+        }
+        Some(t) if t.kind == "local_agent" => "agent",
+        Some(t) if t.kind == "local_bash" => "command",
+        _ => "task",
+    };
+    if summary.starts_with("Background ") {
+        summary.to_string()
+    } else {
+        format!("Background {what} {status}.")
+    }
+}
+
+fn on_lifecycle(ctx: &SessionCtx, st: &mut State, msg: &Value) {
+    let ours = st.user_turn && st.turn.as_deref() == msg["command_uuid"].as_str();
+    if !ours {
+        return;
+    }
+    match msg["state"].as_str().unwrap_or("") {
+        "started" => st.turn_began = true,
+        "cancelled" if !st.turn_began => {
+            finish_open_turn(ctx, st, TurnOutcome::Interrupted, None);
+            let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Idle));
+        }
+        _ => {}
     }
 }
 
@@ -1321,10 +1410,16 @@ fn on_result(ctx: &SessionCtx, st: &mut State, msg: &Value) {
     {
         st.context_window = Some(w);
     }
+    let users: Vec<&str> = msg["user_message_uuids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if st.knows_users && st.user_turn && st.turn.as_deref().is_some_and(|t| !users.contains(&t)) {
+        st.streams.clear();
+        st.message_blocks.clear();
+        return;
+    }
     let Some(turn) = st.turn.take() else {
-        if let Some(last) = st.last_turn.clone() {
-            flush_held(ctx, st, &last);
-        }
         return;
     };
     close_running_tools(ctx, st, &turn);

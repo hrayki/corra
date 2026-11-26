@@ -50,6 +50,7 @@ fn turn(hub: &HubRef, thread: ThreadId, id: &str, outcome: Option<TurnOutcome>) 
             turn: id.into(),
             input: vec![],
             settings: AgentSettings::default(),
+            cause: None,
         },
         Some(outcome) => Event::TurnCompleted {
             turn: id.into(),
@@ -335,6 +336,7 @@ fn started(hub: &HubRef, thread: ThreadId, id: &str, input: &str) {
             turn: id.into(),
             input: text(input),
             settings: AgentSettings::default(),
+            cause: None,
         },
     )
     .unwrap();

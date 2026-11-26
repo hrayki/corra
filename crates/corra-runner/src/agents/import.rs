@@ -271,6 +271,7 @@ pub fn history(s: &FoundSession) -> Result<Vec<(i64, Event)>> {
                     turn: id.clone(),
                     input: input.clone(),
                     settings: AgentSettings::default(),
+                    cause: None,
                 },
             ));
             events.push((

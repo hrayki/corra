@@ -35,6 +35,9 @@ pub enum Event {
         turn: String,
         input: Vec<InputPart>,
         settings: AgentSettings,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        cause: Option<String>,
     },
     ItemStarted {
         turn: String,
