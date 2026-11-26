@@ -95,3 +95,17 @@ test('a thread opened on its last turns ignores steps of earlier turns until tho
     ],
   )
 })
+
+test('a thread cached before session events carried models still opens', () => {
+  const v = buildView(
+    [
+      ev(1000, { kind: 'session', session_id: 's', cwd: '~', model: 'opus', tools: [], slash_commands: [] }),
+      ev(1000, { kind: 'turn_started', turn: 't1', input: [{ type: 'text', text: 'hi' }], settings: {} }),
+      answer('t1', 'm', 2000, 'hello'),
+      ev(2000, { kind: 'turn_completed', turn: 't1', outcome: 'completed' }),
+    ],
+    false,
+  )
+  assert.equal(v.model, 'opus')
+  assert.deepEqual(ids(v.turns[0].entries), ['m'])
+})
