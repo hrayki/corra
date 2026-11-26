@@ -12,10 +12,11 @@ The README says what corra is. This is how it fits together.
   handed over a lease in the bucket, so two never write at once. Session files live in the database too. Its schema is a
   single base schema at version 12; a database older than that is refused rather than migrated.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
-  through its stream-json interface, and serves the thread's panel: changes, files, terminal, browser, phone. When the
-  hub serves a newer runner, a runner switches to it once nothing has needed it for two minutes: no turn running and no
-  terminal open, except the desktop app's, which comes with the app. On Linux it starts as a small parent that takes in
-  and reaps the processes orphaned below it, since a machine's PID 1 may not (Modal's doesn't).
+  through its stream-json interface, or Antigravity through `agy`'s Agent Client Protocol server, and serves the
+  thread's panel: changes, files, terminal, browser, phone. When the hub serves a newer runner, a runner switches to it
+  once nothing has needed it for two minutes: no turn running and no terminal open, except the desktop app's, which
+  comes with the app. On Linux it starts as a small parent that takes in and reaps the processes orphaned below it,
+  since a machine's PID 1 may not (Modal's doesn't).
 - **Desktop core** (`crates/corra-local`): inside the desktop app. It adds the laptop to the hub as one of its machines
   and runs its runner. It also holds a built-in hub, the same code as the real one: when the hub can't be reached for a
   minute, the window moves to it, and when the hub is back, the threads started there move to the hub with their events
@@ -73,6 +74,14 @@ also scan a QR code from Settings that holds the hub's address and a one-time co
 
 The hub keeps the keys: GitHub, the providers, DigitalOcean and the env vars. A machine holds only the Claude token,
 its own hub token and the project's env vars, so those should be test keys with spending caps.
+
+Antigravity signs in on each machine with Google through `agy`'s own login, whose code a card in the thread takes.
+Signed in that way, only I prompt its threads: agents can't send to or start one, and the hub doesn't continue it. A
+Gemini API key in Settings lifts that. That's because Google allows a Google AI Pro or Ultra login in another app's ACP
+client only while a person drives the session: not when another agent or a background queue writes the prompts, which
+can get the account suspended (a Google maintainer's answer in google-antigravity/antigravity-cli issue #1493, November
+2026). Google's guidance on this is still changing, so this may be revisited; `Hub::hands_off` is the one place in the
+hub that applies it.
 
 A machine's token lets it connect as a runner, download the runner and its setup kit (`shared/` and its own projects'
 setups only), read and write the session files of its own threads and its project's, and use git through the hub for its

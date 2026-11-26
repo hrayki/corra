@@ -501,7 +501,7 @@ impl Hub {
 
     fn say_to(&self, thread: ThreadId, follower: ThreadId, text: String) {
         match self.db.thread(follower) {
-            Ok(Some(f)) if f.hidden_at.is_none() => {}
+            Ok(Some(f)) if f.hidden_at.is_none() && !self.hands_off(f.agent) => {}
             _ => {
                 let _ = self.db.kv_delete(&format!("thread:{thread}:follower"));
                 return;
@@ -684,6 +684,34 @@ impl Hub {
     pub fn answer_secret(&self, thread: ThreadId, request: String, value: String) -> Result<()> {
         if value.is_empty() {
             bail!("the secret is empty");
+        }
+        if request.starts_with("signin-") {
+            if !open_requests(&self.db.events_tail(thread, 2000)?).contains(&request) {
+                bail!("that sign-in is no longer waiting");
+            }
+            let t = self
+                .db
+                .thread(thread)?
+                .ok_or_else(|| anyhow!("no such thread"))?;
+            let m = t.machine.ok_or_else(|| anyhow!("thread has no machine"))?;
+            self.send_runner(
+                m,
+                HubMsg::SignIn {
+                    thread,
+                    request: request.clone(),
+                    code: value,
+                },
+            )?;
+            self.append(
+                thread,
+                None,
+                now_ms(),
+                Event::RequestResolved {
+                    id: request,
+                    response: RequestResponse::Allow { always: false },
+                },
+            )?;
+            return Ok(());
         }
         let Some(tx) = self.secret_requests.lock().unwrap().remove(&request) else {
             bail!("that request is no longer waiting");
@@ -1298,8 +1326,24 @@ impl Hub {
         Ok(())
     }
 
+    pub fn hands_off(&self, agent: AgentKind) -> bool {
+        agent == AgentKind::Antigravity
+            && !self
+                .secrets
+                .get("gemini.api_key")
+                .ok()
+                .flatten()
+                .is_some_and(|k| !k.trim().is_empty())
+    }
+
     fn agent_env(&self, agent: AgentKind) -> Result<Vec<(String, String)>> {
         let mut env = vec![];
+        if agent == AgentKind::Antigravity
+            && let Some(k) = self.secrets.get("gemini.api_key")?
+            && !k.trim().is_empty()
+        {
+            env.push(("GEMINI_API_KEY".to_string(), k.trim().to_string()));
+        }
         if agent == AgentKind::Claude {
             let clean = |s: String| s.split_whitespace().collect::<String>();
             if let Some(t) = self.secrets.get("claude.token")? {

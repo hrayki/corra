@@ -58,7 +58,11 @@ pub async fn continue_limited(hub: &HubRef, now: i64) -> Result<()> {
         let Some(t) = hub.db.thread(thread)? else {
             continue;
         };
-        if t.hidden_at.is_some() || t.status == ThreadStatus::Waiting || hub.busy(thread) {
+        if t.hidden_at.is_some()
+            || t.status == ThreadStatus::Waiting
+            || hub.busy(thread)
+            || hub.hands_off(t.agent)
+        {
             continue;
         }
         let n = tries(hub, thread) + 1;

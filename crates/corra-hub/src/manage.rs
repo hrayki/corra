@@ -356,6 +356,11 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             }))
         }
         "threads.start" => {
+            if hub.hands_off(caller.agent) {
+                bail!(
+                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+                );
+            }
             let p = find_project(hub, &text(&input, "project")?)?;
             let machine = match input["on"].as_str() {
                 Some(n) => Some(find_machine(hub, n)?.id),
@@ -421,6 +426,11 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             let t = find_thread(hub, &text(&input, "thread")?)?;
             if t.id == caller.id {
                 bail!("that's this thread");
+            }
+            if hub.hands_off(t.agent) {
+                bail!(
+                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+                );
             }
             exec_call(
                 hub,

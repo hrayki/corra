@@ -12,10 +12,16 @@ import { InputBox, SendButton, SettingsPickers, useInput } from './Composer'
 import { Btn, Menu, inputClass, type MenuItem } from './bits'
 import { providerLabel, providerOf } from '../lib/catalog'
 import type { AgentSettings } from '../proto/AgentSettings'
+import type { AgentKind } from '../proto/AgentKind'
 import type { Thread } from '../proto/Thread'
 import type { Project } from '../proto/Project'
 
 type Target = { key: string; project: ProjectX; machine?: string; label: string; laptop: boolean }
+
+const AGENTS: { id: AgentKind; name: string; hint: string }[] = [
+  { id: 'claude', name: 'Claude Code', hint: 'Anthropic' },
+  { id: 'antigravity', name: 'Antigravity', hint: 'Google, Gemini' },
+]
 
 export function NewThread(props: { project?: string }) {
   const names = createMemo(() => [...new Set(Object.values(state.projects).map((p) => p.name))].sort((a, b) => a.localeCompare(b)))
@@ -46,13 +52,19 @@ export function NewThread(props: { project?: string }) {
   })
   const [targetKey, setTargetKey] = createSignal<string>(localStorage.getItem('corra_last_target') ?? '')
   const target = () => targets().find((t) => t.key === targetKey()) ?? targets()[0]
-  const [settings, setSettings] = createSignal<AgentSettings>(
-    JSON.parse(localStorage.getItem('corra_last_settings') ?? 'null') ?? {
-      model: 'claude-opus-5-5',
-      effort: 'high',
-      permission_mode: 'default',
-    },
+  const [agent, setAgentRaw] = createSignal<AgentKind>(
+    localStorage.getItem('corra_last_agent') === 'antigravity' ? 'antigravity' : 'claude',
   )
+  const defaults = (a: AgentKind): AgentSettings =>
+    JSON.parse(localStorage.getItem(a === 'claude' ? 'corra_last_settings' : `corra_last_settings_${a}`) ?? 'null') ??
+    (a === 'claude'
+      ? { model: 'claude-opus-5-5', effort: 'high', permission_mode: 'default' }
+      : { effort: 'high', permission_mode: 'default' })
+  const [settings, setSettings] = createSignal<AgentSettings>(defaults(agent()))
+  const setAgent = (a: AgentKind) => {
+    setAgentRaw(a)
+    setSettings(defaults(a))
+  }
   const [error, setError] = createSignal('')
   const [picking, setPicking] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
@@ -67,11 +79,12 @@ export function NewThread(props: { project?: string }) {
     try {
       localStorage.setItem('corra_last_project', t.project.name)
       localStorage.setItem('corra_last_target', t.key)
-      localStorage.setItem('corra_last_settings', JSON.stringify(settings()))
+      localStorage.setItem('corra_last_agent', agent())
+      localStorage.setItem(agent() === 'claude' ? 'corra_last_settings' : `corra_last_settings_${agent()}`, JSON.stringify(settings()))
       const thread = await call<Thread>({
         op: 'create_thread',
         project: t.project.id,
-        agent: 'claude',
+        agent: agent(),
         machine: t.machine,
         settings: settings(),
         input: parts,
@@ -119,6 +132,9 @@ export function NewThread(props: { project?: string }) {
   const pickers = SettingsPickers({
     get settings() {
       return settings()
+    },
+    get agent() {
+      return agent()
     },
     onChange: (s) => setSettings({ ...settings(), ...s }),
   })
@@ -170,6 +186,15 @@ export function NewThread(props: { project?: string }) {
             }
           >
             <div class="mb-3 flex flex-wrap items-center gap-2">
+              <Menu
+                label="Agent"
+                class={pill}
+                items={AGENTS.map((a) => ({ label: a.name, hint: a.hint, checked: agent() === a.id, onSelect: () => setAgent(a.id) }))}
+              >
+                <span class="text-mute">Agent</span>
+                <span class="font-medium">{AGENTS.find((a) => a.id === agent())!.name}</span>
+                <ChevronDown size={13} class="text-faint" />
+              </Menu>
               <Menu label="Project" items={projectItems()} class={pill}>
                 <span class="text-mute">Project</span>
                 <span class="font-medium">{current()}</span>

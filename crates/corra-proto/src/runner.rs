@@ -141,6 +141,11 @@ pub enum HubMsg {
         thread: ThreadId,
         tool: String,
     },
+    SignIn {
+        thread: ThreadId,
+        request: String,
+        code: String,
+    },
     Respond {
         thread: ThreadId,
         request: String,

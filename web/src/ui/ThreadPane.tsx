@@ -216,6 +216,8 @@ export function ThreadPane(props: { id: string }) {
               <div class="flex items-center gap-1.5 truncate pl-[22px] text-[12px] text-mute">
                 <span>{project()?.name}</span>
                 <span class="text-faint">·</span>
+                <span class="max-sm:hidden">{thread()!.agent === 'antigravity' ? 'Antigravity' : 'Claude Code'}</span>
+                <span class="text-faint max-sm:hidden">·</span>
                 <span class="inline-flex items-center gap-1">
                   {here() || (machine() && paired(machine()!.provider)) ? <Laptop size={12} /> : <Cloud size={12} />}
                   {where()}

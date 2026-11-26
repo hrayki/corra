@@ -1,5 +1,7 @@
+pub mod antigravity;
 pub mod claude;
 pub mod import;
+pub mod mcp;
 mod record;
 #[cfg(test)]
 mod replay;
@@ -23,6 +25,10 @@ pub enum SessionCmd {
         response: RequestResponse,
     },
     Settings(AgentSettings),
+    SignIn {
+        request: String,
+        code: String,
+    },
     Stop,
 }
 
@@ -65,37 +71,31 @@ pub struct SessionCtx {
 }
 
 pub fn spawn(ctx: SessionCtx) {
-    match ctx.spec.agent {
-        AgentKind::Claude => {
-            tokio::spawn(async move {
-                for p in crate::git::ensure_repos(
-                    &ctx.cwd,
-                    &ctx.hub_url,
-                    &ctx.hub_token,
-                    &ctx.spec.repos,
-                )
-                .await
-                {
-                    let _ = ctx.out.send(AgentOut::Event(Event::Notice {
-                        level: NoticeLevel::Warning,
-                        text: p,
-                    }));
-                }
-                if let Some(sync) = ctx.sync.clone() {
-                    restore(&ctx, &sync).await;
-                }
-                {
-                    let mut b = ctx.baseline.lock().await;
-                    for (name, path) in crate::git::repos(&ctx.cwd) {
-                        if let Ok(sha) = crate::git::snapshot(&path).await {
-                            b.push((name, sha));
-                        }
-                    }
-                }
-                claude::run(ctx).await
-            });
+    tokio::spawn(async move {
+        for p in
+            crate::git::ensure_repos(&ctx.cwd, &ctx.hub_url, &ctx.hub_token, &ctx.spec.repos).await
+        {
+            let _ = ctx.out.send(AgentOut::Event(Event::Notice {
+                level: NoticeLevel::Warning,
+                text: p,
+            }));
         }
-    }
+        if let Some(sync) = ctx.sync.clone() {
+            restore(&ctx, &sync).await;
+        }
+        {
+            let mut b = ctx.baseline.lock().await;
+            for (name, path) in crate::git::repos(&ctx.cwd) {
+                if let Ok(sha) = crate::git::snapshot(&path).await {
+                    b.push((name, sha));
+                }
+            }
+        }
+        match ctx.spec.agent {
+            AgentKind::Claude => claude::run(ctx).await,
+            AgentKind::Antigravity => antigravity::run(ctx).await,
+        }
+    });
 }
 
 fn notice(ctx: &SessionCtx, level: NoticeLevel, text: String) {
@@ -135,7 +135,7 @@ async fn restore(ctx: &SessionCtx, sync: &crate::sync::Syncer) {
             ),
         }
     }
-    let base = claude::session_base(&ctx.cwd);
+    let base = session_base(ctx.spec.agent, &ctx.cwd);
     let mut sources = vec![];
     if ctx.spec.resume_session.is_some() || ctx.spec.fork_of.is_some() {
         sources.push(thread);
@@ -162,5 +162,16 @@ pub fn session_files(
             claude::session_base(cwd),
             claude::session_files(cwd, session_id),
         ),
+        AgentKind::Antigravity => (
+            antigravity::store_dir(),
+            antigravity::session_files(session_id),
+        ),
+    }
+}
+
+pub fn session_base(agent: AgentKind, cwd: &std::path::Path) -> std::path::PathBuf {
+    match agent {
+        AgentKind::Claude => claude::session_base(cwd),
+        AgentKind::Antigravity => antigravity::store_dir(),
     }
 }

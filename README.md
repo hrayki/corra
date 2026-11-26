@@ -8,9 +8,9 @@ the way I do and finds it useful.
 I recommend you **don't** use it. There's no support promise: I keep it up to date as I use it and add what I want.
 You can open an issue or a pull request, but I'll likely pass on anything I don't need myself.
 
-Corra is a hub in the cloud and an app for the desktop, Android and the browser. In the app I pick repos from my
-GitHub, and the hub starts a machine on one of my cloud providers, clones the repos onto it, sets it up from my setup
-repo and runs Claude Code there. Corra isn't a harness itself.
+Corra is a hub in the cloud and an app for the desktop, Android and the browser. In the app I pick repos from my GitHub,
+and the hub starts a machine on one of my cloud providers, clones the repos onto it, sets it up from my setup repo and
+runs Claude Code or Google's Antigravity there. Corra isn't a harness itself.
 
 Corra drives Claude Code through interfaces that aren't documented, so any Claude Code update can break it.
 
@@ -61,6 +61,7 @@ And if you need them:
 Open the address, sign in with the key, and in Settings add:
 
 - `claude.token` (from `claude setup-token`), or `anthropic.api_key`.
+- `gemini.api_key`, optional: without it each machine signs in to Antigravity with Google.
 - `github.token`: fine-grained, for your repos, with Contents, Pull requests and Issues read and write, Actions and
   Checks read, and no Workflows.
 - `modal.token_id` and `modal.token_secret`, or `agent37.key`, for machines. `digitalocean.token` adds the Android test
