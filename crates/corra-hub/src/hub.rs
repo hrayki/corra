@@ -51,6 +51,7 @@ pub struct Hub {
     pub browser_watch: Mutex<HashMap<MachineId, usize>>,
     pub phone: crate::phone::PhoneState,
     pub quiet_stops: Mutex<HashMap<ThreadId, std::time::Instant>>,
+    pub delivering: Mutex<HashMap<ThreadId, usize>>,
     pub presence: Mutex<HashMap<u64, std::time::Instant>>,
     pub github_api: Mutex<String>,
     me: Weak<Hub>,
@@ -141,6 +142,7 @@ impl Hub {
         Arc::new_cyclic(|me| Hub {
             me: me.clone(),
             quiet_stops: Mutex::new(HashMap::new()),
+            delivering: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
             github_api: Mutex::new("https://api.github.com".into()),
             data,
@@ -877,6 +879,102 @@ impl Hub {
         Ok(())
     }
 
+    pub fn runner_status(&self, thread: ThreadId, status: ThreadStatus) -> Result<()> {
+        let mut status = status;
+        if matches!(status, ThreadStatus::Idle | ThreadStatus::Error) {
+            if self.close_stray_turn(thread)? {
+                self.hub_notice(
+                    thread,
+                    NoticeLevel::Warning,
+                    "The agent stopped working on this turn without ending it, so corra ended it.",
+                );
+            }
+            if self
+                .db
+                .open_requests(thread)?
+                .iter()
+                .any(|e| matches!(&e.event, Event::Request { id, .. } if id.starts_with("hub-")))
+            {
+                status = ThreadStatus::Waiting;
+            }
+        }
+        self.set_thread_status(thread, status)
+    }
+
+    fn close_stray_turn(&self, thread: ThreadId) -> Result<bool> {
+        for e in self.db.open_requests(thread)? {
+            if let Event::Request { id, .. } = e.event
+                && !id.starts_with("hub-")
+            {
+                self.append(
+                    thread,
+                    None,
+                    now_ms(),
+                    Event::RequestResolved {
+                        id,
+                        response: RequestResponse::Cancelled,
+                    },
+                )?;
+            }
+        }
+        let Some(turn) = self.db.open_turn(thread)? else {
+            return Ok(false);
+        };
+        self.append(
+            thread,
+            None,
+            now_ms(),
+            Event::TurnCompleted {
+                turn,
+                outcome: TurnOutcome::Interrupted,
+                usage: None,
+                error: None,
+                anchor: None,
+                resets_at: None,
+            },
+        )?;
+        Ok(true)
+    }
+
+    pub fn delivering(&self, thread: ThreadId) -> bool {
+        self.delivering.lock().unwrap().contains_key(&thread)
+    }
+
+    pub fn settle_strays(&self, now: i64) -> Result<()> {
+        for t in self.db.threads()? {
+            if self.delivering(t.id) || now - t.updated_at < STRAY_AFTER_MS {
+                continue;
+            }
+            match t.status {
+                ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting => {
+                    let live = t.machine.and_then(|m| {
+                        self.runners
+                            .lock()
+                            .unwrap()
+                            .get(&m)
+                            .map(|c| c.live.contains(&t.id))
+                    });
+                    let gone = match live {
+                        Some(live) => !live,
+                        None => t.status == ThreadStatus::Starting,
+                    };
+                    if gone {
+                        self.runner_status(t.id, ThreadStatus::Idle)?;
+                    }
+                }
+                ThreadStatus::Idle
+                    if t.hidden_at.is_none()
+                        && !self.queued(t.id).is_empty()
+                        && self.db.last_outcome(t.id)? != Some(TurnOutcome::Failed) =>
+                {
+                    self.send_next_queued(t.id);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_thread_status(&self, thread: ThreadId, status: ThreadStatus) -> Result<()> {
         if let Some(mut t) = self.db.thread(thread)?
             && t.status != status
@@ -1241,6 +1339,24 @@ impl Hub {
     }
 
     async fn deliver(
+        self: &Arc<Self>,
+        thread: ThreadId,
+        input: Vec<InputPart>,
+        settings: Option<AgentSettings>,
+    ) -> Result<()> {
+        *self.delivering.lock().unwrap().entry(thread).or_default() += 1;
+        let r = self.deliver_now(thread, input, settings).await;
+        let mut d = self.delivering.lock().unwrap();
+        if let Some(n) = d.get_mut(&thread) {
+            *n -= 1;
+            if *n == 0 {
+                d.remove(&thread);
+            }
+        }
+        r
+    }
+
+    async fn deliver_now(
         self: &Arc<Self>,
         thread: ThreadId,
         input: Vec<InputPart>,
@@ -1939,6 +2055,8 @@ pub fn open_requests(events: &[StoredEvent]) -> Vec<String> {
     }
     open
 }
+
+const STRAY_AFTER_MS: i64 = 60_000;
 
 pub fn input_text(input: &[InputPart]) -> String {
     input

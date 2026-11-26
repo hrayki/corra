@@ -289,7 +289,7 @@ async fn handle_runner_msg(
             if !owns(hub, machine, thread) {
                 return Ok(());
             }
-            hub.set_thread_status(thread, status)?;
+            hub.runner_status(thread, status)?;
         }
         RunnerMsg::Status { thread, status } => {
             if owns(hub, machine, thread) {
@@ -370,7 +370,7 @@ async fn handle_runner_msg(
                 } else {
                     ThreadStatus::Idle
                 };
-                hub.set_thread_status(thread, status)?;
+                hub.runner_status(thread, status)?;
             }
         }
         RunnerMsg::Reply { id, ok, err } => {
