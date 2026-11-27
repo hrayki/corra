@@ -56,3 +56,48 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./...
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [rust, web, modal-helper]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: latest
+      - uses: actions/setup-node@v7
+        with:
+          node-version: latest
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: helpers/modal/go.sum
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/release dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export LC_ALL=C
+          v=$(cat dist/VERSION)
+          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          newest=--latest
+          if [[ -n "$latest" && ! "$v" > "$latest" ]]; then newest=--latest=false; fi
+          gh release create "$v" dist/* --target "$GITHUB_SHA" --title "$v" --notes "$(git log -1 --format=%s)" "$newest"
