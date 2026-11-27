@@ -566,3 +566,50 @@ async fn a_send_that_cant_be_delivered_tells_the_app_which_one() {
     .expect("the app was never told");
     assert_eq!(failed, "mine");
 }
+
+#[tokio::test]
+async fn a_long_turn_is_closed_and_its_old_request_answered_however_many_events_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread) = setup(dir.path());
+    turn(&hub, thread, "a", None);
+    let asking = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            hub.ask(thread, "a", "github.pr_merge", &serde_json::json!({}))
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ask = hub.db.open_requests(thread).unwrap();
+    let Event::Request { id, .. } = &ask[0].event else {
+        panic!()
+    };
+    for i in 0..2100 {
+        hub.append(
+            thread,
+            None,
+            now_ms(),
+            Event::ItemCompleted {
+                turn: "a".into(),
+                item: Item {
+                    id: format!("i{i}"),
+                    parent: None,
+                    body: ItemBody::AgentMessage { text: ".".into() },
+                },
+            },
+        )
+        .unwrap();
+    }
+    hub.respond(thread, id.clone(), RequestResponse::Allow { always: false })
+        .unwrap();
+    assert!(matches!(
+        asking.await.unwrap(),
+        RequestResponse::Allow { .. }
+    ));
+    assert!(
+        hub.close_open_turn(thread).unwrap(),
+        "the turn was left open"
+    );
+    assert!(hub.db.open_turn(thread).unwrap().is_none());
+}
