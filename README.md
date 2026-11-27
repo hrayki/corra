@@ -78,8 +78,9 @@ Open the address, sign in with the key, and in Settings add:
 
 Settings › Version shows which version runs and, when there's a newer release, an Update button. The hub restarts into
 it within a few seconds. A version that doesn't answer `/healthz` within 3 minutes, or stops in its first minute, is
-rolled back automatically, and Settings says why. Roll back, there, returns to the version before. A change to the
-image itself, the launcher or Litestream, still needs a deploy.
+rolled back automatically, and Settings says why. Roll back, there, returns to the version before, unless that version
+can't open the database the newer one changed. A change to the image itself, the launcher or Litestream, still needs a
+deploy.
 
 ## The apps
 
