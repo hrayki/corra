@@ -501,3 +501,67 @@ async fn an_idle_thread_compacts_once_before_its_cache_expires() {
         "compacted after the cache expired"
     );
 }
+
+#[tokio::test]
+async fn a_send_says_whether_it_queued_and_its_id_outlives_a_hub_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let thread = {
+        let (hub, thread) = setup(dir.path());
+        assert!(
+            !hub.send_once(thread, text("now"), None, true, Some("idle-id".into()))
+                .await
+                .unwrap()
+        );
+        turn(&hub, thread, "a", None);
+        assert!(
+            hub.send_once(thread, text("later"), None, true, Some("busy-id".into()))
+                .await
+                .unwrap()
+        );
+        thread
+    };
+    let hub = corra_hub::build(corra_hub::Options {
+        data: dir.path().to_path_buf(),
+        public_url: "http://127.0.0.1:1".into(),
+        dev_no_auth: false,
+    })
+    .unwrap()
+    .state
+    .hub;
+    assert!(
+        !hub.send_once(thread, text("now"), None, false, Some("idle-id".into()))
+            .await
+            .unwrap()
+    );
+    assert!(
+        hub.send_once(thread, text("later"), None, true, Some("busy-id".into()))
+            .await
+            .unwrap()
+    );
+    assert_eq!(waiting(&hub, thread), ["later"]);
+    assert_eq!(tried_to_send(&hub, thread).await, 1, "sent twice");
+}
+
+#[tokio::test]
+async fn a_send_that_cant_be_delivered_tells_the_app_which_one() {
+    use corra_hub::hub::Outbound;
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread) = setup(dir.path());
+    let mut apps = hub.apps.subscribe();
+    hub.send_once(thread, text("hello"), None, false, Some("mine".into()))
+        .await
+        .unwrap();
+    let failed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Outbound::Thread(t, corra_proto::app::HubToApp::NotSent { client_id, .. }) =
+                &*apps.recv().await.unwrap()
+                && *t == thread
+            {
+                return client_id.clone();
+            }
+        }
+    })
+    .await
+    .expect("the app was never told");
+    assert_eq!(failed, "mine");
+}

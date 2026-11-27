@@ -928,13 +928,14 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             client_id,
             compact,
         } => {
-            if compact == Some(true) {
+            let queued = if compact == Some(true) {
                 crate::schedule::compact_then_send(hub, thread, input, settings, client_id).await?;
+                true
             } else {
                 hub.send_once(thread, input, settings, queue, client_id)
-                    .await?;
-            }
-            Value::Null
+                    .await?
+            };
+            json!({ "queued": queued })
         }
         AppCall::DeleteThread { thread } => {
             let t = hub

@@ -265,6 +265,26 @@ impl Db {
         })
     }
 
+    pub fn first_send(&self, id: &str, now: i64) -> Result<bool> {
+        self.with(|c| {
+            let added = c.execute(
+                "INSERT OR IGNORE INTO kv(key, value) VALUES (?1, ?2)",
+                params![format!("sent:{id}"), now.to_string()],
+            )?;
+            Ok(added == 1)
+        })
+    }
+
+    pub fn forget_sends_before(&self, at: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM kv WHERE key >= 'sent:' AND key < 'sent;' AND CAST(value AS INTEGER) < ?1",
+                [at],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn kv_keys(&self, prefix: &str) -> Result<Vec<String>> {
         self.with(|c| {
             let mut st =

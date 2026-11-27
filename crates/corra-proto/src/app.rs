@@ -396,6 +396,10 @@ pub enum HubToApp {
         thread: ThreadId,
         items: Vec<crate::Queued>,
     },
+    NotSent {
+        thread: ThreadId,
+        client_id: String,
+    },
     Usage {
         at: i64,
         limits: Value,

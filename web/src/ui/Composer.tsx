@@ -5,7 +5,7 @@ import X from 'lucide-solid/icons/x'
 import Paperclip from 'lucide-solid/icons/paperclip'
 import FoldVertical from 'lucide-solid/icons/chevrons-down-up'
 import UnfoldVertical from 'lucide-solid/icons/chevrons-up-down'
-import { addPending, call, dropPending, state, stopThread, takeRestored, type ThreadX } from '../lib/store'
+import { addPending, call, dropPending, settlePending, state, stopThread, takeRestored, type ThreadX } from '../lib/store'
 import type { InputPart } from '../proto/InputPart'
 import type { AgentSettings } from '../proto/AgentSettings'
 import type { AgentKind } from '../proto/AgentKind'
@@ -472,16 +472,18 @@ export function Composer(props: { thread: ThreadX }) {
     const compact = stale() !== null && !keep()
     const queued = (busy() && !now) || compact
     setKeep(false)
-    const shown = addPending(props.thread.id, parts, queued)
+    const client = crypto.randomUUID()
+    const shown = addPending(props.thread.id, parts, queued, client)
     try {
-      await call({
+      const r = await call<{ queued?: boolean } | null>({
         op: 'send',
         thread: props.thread.id,
         input: parts,
         queue: queued && !compact,
-        client_id: crypto.randomUUID(),
+        client_id: client,
         ...(compact ? { compact: true } : {}),
       })
+      settlePending(props.thread.id, shown, r?.queued ?? queued)
     } catch (e) {
       dropPending(props.thread.id, shown)
       setError((e as Error).message)
