@@ -1,4 +1,5 @@
 pub mod antigravity;
+mod child;
 pub mod claude;
 pub mod import;
 pub mod mcp;

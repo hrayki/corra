@@ -59,18 +59,22 @@ test('auto is offered only with a model that supports it, and a thread in auto s
   assert.equal(s.mode.name, 'Auto')
 })
 
-test("an Antigravity thread whose saved mode agy doesn't offer shows agy's current mode", () => {
+test('an Antigravity thread normalizes accept-edits, offers bypassPermissions, and falls back for unsupported modes', () => {
   const modes: Choice[] = [
     { id: 'default', name: 'Default' },
     { id: 'accept-edits', name: 'Accept edits' },
     { id: 'plan', name: 'Plan' },
   ]
-  for (const saved of ['bypassPermissions', 'acceptEdits']) {
-    const s = pickerState({ agent: 'antigravity', settings: { permission_mode: saved }, models: [], modes, mode: 'plan' })
-    assert.equal(s.mode.id, 'plan', saved)
-    assert.deepEqual(
-      s.modes.map((m) => m.id),
-      ['default', 'accept-edits', 'plan'],
-    )
-  }
+  const accept = pickerState({ agent: 'antigravity', settings: { permission_mode: 'accept-edits' }, models: [], modes, mode: 'plan' })
+  assert.equal(accept.mode.id, 'acceptEdits')
+  assert.deepEqual(
+    accept.modes.map((m) => m.id),
+    ['default', 'acceptEdits', 'plan', 'bypassPermissions'],
+  )
+
+  const bypass = pickerState({ agent: 'antigravity', settings: { permission_mode: 'bypassPermissions' }, models: [], modes, mode: 'plan' })
+  assert.equal(bypass.mode.id, 'bypassPermissions')
+
+  const unsupported = pickerState({ agent: 'antigravity', settings: { permission_mode: 'auto' }, models: [], modes, mode: 'plan' })
+  assert.equal(unsupported.mode.id, 'plan')
 })

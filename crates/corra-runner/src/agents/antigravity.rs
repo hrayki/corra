@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -7,14 +7,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use corra_proto::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
+use super::child::{JsonlChild, with_output};
 use super::{AgentOut, SessionCmd, SessionCtx, mcp};
 
 const MANIFEST: &str =
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
-const STDERR_LINES: usize = 15;
 const WAKE_QUIET: Duration = Duration::from_secs(5);
+const BYPASS: &str = "bypassPermissions";
 
 pub async fn run(mut ctx: SessionCtx) {
     let error = drive(&mut ctx).await.err().map(|e| format!("{e:#}"));
@@ -143,94 +144,53 @@ fn has_key(ctx: &SessionCtx) -> bool {
         .any(|(k, v)| k == "GEMINI_API_KEY" && !v.is_empty())
 }
 
-type Reader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-type Writer = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
-
 struct Acp {
-    child: Option<Child>,
-    stdin: Writer,
-    lines: tokio::io::Lines<BufReader<Reader>>,
+    io: JsonlChild,
     next: u64,
-    stderr: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
     early: VecDeque<Value>,
-    rec: Option<super::record::Recorder>,
+    bypass_flag: bool,
+    can_respawn: bool,
 }
 
 impl Acp {
-    fn spawn(bin: &PathBuf, ctx: &SessionCtx) -> Result<Acp> {
+    fn spawn(bin: &Path, ctx: &SessionCtx, bypass: bool) -> Result<Acp> {
         let mut cmd = Command::new(bin);
-        cmd.arg("acp")
-            .current_dir(&ctx.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        cmd.arg("acp");
+        if bypass {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        for d in &ctx.extra_dirs {
+            cmd.arg("--add-dir").arg(d);
+        }
+        cmd.current_dir(&ctx.cwd);
         env_for(&mut cmd, ctx);
-        #[cfg(target_os = "linux")]
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                Ok(())
-            });
-        }
-        let mut child = cmd.spawn().context("starting agy acp")?;
-        let stdin: Writer = Box::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
-        let stdout: Reader = Box::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
-        let tail = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
-        if let Some(stderr) = child.stderr.take() {
-            let tail = tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    tracing::debug!(target: "corra_runner::antigravity", "stderr: {l}");
-                    if l.trim().is_empty() {
-                        continue;
-                    }
-                    let mut t = tail.lock().unwrap();
-                    if t.len() == STDERR_LINES {
-                        t.pop_front();
-                    }
-                    t.push_back(l.chars().take(400).collect());
-                }
-            });
-        }
         let rec = super::record::Recorder::open(
             ctx.spec.thread,
-            json!({ "agent": "antigravity", "settings": ctx.spec.settings }),
+            json!({ "agent": "antigravity", "settings": ctx.spec.settings, "bypass": bypass }),
         );
+        let io = JsonlChild::spawn(cmd, "agy acp", "antigravity", rec)?;
         Ok(Acp {
-            child: Some(child),
-            stdin,
-            lines: BufReader::new(stdout).lines(),
+            io,
             next: 0,
-            stderr: tail,
             early: VecDeque::new(),
-            rec,
+            bypass_flag: bypass,
+            can_respawn: true,
         })
     }
 
     #[cfg(test)]
-    fn piped(reader: Reader, writer: Writer) -> Acp {
+    fn piped(reader: super::child::Reader, writer: super::child::Writer) -> Acp {
         Acp {
-            child: None,
-            stdin: writer,
-            lines: BufReader::new(reader).lines(),
+            io: JsonlChild::piped(reader, writer),
             next: 0,
-            stderr: Default::default(),
             early: VecDeque::new(),
-            rec: None,
+            bypass_flag: false,
+            can_respawn: false,
         }
     }
 
     async fn write(&mut self, v: &Value) -> Result<()> {
-        if let Some(r) = &mut self.rec {
-            r.runner(v);
-        }
-        let mut line = v.to_string();
-        line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        self.io.write_json(v).await
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<u64> {
@@ -253,13 +213,13 @@ impl Acp {
 
     async fn read(&mut self) -> Result<Option<Value>> {
         loop {
-            let Some(line) = self.lines.next_line().await? else {
+            let Some(line) = self.io.next_line().await? else {
                 return Ok(None);
             };
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(r) = &mut self.rec {
+            if let Some(r) = &mut self.io.rec {
                 r.claude(&line);
             }
             match serde_json::from_str::<Value>(&line) {
@@ -288,20 +248,16 @@ impl Acp {
         }
     }
 
-    fn tail(&self) -> String {
-        self.stderr
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+    async fn tail(&mut self) -> String {
+        self.io.stderr_tail().await
+    }
+
+    async fn wait_code(&mut self) -> Option<i32> {
+        self.io.wait().await.ok().and_then(|s| s.code())
     }
 
     async fn kill(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill().await;
-        }
+        self.io.kill().await
     }
 }
 
@@ -427,10 +383,26 @@ impl Choices {
     }
 
     fn mode_list(&self) -> Vec<Choice> {
-        match &self.mode {
+        let raw = match &self.mode {
             Some((_, list, _)) => list.clone(),
             None => self.modes.clone(),
+        };
+        let mut out: Vec<Choice> = raw
+            .into_iter()
+            .map(|mut c| {
+                c.id = mode_to_corra(&c.id);
+                c
+            })
+            .collect();
+        if !out.iter().any(|c| c.id == BYPASS) {
+            out.push(Choice {
+                id: BYPASS.into(),
+                name: "Bypass Permissions".into(),
+                hint: Some("Approve all tool calls without asking.".into()),
+                ..Default::default()
+            });
         }
+        out
     }
 
     fn mode_is(&mut self, now: Option<String>) -> bool {
@@ -457,8 +429,26 @@ impl Choices {
     }
 }
 
+fn mode_to_corra(id: &str) -> String {
+    match id {
+        "accept-edits" => "acceptEdits".into(),
+        other => other.to_string(),
+    }
+}
+
 fn mode_for(permission: &str, available: &[String]) -> Option<String> {
-    available.iter().find(|a| *a == permission).cloned()
+    if permission == BYPASS {
+        return None;
+    }
+    if let Some(found) = available.iter().find(|a| *a == permission) {
+        return Some(found.clone());
+    }
+    let alt = match permission {
+        "acceptEdits" => Some("accept-edits"),
+        "accept-edits" => Some("acceptEdits"),
+        _ => None,
+    }?;
+    available.iter().find(|a| a.as_str() == alt).cloned()
 }
 
 const RANKS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -488,6 +478,7 @@ fn effort_for(effort: &str, available: &[Choice]) -> Option<String> {
 }
 
 struct Tool {
+    kind: String,
     name: String,
     input: Value,
     output: String,
@@ -503,6 +494,8 @@ struct State {
     session: String,
     settings: AgentSettings,
     choices: Choices,
+    bypass: bool,
+    needs_respawn: bool,
     turn: Option<String>,
     last_turn: Option<String>,
     prompts: Vec<u64>,
@@ -570,27 +563,22 @@ async fn drive(ctx: &mut SessionCtx) -> Result<()> {
             "env": [],
         }));
     }
-    let mut acp = Acp::spawn(&bin, ctx)?;
+    servers.extend(mcp::acp_shared_servers(&mcp::shared_mcp_path()));
+    let start_bypass = ctx.spec.settings.permission_mode.as_deref() == Some(BYPASS);
+    let mut acp = Acp::spawn(&bin, ctx, start_bypass)?;
     let result = talk(ctx, &mut acp, &bin, servers, turn).await;
     acp.kill().await;
     drop(server);
-    result.map_err(|e| {
-        let tail = acp.tail();
-        if tail.is_empty() {
-            e
-        } else {
-            anyhow!("{e:#}. The end of its output:\n\n```\n{tail}\n```")
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let tail = acp.tail().await;
+            Err(anyhow!(with_output(format!("{e:#}"), &tail)))
         }
-    })
+    }
 }
 
-async fn talk(
-    ctx: &mut SessionCtx,
-    acp: &mut Acp,
-    bin: &PathBuf,
-    servers: Vec<Value>,
-    current: mcp::CurrentTurn,
-) -> Result<()> {
+async fn initialize_acp(acp: &mut Acp) -> Result<()> {
     let init = acp
         .call(
             "initialize",
@@ -606,10 +594,64 @@ async fn talk(
         "agy {}",
         init["agentInfo"]["version"].as_str().unwrap_or("?")
     );
+    Ok(())
+}
+
+async fn respawn_without_bypass(
+    ctx: &mut SessionCtx,
+    acp: &mut Acp,
+    bin: &Path,
+    servers: &[Value],
+    st: &mut State,
+) -> Result<()> {
+    st.needs_respawn = false;
+    if !acp.can_respawn || !acp.bypass_flag || st.bypass || st.session.is_empty() {
+        return Ok(());
+    }
+    acp.kill().await;
+    st.pending.clear();
+    *acp = Acp::spawn(bin, ctx, false)?;
+    initialize_acp(acp).await?;
+    authenticate(ctx, acp, bin, st).await?;
+    let dirs: Vec<String> = ctx
+        .extra_dirs
+        .iter()
+        .map(|d| d.to_string_lossy().to_string())
+        .collect();
+    let cwd = ctx.cwd.to_string_lossy().to_string();
+    let params = json!({
+        "sessionId": st.session,
+        "cwd": cwd,
+        "mcpServers": servers,
+        "additionalDirectories": dirs,
+    });
+    match acp.call("session/resume", params).await? {
+        Ok(r) => {
+            st.choices.read(&r);
+            announce(ctx, st);
+        }
+        Err((_, m)) => {
+            bail!("Antigravity couldn't reopen the session after leaving bypass mode: {m}")
+        }
+    }
+    apply_settings(ctx, acp, st, st.settings.clone(), true).await?;
+    Ok(())
+}
+
+async fn talk(
+    ctx: &mut SessionCtx,
+    acp: &mut Acp,
+    bin: &Path,
+    servers: Vec<Value>,
+    current: mcp::CurrentTurn,
+) -> Result<()> {
+    initialize_acp(acp).await?;
     let mut st = State {
         session: String::new(),
         settings: ctx.spec.settings.clone(),
         choices: Choices::default(),
+        bypass: ctx.spec.settings.permission_mode.as_deref() == Some(BYPASS),
+        needs_respawn: false,
         turn: None,
         last_turn: None,
         prompts: vec![],
@@ -639,10 +681,10 @@ async fn talk(
         let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Idle));
     }
     authenticate(ctx, acp, bin, &mut st).await?;
-    open_session(ctx, acp, &mut st, servers).await?;
+    open_session(ctx, acp, &mut st, &servers).await?;
     apply_settings(ctx, acp, &mut st, ctx.spec.settings.clone(), true).await?;
     while let Some(msg) = acp.early.pop_front() {
-        on_message(ctx, acp, &mut st, msg).await?;
+        on_message(ctx, acp, bin, &servers, &mut st, msg).await?;
     }
     if let Some(input) = initial {
         prompt(acp, &mut st, &input).await?;
@@ -659,19 +701,19 @@ async fn talk(
             biased;
             msg = acp.read() => {
                 let Some(msg) = msg? else {
-                    let code = match &mut acp.child { Some(c) => c.wait().await.ok().and_then(|s| s.code()), None => None };
+                    let code = acp.wait_code().await;
                     drop_held(ctx, &mut st);
                     finish_turn(ctx, &mut st, TurnOutcome::Failed, Some(format!("agy exited ({})", code.map(|c| c.to_string()).unwrap_or_else(|| "killed".into()))));
                     bail!("agy exited");
                 };
-                on_message(ctx, acp, &mut st, msg).await?;
+                on_message(ctx, acp, bin, &servers, &mut st, msg).await?;
             }
             cmd = ctx.cmds.recv() => {
                 let Some(cmd) = cmd else { return Ok(()); };
-                if let Some(r) = &mut acp.rec {
+                if let Some(r) = &mut acp.io.rec {
                     r.app(&cmd, false);
                 }
-                if !on_command(ctx, acp, &mut st, cmd).await? {
+                if !on_command(ctx, acp, bin, &servers, &mut st, cmd).await? {
                     return Ok(());
                 }
             }
@@ -680,6 +722,9 @@ async fn talk(
                 if st.prompts.is_empty() && st.turn.is_some() {
                     finish_turn(ctx, &mut st, TurnOutcome::Completed, None);
                     idle(ctx, &st);
+                    if st.needs_respawn {
+                        respawn_without_bypass(ctx, acp, bin, &servers, &mut st).await?;
+                    }
                 }
             }
         }
@@ -689,7 +734,7 @@ async fn talk(
 async fn authenticate(
     ctx: &mut SessionCtx,
     acp: &mut Acp,
-    bin: &PathBuf,
+    bin: &Path,
     st: &mut State,
 ) -> Result<()> {
     let method = if has_key(ctx) {
@@ -715,7 +760,7 @@ async fn authenticate(
     }
 }
 
-async fn sign_in(ctx: &mut SessionCtx, bin: &PathBuf, st: &mut State) -> Result<bool> {
+async fn sign_in(ctx: &mut SessionCtx, bin: &Path, st: &mut State) -> Result<bool> {
     let mut cmd = Command::new(bin);
     cmd.args(["acp", "--login"])
         .current_dir(&ctx.cwd)
@@ -809,6 +854,22 @@ async fn sign_in(ctx: &mut SessionCtx, bin: &PathBuf, st: &mut State) -> Result<
                     }
                 };
             }
+            SessionCmd::Respond {
+                request: r,
+                response,
+            } if r == request && !matches!(response, RequestResponse::Allow { .. }) => {
+                let _ = child.kill().await;
+                emit(
+                    ctx,
+                    Event::RequestResolved {
+                        id: request,
+                        response,
+                    },
+                );
+                drop_held(ctx, st);
+                finish_turn(ctx, st, TurnOutcome::Interrupted, None);
+                return Ok(false);
+            }
             SessionCmd::Interrupt | SessionCmd::Stop => {
                 let _ = child.kill().await;
                 emit(
@@ -833,7 +894,7 @@ async fn open_session(
     ctx: &SessionCtx,
     acp: &mut Acp,
     st: &mut State,
-    servers: Vec<Value>,
+    servers: &[Value],
 ) -> Result<()> {
     let dirs: Vec<String> = ctx
         .extra_dirs
@@ -904,7 +965,11 @@ fn announce(ctx: &SessionCtx, st: &State) {
             cwd: ctx.cwd.to_string_lossy().to_string(),
             tools: vec![],
             slash_commands: st.slash.clone(),
-            permission_mode: st.choices.mode_current(),
+            permission_mode: if st.bypass {
+                Some(BYPASS.into())
+            } else {
+                st.choices.mode_current().map(|m| mode_to_corra(&m))
+            },
             models,
             efforts: pick(&st.choices.effort),
             modes: st.choices.mode_list(),
@@ -954,28 +1019,80 @@ async fn apply_settings(
             changed.effort = Some(e.clone());
         }
     }
-    if let Some(p) = &s.permission_mode
-        && (first || Some(p) != st.settings.permission_mode.as_ref())
-        && let Some(mode) = mode_for(p, &st.choices.mode_ids())
-    {
-        match st.choices.mode.clone() {
-            Some((id, _, now)) if now != mode => set_option(acp, st, &id, &mode).await?,
-            None if st.choices.mode_now.as_deref() != Some(&mode) => {
-                let rid = acp
-                    .request(
-                        "session/set_mode",
-                        json!({ "sessionId": st.session, "modeId": mode }),
-                    )
-                    .await?;
-                st.pending.insert(rid, json!({ "mode": mode }));
+    let mut mode_changed = false;
+    if let Some(p) = &s.permission_mode {
+        let norm = mode_to_corra(p);
+        let cur = st.settings.permission_mode.as_deref().map(mode_to_corra);
+        if norm == BYPASS {
+            if first || !st.bypass {
+                st.bypass = true;
+                st.needs_respawn = false;
+                if st.choices.mode_current().as_deref() == Some("plan") {
+                    let target = mode_for("acceptEdits", &st.choices.mode_ids())
+                        .or_else(|| mode_for("default", &st.choices.mode_ids()));
+                    if let Some(mode) = target {
+                        set_acp_mode(acp, st, &mode).await?;
+                    }
+                }
+                if !first {
+                    let open_tools: Vec<String> = st
+                        .asks
+                        .iter()
+                        .filter(|(_, a)| !a.question)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in open_tools {
+                        answer(ctx, acp, st, &id, RequestResponse::Allow { always: true }).await?;
+                    }
+                }
+                changed.permission_mode = Some(BYPASS.into());
+                mode_changed = true;
             }
-            _ => {}
+        } else if first || st.bypass || cur.as_deref() != Some(norm.as_str()) {
+            let was_bypass = st.bypass;
+            if was_bypass {
+                st.bypass = false;
+                if acp.bypass_flag {
+                    st.needs_respawn = true;
+                }
+            }
+            if let Some(mode) = mode_for(&norm, &st.choices.mode_ids()) {
+                set_acp_mode(acp, st, &mode).await?;
+                changed.permission_mode = Some(norm);
+                mode_changed = true;
+            } else if was_bypass {
+                changed.permission_mode = st.choices.mode_current().map(|m| mode_to_corra(&m));
+                mode_changed = true;
+            }
         }
-        changed.permission_mode = Some(p.clone());
     }
-    st.settings.merge(&s);
+    let mut normalized = s;
+    if let Some(p) = normalized.permission_mode.take() {
+        normalized.permission_mode = Some(mode_to_corra(&p));
+    }
+    st.settings.merge(&normalized);
     if !first && changed != AgentSettings::default() {
         emit(ctx, Event::SettingsChanged { settings: changed });
+        if mode_changed {
+            announce(ctx, st);
+        }
+    }
+    Ok(())
+}
+
+async fn set_acp_mode(acp: &mut Acp, st: &mut State, mode: &str) -> Result<()> {
+    match st.choices.mode.clone() {
+        Some((id, _, now)) if now != mode => set_option(acp, st, &id, mode).await?,
+        None if st.choices.mode_now.as_deref() != Some(mode) => {
+            let rid = acp
+                .request(
+                    "session/set_mode",
+                    json!({ "sessionId": st.session, "modeId": mode }),
+                )
+                .await?;
+            st.pending.insert(rid, json!({ "mode": mode }));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1187,8 +1304,10 @@ fn idle(ctx: &SessionCtx, st: &State) {
 }
 
 async fn on_command(
-    ctx: &SessionCtx,
+    ctx: &mut SessionCtx,
     acp: &mut Acp,
+    bin: &Path,
+    servers: &[Value],
     st: &mut State,
     cmd: SessionCmd,
 ) -> Result<bool> {
@@ -1196,6 +1315,9 @@ async fn on_command(
         SessionCmd::Send { input, settings } => {
             if let Some(s) = settings {
                 apply_settings(ctx, acp, st, s, false).await?;
+                if st.needs_respawn && st.turn.is_none() {
+                    respawn_without_bypass(ctx, acp, bin, servers, st).await?;
+                }
             }
             match st.turn.clone() {
                 None => {
@@ -1221,12 +1343,20 @@ async fn on_command(
             if st.prompts.is_empty() && st.turn.is_some() {
                 finish_turn(ctx, st, TurnOutcome::Interrupted, None);
                 idle(ctx, st);
+                if st.needs_respawn {
+                    respawn_without_bypass(ctx, acp, bin, servers, st).await?;
+                }
             }
         }
         SessionCmd::Respond { request, response } => {
             answer(ctx, acp, st, &request, response).await?
         }
-        SessionCmd::Settings(s) => apply_settings(ctx, acp, st, s, false).await?,
+        SessionCmd::Settings(s) => {
+            apply_settings(ctx, acp, st, s, false).await?;
+            if st.needs_respawn && st.turn.is_none() {
+                respawn_without_bypass(ctx, acp, bin, servers, st).await?;
+            }
+        }
         SessionCmd::Stop => {
             drop_held(ctx, st);
             finish_turn(ctx, st, TurnOutcome::Interrupted, None);
@@ -1294,20 +1424,103 @@ async fn answer(
     Ok(())
 }
 
-fn tool_name(kind: &str) -> String {
-    format!("acp:{}", if kind.is_empty() { "other" } else { kind })
+fn tool_name(kind: &str, call: &Value) -> String {
+    match kind {
+        "execute" => "Bash".into(),
+        "read" => "Read".into(),
+        "edit" => "Edit".into(),
+        "delete" => "Delete".into(),
+        "move" => "Move".into(),
+        "search" => "Grep".into(),
+        "fetch" => "WebFetch".into(),
+        "think" => "Think".into(),
+        "switch_mode" => "SwitchMode".into(),
+        _ => call["title"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .unwrap_or("Tool")
+            .to_string(),
+    }
 }
 
-fn tool_input(call: &Value) -> Value {
+fn tool_input(kind: &str, call: &Value) -> Value {
     let mut input = match &call["rawInput"] {
         Value::Object(o) => Value::Object(o.clone()),
         _ => json!({}),
     };
-    if let Some(t) = call["title"].as_str() {
+    let title = call["title"].as_str().filter(|t| !t.is_empty());
+    if let Some(t) = title {
         input["title"] = json!(t);
     }
-    if let Some(p) = call["locations"][0]["path"].as_str() {
+    let loc_path = call["locations"][0]["path"]
+        .as_str()
+        .filter(|p| !p.is_empty());
+    if let Some(p) = loc_path {
         input["path"] = json!(p);
+    }
+    match kind {
+        "execute" => {
+            let cmd = input["command"]
+                .as_str()
+                .or_else(|| input["CommandLine"].as_str())
+                .or(title)
+                .map(String::from);
+            if let Some(c) = cmd {
+                if let Some(t) = title
+                    && t != c
+                    && input["description"].is_null()
+                {
+                    input["description"] = json!(t);
+                }
+                input["command"] = json!(c);
+            }
+        }
+        "read" | "edit" | "delete" | "move" => {
+            let fp = input["file_path"]
+                .as_str()
+                .or(loc_path)
+                .or_else(|| input["path"].as_str())
+                .or_else(|| input["Path"].as_str())
+                .or_else(|| input["AbsolutePath"].as_str())
+                .or_else(|| input["TargetFile"].as_str())
+                .or(title)
+                .map(String::from);
+            if let Some(fp) = fp {
+                input["file_path"] = json!(fp);
+            }
+            if input["old_string"].is_null()
+                && let Some(old) = input["TargetContent"].as_str().map(String::from)
+            {
+                input["old_string"] = json!(old);
+            }
+            if input["new_string"].is_null()
+                && let Some(new) = input["ReplacementContent"].as_str().map(String::from)
+            {
+                input["new_string"] = json!(new);
+            }
+        }
+        "search" => {
+            let pat = input["pattern"]
+                .as_str()
+                .or_else(|| input["query"].as_str())
+                .or_else(|| input["Query"].as_str())
+                .or(title)
+                .map(String::from);
+            if let Some(pat) = pat {
+                input["pattern"] = json!(pat);
+            }
+        }
+        "fetch" => {
+            let url = input["url"]
+                .as_str()
+                .or_else(|| input["Url"].as_str())
+                .or(title)
+                .map(String::from);
+            if let Some(url) = url {
+                input["url"] = json!(url);
+            }
+        }
+        _ => {}
     }
     input
 }
@@ -1339,12 +1552,19 @@ fn output_text(update: &Value) -> String {
     out.join("\n")
 }
 
-async fn on_message(ctx: &SessionCtx, acp: &mut Acp, st: &mut State, msg: Value) -> Result<()> {
+async fn on_message(
+    ctx: &mut SessionCtx,
+    acp: &mut Acp,
+    bin: &Path,
+    servers: &[Value],
+    st: &mut State,
+    msg: Value,
+) -> Result<()> {
     let method = msg["method"].as_str().map(String::from);
     match (method.as_deref(), msg.get("id").filter(|v| !v.is_null())) {
         (Some("session/update"), _) => on_update(ctx, st, &msg["params"]["update"]),
         (Some("session/request_permission"), Some(id)) => {
-            on_permission(ctx, st, id.clone(), &msg["params"])
+            on_permission(ctx, acp, st, id.clone(), &msg["params"]).await?;
         }
         (Some("elicitation/create"), Some(id)) => {
             acp.reply(id, json!({ "action": "decline" })).await?;
@@ -1408,6 +1628,9 @@ async fn on_message(ctx: &SessionCtx, acp: &mut Acp, st: &mut State, msg: Value)
                     finish_turn(ctx, st, outcome, error);
                     idle(ctx, st);
                     st.failed = None;
+                    if st.needs_respawn {
+                        respawn_without_bypass(ctx, acp, bin, servers, st).await?;
+                    }
                     if let Some((id, next)) = st.held.pop_front() {
                         start_turn(ctx, st, id, next.clone());
                         prompt(acp, st, &next).await?;
@@ -1490,12 +1713,14 @@ fn on_update(ctx: &SessionCtx, st: &mut State, u: &Value) {
             };
             close_text(ctx, st);
             let turn = current(ctx, st);
-            let name = tool_name(u["kind"].as_str().unwrap_or(""));
-            let input = tool_input(u);
+            let kind = u["kind"].as_str().unwrap_or("").to_string();
+            let name = tool_name(&kind, u);
+            let input = tool_input(&kind, u);
             let status = u["status"].as_str().unwrap_or("pending");
             st.tools.insert(
                 id.to_string(),
                 Tool {
+                    kind,
                     name: name.clone(),
                     input: input.clone(),
                     output: output_text(u),
@@ -1529,7 +1754,8 @@ fn on_update(ctx: &SessionCtx, st: &mut State, u: &Value) {
             let Some(t) = st.tools.get_mut(id) else {
                 return;
             };
-            if let Value::Object(more) = tool_input(u)
+            let kind = u["kind"].as_str().unwrap_or(&t.kind);
+            if let Value::Object(more) = tool_input(kind, u)
                 && let Value::Object(have) = &mut t.input
             {
                 for (k, v) in more {
@@ -1642,12 +1868,35 @@ fn complete_tool(ctx: &SessionCtx, st: &mut State, turn: &str, id: &str, failed:
     );
 }
 
-fn on_permission(ctx: &SessionCtx, st: &mut State, rpc: Value, p: &Value) {
-    close_text(ctx, st);
+async fn on_permission(
+    ctx: &SessionCtx,
+    acp: &mut Acp,
+    st: &mut State,
+    rpc: Value,
+    p: &Value,
+) -> Result<()> {
     let call = &p["toolCall"];
     let tool_call = call["toolCallId"].as_str().unwrap_or_default().to_string();
     let options: Vec<Value> = p["options"].as_array().cloned().unwrap_or_default();
     let question = tool_call.starts_with("interaction_");
+    if st.bypass && !question {
+        let chosen = ["allow_always", "allow_once"].into_iter().find_map(|k| {
+            options
+                .iter()
+                .find(|o| o["kind"] == k)
+                .and_then(|o| o["optionId"].as_str())
+                .map(String::from)
+        });
+        if let Some(id) = chosen {
+            acp.reply(
+                &rpc,
+                json!({ "outcome": { "outcome": "selected", "optionId": id } }),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+    close_text(ctx, st);
     let kind = call["kind"].as_str().unwrap_or("");
     let turn = current(ctx, st);
     st.wake_until = None;
@@ -1674,8 +1923,8 @@ fn on_permission(ctx: &SessionCtx, st: &mut State, rpc: Value, p: &Value) {
         }
     } else {
         AgentRequest::ToolApproval {
-            tool: tool_name(kind),
-            input: tool_input(call),
+            tool: tool_name(kind, call),
+            input: tool_input(kind, call),
             reason: p["options"][0]["_meta"]["agy.security.warning"]["message"]
                 .as_str()
                 .map(String::from),
@@ -1692,6 +1941,7 @@ fn on_permission(ctx: &SessionCtx, st: &mut State, rpc: Value, p: &Value) {
     );
     emit(ctx, Event::Request { id, turn, request });
     let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Waiting));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1752,11 +2002,12 @@ mod tests {
         assert_eq!(ids(c.efforts_of("gemini-3.1-pro")).len(), 2);
         assert!(c.efforts_of("gpt-oss-120b-medium").is_empty());
         let modes = c.mode_list();
-        assert_eq!(modes[1].id, "accept-edits");
+        assert_eq!(modes[1].id, "acceptEdits");
         assert_eq!(
             modes[1].hint.as_deref(),
             Some("Approve file edits in the workspace without asking.")
         );
+        assert!(modes.iter().any(|m| m.id == "bypassPermissions"));
         let pro = c.efforts_of("gemini-3.1-pro");
         assert_eq!(effort_for("xhigh", &pro).as_deref(), Some("high"));
         assert_eq!(effort_for("medium", &pro).as_deref(), Some("low"));
@@ -1764,8 +2015,12 @@ mod tests {
             mode_for("accept-edits", &c.mode_ids()).as_deref(),
             Some("accept-edits")
         );
-        assert_eq!(mode_for("acceptEdits", &c.mode_ids()), None);
+        assert_eq!(
+            mode_for("acceptEdits", &c.mode_ids()).as_deref(),
+            Some("accept-edits")
+        );
         assert_eq!(mode_for("bypassPermissions", &c.mode_ids()), None);
+        assert_eq!(mode_for("auto", &c.mode_ids()), None);
     }
 
     struct Agy {
@@ -1992,7 +2247,7 @@ mod tests {
             .collect();
         assert_eq!(order, ["text", "thought", "text"]);
         assert!(done.iter().any(|i| matches!(&i.body, ItemBody::ToolCall { name, status: ToolStatus::Completed, output: Some(o), input, .. }
-            if name == "acp:execute" && o.text == "Finished" && input["title"] == "cargo build")));
+            if name == "Bash" && o.text == "Finished" && input["command"] == "cargo build" && input["title"] == "cargo build")));
         assert!(done.iter().any(
             |i| matches!(&i.body, ItemBody::Todos { todos } if todos[0].status == "completed")
         ));
@@ -2027,7 +2282,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(tool, "acp:execute");
+        assert_eq!(tool, "Bash");
         cmd.send(SessionCmd::Respond {
             request: id.clone(),
             response: RequestResponse::Allow { always: true },
@@ -2097,10 +2352,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_request_goes_to_the_app_and_a_mode_agy_lacks_leaves_it_as_it_is() {
+    async fn modes_normalize_and_unsupported_modes_leave_agy_as_it_is() {
         for (stored, set) in [
-            ("bypassPermissions", None),
+            ("auto", None),
             ("accept-edits", Some("accept-edits")),
+            ("acceptEdits", Some("accept-edits")),
         ] {
             let (mut agy, mut rx, _cmd) = start(AgentSettings {
                 permission_mode: Some(stored.into()),
@@ -2137,12 +2393,18 @@ mod tests {
             for (n, kind) in ["edit", "read", "execute"].into_iter().enumerate() {
                 agy.send(json!({ "jsonrpc": "2.0", "id": 80 + n, "method": "session/request_permission", "params": {
                     "sessionId": "s",
-                    "toolCall": { "toolCallId": format!("c{n}"), "title": kind, "kind": kind },
+                    "toolCall": {
+                        "toolCallId": format!("c{n}"),
+                        "title": kind,
+                        "kind": kind,
+                        "locations": [{ "path": "src/lib.rs" }],
+                        "rawInput": if kind == "edit" { json!({ "TargetContent": "old", "ReplacementContent": "new" }) } else { json!({}) }
+                    },
                     "options": [{ "optionId": "a1", "name": "Allow", "kind": "allow_once" }, { "optionId": "r1", "name": "Deny", "kind": "reject_once" }]
                 } })).await;
             }
             let out = drain(&mut rx, |o| {
-                matches!(o, AgentOut::Event(Event::Request { request: AgentRequest::ToolApproval { tool, .. }, .. }) if tool == "acp:execute")
+                matches!(o, AgentOut::Event(Event::Request { request: AgentRequest::ToolApproval { tool, .. }, .. }) if tool == "Bash")
             })
             .await;
             let asked: Vec<&str> = out
@@ -2155,11 +2417,18 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(
-                asked,
-                ["acp:edit", "acp:read", "acp:execute"],
-                "in {stored}"
-            );
+            assert_eq!(asked, ["Edit", "Read", "Bash"], "in {stored}");
+            let edit_input = out.iter().find_map(|o| match o {
+                AgentOut::Event(Event::Request {
+                    request: AgentRequest::ToolApproval { tool, input, .. },
+                    ..
+                }) if tool == "Edit" => Some(input),
+                _ => None,
+            });
+            let edit_input = edit_input.expect("Edit approval");
+            assert_eq!(edit_input["file_path"], "src/lib.rs");
+            assert_eq!(edit_input["old_string"], "old");
+            assert_eq!(edit_input["new_string"], "new");
             let shown = out.iter().find_map(|o| match o {
                 AgentOut::Event(Event::Session {
                     permission_mode, ..
@@ -2171,6 +2440,136 @@ mod tests {
             }
             agy.answer(&p, json!({ "stopReason": "cancelled" })).await;
         }
+    }
+
+    #[tokio::test]
+    async fn bypass_mode_auto_approves_tools_but_still_surfaces_questions_and_toggles_live() {
+        let (mut agy, mut rx, cmd) = start(AgentSettings {
+            permission_mode: Some("bypassPermissions".into()),
+            ..Default::default()
+        });
+        let init = agy.expect("initialize").await;
+        agy.answer(&init, json!({ "protocolVersion": 1 })).await;
+        let auth = agy.expect("authenticate").await;
+        agy.answer(&auth, json!({})).await;
+        let new = agy.expect("session/new").await;
+        agy.answer(&new, real_session()).await;
+        let p = agy.expect("session/prompt").await;
+
+        agy.send(
+            json!({ "jsonrpc": "2.0", "id": 90, "method": "session/request_permission", "params": {
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "c0", "title": "cargo test", "kind": "execute" },
+            "options": [
+                { "optionId": "a1", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "a2", "name": "Always", "kind": "allow_always" },
+                { "optionId": "r1", "name": "Deny", "kind": "reject_once" }
+            ]
+        } }),
+        )
+        .await;
+        let auto_reply = agy.next().await;
+        assert_eq!(
+            (
+                auto_reply["id"].as_u64(),
+                auto_reply["result"]["outcome"]["optionId"].as_str()
+            ),
+            (Some(90), Some("a2"))
+        );
+
+        agy.send(json!({ "jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "interaction_1", "title": "Which database?", "kind": "other" },
+            "options": [{ "optionId": "o1", "name": "SQLite" }, { "optionId": "o2", "name": "Postgres" }]
+        } })).await;
+        let out = drain(&mut rx, |o| {
+            matches!(o, AgentOut::Event(Event::Request { .. }))
+        })
+        .await;
+        let session_mode = out.iter().find_map(|o| match o {
+            AgentOut::Event(Event::Session {
+                permission_mode, ..
+            }) => Some(permission_mode.clone()),
+            _ => None,
+        });
+        assert_eq!(session_mode, Some(Some("bypassPermissions".to_string())));
+        let q_id = match out.last() {
+            Some(AgentOut::Event(Event::Request {
+                id,
+                request: AgentRequest::Question { questions },
+                ..
+            })) => {
+                assert_eq!(questions[0].question, "Which database?");
+                id.clone()
+            }
+            other => panic!("expected Question request, got {other:?}"),
+        };
+        assert!(
+            !out.iter().any(|o| matches!(
+                o,
+                AgentOut::Event(Event::Request {
+                    request: AgentRequest::ToolApproval { .. },
+                    ..
+                })
+            )),
+            "tool approval should not have been sent to the app in bypass mode"
+        );
+        cmd.send(SessionCmd::Respond {
+            request: q_id,
+            response: RequestResponse::Answers {
+                answers: vec![vec!["SQLite".into()]],
+            },
+        })
+        .unwrap();
+        let q_reply = agy.next().await;
+        assert_eq!(
+            (
+                q_reply["id"].as_u64(),
+                q_reply["result"]["outcome"]["optionId"].as_str()
+            ),
+            (Some(91), Some("o1"))
+        );
+
+        cmd.send(SessionCmd::Settings(AgentSettings {
+            permission_mode: Some("default".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        drain(&mut rx, |o| {
+            matches!(o, AgentOut::Event(Event::SettingsChanged { .. }))
+        })
+        .await;
+        agy.send(json!({ "jsonrpc": "2.0", "id": 92, "method": "session/request_permission", "params": {
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "c2", "title": "git status", "kind": "execute" },
+            "options": [{ "optionId": "a1", "name": "Allow", "kind": "allow_once" }, { "optionId": "r1", "name": "Deny", "kind": "reject_once" }]
+        } })).await;
+        drain(&mut rx, |o| {
+            matches!(
+                o,
+                AgentOut::Event(Event::Request {
+                    request: AgentRequest::ToolApproval { .. },
+                    ..
+                })
+            )
+        })
+        .await;
+
+        cmd.send(SessionCmd::Settings(AgentSettings {
+            permission_mode: Some("bypassPermissions".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        let live_reply = agy.next().await;
+        assert_eq!(
+            (
+                live_reply["id"].as_u64(),
+                live_reply["result"]["outcome"]["optionId"].as_str()
+            ),
+            (Some(92), Some("a1"))
+        );
+        agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
+        drain(&mut rx, ended).await;
     }
 
     #[tokio::test]

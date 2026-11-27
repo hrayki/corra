@@ -12,13 +12,18 @@ export const CLAUDE_MODES: Choice[] = [
 
 export const AGY_MODES: Choice[] = [
   { id: 'default', name: 'Default' },
-  { id: 'accept-edits', name: 'Accept edits' },
+  { id: 'acceptEdits', name: 'Accept edits' },
   { id: 'plan', name: 'Plan' },
+  { id: 'bypassPermissions', name: 'Bypass Permissions' },
 ]
 
 export const AGENT_NAMES: Record<AgentKind, string> = { claude: 'Claude Code', antigravity: 'Antigravity' }
 
 const RANKS = ['low', 'medium', 'high', 'xhigh', 'max']
+
+export function normalizeModeId(id: string | undefined): string | undefined {
+  return id === 'accept-edits' ? 'acceptEdits' : id
+}
 
 export function fitEffort(effort: string | undefined, list: Choice[]): string | undefined {
   if (!effort || !list.length || list.some((c) => c.id === effort)) return effort
@@ -48,18 +53,22 @@ export type PickerInput = {
 }
 
 export function pickerState(p: PickerInput) {
-  const agy = p.agent === 'antigravity'
-  const modelId = p.settings.model ?? (agy ? p.model : 'default')
+  const defaultModes = p.agent === 'antigravity' ? AGY_MODES : CLAUDE_MODES
+  const modelId = p.settings.model ?? (p.agent === 'claude' ? 'default' : p.model)
   const model = findModel(p.models, modelId)
-  const efforts = model?.efforts ?? (agy && model && model.id === p.model ? p.efforts : undefined) ?? []
+  const efforts = model?.efforts ?? (model && model.id === p.model ? p.efforts : undefined) ?? []
   const effort = p.settings.effort ?? 'high'
-  const all = agy ? (p.modes?.length ? p.modes : AGY_MODES) : CLAUDE_MODES
-  const modes = agy ? all : all.filter((m) => m.id !== 'auto' || model?.supports_auto_mode === true)
-  const stored = p.settings.permission_mode ?? 'default'
-  const mode = all.find((m) => m.id === stored) ?? all.find((m) => m.id === p.mode) ?? all[0]
+  const rawModes = p.modes?.length ? p.modes.map((m) => ({ ...m, id: normalizeModeId(m.id)! })) : defaultModes
+  const all = rawModes.some((m) => m.id === 'bypassPermissions')
+    ? rawModes
+    : [...rawModes, { id: 'bypassPermissions', name: 'Bypass Permissions' }]
+  const modes = p.agent === 'claude' ? all.filter((m) => m.id !== 'auto' || model?.supports_auto_mode === true) : all
+  const stored = normalizeModeId(p.settings.permission_mode) ?? 'default'
+  const liveMode = normalizeModeId(p.mode)
+  const mode = all.find((m) => m.id === stored) ?? all.find((m) => m.id === liveMode) ?? all[0]
   return {
     model,
-    modelName: model?.name ?? p.settings.model ?? (agy ? p.model : undefined) ?? 'Default model',
+    modelName: model?.name ?? p.settings.model ?? (p.agent === 'claude' ? undefined : p.model) ?? 'Default model',
     efforts,
     effort,
     effortName: efforts.find((c) => c.id === effort)?.name ?? '',

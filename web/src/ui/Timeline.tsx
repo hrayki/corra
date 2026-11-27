@@ -18,7 +18,7 @@ import type { RequestResponse } from '../proto/RequestResponse'
 import { clock, duration } from '../lib/format'
 import { openFile, setPanel } from '../lib/panel'
 import { Btn, Thumbs, inputClass } from './bits'
-import { ToolDetail, toolSummary } from './tools'
+import { ToolDetail, canonicalToolName, toolSummary } from './tools'
 import { AgentRow, ThreadRow } from './Agents'
 import { isAgentCall, startedThread } from '../lib/agents'
 import { holds } from '../lib/find'
@@ -729,7 +729,8 @@ function ToolRow(props: { thread?: string; item: ItemView; kids?: Map<string, It
   )
 }
 
-function approvalTitle(tool: string): string {
+function approvalTitle(rawTool: string): string {
+  const tool = canonicalToolName(rawTool)
   switch (tool) {
     case 'Bash':
       return 'Run this command?'
@@ -739,23 +740,16 @@ function approvalTitle(tool: string): string {
     case 'MultiEdit':
     case 'NotebookEdit':
       return 'Edit this file?'
+    case 'Delete':
+      return 'Delete this?'
+    case 'Move':
+      return 'Move this?'
     case 'WebFetch':
       return 'Fetch this page?'
     case 'Read':
-    case 'acp:read':
       return 'Read this file?'
-    case 'acp:execute':
-      return 'Run this command?'
-    case 'acp:edit':
-      return 'Edit this file?'
-    case 'acp:delete':
-      return 'Delete this?'
-    case 'acp:move':
-      return 'Move this?'
-    case 'acp:fetch':
-      return 'Fetch this page?'
     default: {
-      if (tool.startsWith('acp:')) return 'Allow this?'
+      if (tool === 'acp:other') return 'Allow this?'
       const m = tool.match(/^mcp__(.+?)__(.+)$/)
       return m ? `Use ${m[2].replace(/_/g, ' ')} from ${m[1]}?` : `Use ${tool}?`
     }
@@ -915,11 +909,13 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
                 <SignInForm
                   agent={String(x.input?.agent ?? 'the agent')}
                   url={String(x.input?.url ?? '')}
+                  disabled={sending()}
                   onSend={(code) =>
                     call({ op: 'answer_secret', thread: props.thread, request: props.r.id, value: code }).catch((e) =>
                       setError((e as Error).message),
                     )
                   }
+                  onCancel={() => respond({ type: 'deny' })}
                 />
               )
             }}
@@ -988,7 +984,13 @@ function secretLabel(r?: RequestResponse) {
   return 'Cancelled'
 }
 
-function SignInForm(props: { agent: string; url: string; onSend: (code: string) => Promise<unknown> }) {
+function SignInForm(props: {
+  agent: string
+  url: string
+  disabled?: boolean
+  onSend: (code: string) => Promise<unknown>
+  onCancel: () => void
+}) {
   const [code, setCode] = createSignal('')
   const [busy, setBusy] = createSignal(false)
   const send = async () => {
@@ -1026,8 +1028,11 @@ function SignInForm(props: { agent: string; url: string; onSend: (code: string) 
       />
       <p class="mt-2 text-[12.5px] text-faint">The code goes straight to this machine and isn't kept in the conversation.</p>
       <div class="mt-3 flex gap-2">
-        <Btn kind="primary" type="submit" disabled={!code().trim() || busy()}>
+        <Btn kind="primary" type="submit" disabled={!code().trim() || busy() || props.disabled}>
           {busy() ? 'Signing in…' : 'Sign in'}
+        </Btn>
+        <Btn kind="ghost" disabled={busy() || props.disabled} onClick={props.onCancel}>
+          Cancel
         </Btn>
       </div>
     </form>
