@@ -104,6 +104,14 @@ input:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+::highlight(corra-find) {
+  background-color: color-mix(in srgb, var(--warn) 32%, transparent);
+}
+::highlight(corra-find-now) {
+  background-color: var(--accent);
+  color: var(--bg);
+}
+
 @keyframes pulse-soft {
   0%,
   100% {

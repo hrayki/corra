@@ -888,6 +888,48 @@ impl Db {
         })
     }
 
+    pub fn turns_between(&self, thread: ThreadId, from: i64, before: i64) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started' AND seq >= ?2 AND seq < ?3",
+                params![thread.to_string(), from, before],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    pub fn turn_start(&self, thread: ThreadId, turn: &str, at_most: i64) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind = 'turn_started' AND seq <= ?2 AND json_extract(data, '$.turn') = ?3 ORDER BY seq DESC LIMIT 1",
+                params![thread.to_string(), at_most, turn],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn event_at(&self, thread: ThreadId, seq: i64) -> Result<Option<StoredEvent>> {
+        Ok(self
+            .stored_events(
+                "SELECT seq, ts, data FROM events WHERE thread = ?1 AND seq = ?2",
+                params![thread.to_string(), seq],
+            )?
+            .pop())
+    }
+
+    pub fn messages_between(
+        &self,
+        thread: ThreadId,
+        after: i64,
+        upto: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        self.stored_events(
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind IN ('turn_started', 'item_completed') AND seq > ?2 AND seq <= ?3 AND (kind = 'turn_started' OR (json_extract(data, '$.item.type') IN ('user_message', 'agent_message') AND json_extract(data, '$.item.parent') IS NULL)) ORDER BY seq",
+            params![thread.to_string(), after, upto],
+        )
+    }
+
     pub fn events_between(&self, thread: ThreadId, from: i64, to: i64) -> Result<Vec<StoredEvent>> {
         self.stored_events(
             "SELECT seq, ts, data FROM events WHERE thread = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq",

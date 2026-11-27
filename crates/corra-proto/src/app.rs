@@ -29,6 +29,13 @@ pub enum AppCall {
     Earlier {
         thread: ThreadId,
         before_seq: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to_seq: Option<i64>,
+    },
+    Find {
+        thread: ThreadId,
+        query: String,
     },
     Unsubscribe {
         thread: ThreadId,
@@ -344,6 +351,20 @@ pub enum AppCall {
         repo: Option<String>,
         args: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Found {
+    pub hits: Vec<FindHit>,
+    pub capped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FindHit {
+    pub seq: i64,
+    pub n: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
