@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS threads (
     updated_at INTEGER NOT NULL,
     pinned_at INTEGER,
     settled_at INTEGER,
-    hidden_at INTEGER
+    hidden_at INTEGER,
+    started_by TEXT,
+    follower TEXT
 );
 CREATE INDEX IF NOT EXISTS threads_by_project ON threads(project, updated_at);
 CREATE TABLE IF NOT EXISTS events (
@@ -85,7 +87,7 @@ CREATE TABLE IF NOT EXISTS thread_files (
 ) WITHOUT ROWID;
 "#;
 
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 const OLDEST_VERSION: i64 = 12;
 pub const NEWER_DATABASE: i32 = 65;
 
@@ -140,6 +142,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "ALTER TABLE projects ADD COLUMN kind TEXT;
              ALTER TABLE machines ADD COLUMN kind TEXT;",
+        )?;
+    }
+    if !fresh && v < 14 {
+        conn.execute_batch(
+            "ALTER TABLE threads ADD COLUMN started_by TEXT;
+             ALTER TABLE threads ADD COLUMN follower TEXT;
+             UPDATE threads SET started_by = (SELECT value FROM kv WHERE kv.key = 'thread:' || threads.id || ':started_by')
+               WHERE EXISTS (SELECT 1 FROM kv WHERE kv.key = 'thread:' || threads.id || ':started_by');
+             UPDATE threads SET follower = (SELECT value FROM kv WHERE kv.key = 'thread:' || threads.id || ':follower')
+               WHERE EXISTS (SELECT 1 FROM kv WHERE kv.key = 'thread:' || threads.id || ':follower');
+             DELETE FROM kv WHERE key LIKE 'thread:%:started_by' OR key LIKE 'thread:%:follower';",
         )?;
     }
     conn.execute_batch(
@@ -418,6 +431,21 @@ impl Db {
         })
     }
 
+    pub fn delete_project(&self, id: ProjectId) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM kv WHERE key = ?1 OR (key >= ?2 AND key < ?3)",
+                params![
+                    format!("setup_failed:{id}"),
+                    format!("project:{id}:"),
+                    format!("project:{id}:\u{10FFFF}"),
+                ],
+            )?;
+            c.execute("DELETE FROM projects WHERE id = ?1", [id.to_string()])
+                .map(|_| ())
+        })
+    }
+
     pub fn machines(&self) -> Result<Vec<Machine>> {
         self.with(|c| {
             let mut st = c.prepare(
@@ -603,10 +631,17 @@ impl Db {
         })
     }
 
+    pub fn threads_in_project(&self, project: ProjectId) -> Result<Vec<Thread>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!("{THREAD_SELECT} WHERE project = ?1"))?;
+            st.query_map([project.to_string()], row_thread)?.collect()
+        })
+    }
+
     pub fn insert_thread(&self, t: &Thread) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO threads(id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO threads(id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at, started_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     t.id.to_string(),
                     t.project.to_string(),
@@ -619,8 +654,41 @@ impl Db {
                     t.status.as_str(),
                     t.last_seq,
                     t.created_at,
-                    t.updated_at
+                    t.updated_at,
+                    t.started_by.map(|s| s.to_string()),
                 ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_started_by(&self, thread: ThreadId, parent: ThreadId) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE threads SET started_by = ?2 WHERE id = ?1",
+                params![thread.to_string(), parent.to_string()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn follower(&self, thread: ThreadId) -> Result<Option<ThreadId>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT follower FROM threads WHERE id = ?1",
+                [thread.to_string()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| opt_uuid(o.flatten()))
+        })
+    }
+
+    pub fn set_follower(&self, thread: ThreadId, follower: Option<ThreadId>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE threads SET follower = ?2 WHERE id = ?1",
+                params![thread.to_string(), follower.map(|f| f.to_string())],
             )
             .map(|_| ())
         })
@@ -1001,7 +1069,7 @@ impl Db {
     }
 }
 
-const THREAD_SELECT: &str = "SELECT id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at, pinned_at, settled_at, hidden_at, (SELECT value FROM kv WHERE kv.key = 'thread:' || threads.id || ':started_by') FROM threads";
+const THREAD_SELECT: &str = "SELECT id, project, title, agent, machine, session_id, cwd, settings, status, last_seq, created_at, updated_at, pinned_at, settled_at, hidden_at, started_by FROM threads";
 
 fn row_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
     Ok(Project {

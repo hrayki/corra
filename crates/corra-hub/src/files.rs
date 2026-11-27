@@ -5,21 +5,14 @@ use axum::body::Bytes;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use corra_proto::{MachineStatus, ThreadId};
+use corra_proto::ThreadId;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::AppState;
-use crate::hub::hash_token;
 
 fn machine_of(s: &AppState, headers: &HeaderMap) -> Option<corra_proto::MachineId> {
-    let token = headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")?;
-    let a = s.hub.db.machine_by_token(&hash_token(token)).ok()??;
-    (a.status != MachineStatus::Destroyed).then_some(a.id)
+    s.hub.auth_machine_bearer(headers)
 }
 
 fn allowed(s: &AppState, headers: &HeaderMap, thread: ThreadId) -> bool {

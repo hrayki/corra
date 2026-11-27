@@ -1,15 +1,28 @@
-import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal } from 'solid-js'
 import ArrowLeft from 'lucide-solid/icons/arrow-left'
 import ChevronDown from 'lucide-solid/icons/chevron-down'
+import ChevronRight from 'lucide-solid/icons/chevron-right'
+import Play from 'lucide-solid/icons/play'
+import Moon from 'lucide-solid/icons/moon'
+import RotateCw from 'lucide-solid/icons/rotate-cw'
+import Trash from 'lucide-solid/icons/trash'
 import X from 'lucide-solid/icons/x'
 import { call, state } from '../lib/store'
 import type { Project } from '../proto/Project'
+import type { SetupLog } from '../proto/SetupLog'
 import { ago } from '../lib/format'
 import { kindOf, makers, paired, providerOf, sizeLabel, sizesFor } from '../lib/catalog'
 import { RepoPicker } from './RepoPicker'
 import { Btn, Menu } from './bits'
 
 type SetupRow = { name: string; repos: string[]; env: string[] }
+type RuntimeInfo = {
+  stage?: string
+  setup?: SetupLog
+  env_injected: string[]
+  manager_env: string[]
+  tools: string[]
+}
 
 const MAIN = [
   { value: false, label: 'Wait for you', hint: 'Pushing to the default branch or a tag, and merging, wait for your yes.' },
@@ -22,8 +35,17 @@ export function ProjectPage(props: { id: string }) {
   const p = () => state.projects[props.id] as Project | undefined
   const [setups] = createResource(() => call<SetupRow[]>({ op: 'list_setups' }).catch(() => []))
   const [envNames] = createResource(() => call<string[]>({ op: 'list_env' }).catch(() => []))
+  const [runtime, { refetch: refetchRuntime }] = createResource(
+    () => (p() ? [props.id, p()!.trusted, p()!.env.join(',')] : null),
+    () => call<RuntimeInfo>({ op: 'project_setup_log', project: props.id }).catch(() => undefined),
+  )
   const [error, setError] = createSignal('')
   const [busy, setBusy] = createSignal(false)
+  const [confirmReset, setConfirmReset] = createSignal(false)
+  const [confirmManager, setConfirmManager] = createSignal(false)
+  const [confirmDelete, setConfirmDelete] = createSignal(false)
+  const [logOpen, setLogOpen] = createSignal(false)
+
   const run = async (f: () => Promise<unknown>) => {
     setError('')
     setBusy(true)
@@ -35,16 +57,28 @@ export function ProjectPage(props: { id: string }) {
       setBusy(false)
     }
   }
-  const update = (fields: Record<string, unknown>) => run(() => call({ op: 'update_project', project: props.id, ...fields }))
+  const update = (fields: Record<string, unknown>) =>
+    run(async () => {
+      await call({ op: 'update_project', project: props.id, ...fields })
+      void refetchRuntime()
+    })
   const machine = createMemo(
     () =>
       Object.values(state.machines)
         .filter((m) => m.project === props.id && m.status !== 'destroyed')
         .sort((a, b) => b.created_at - a.created_at)[0],
   )
+  const threadCount = createMemo(() => Object.values(state.threads).filter((t) => t.project === props.id).length)
+  const liveStatus = () => state.projectStatus[props.id]
+  const stage = () => liveStatus()?.stage ?? runtime()?.stage
+  const setupLog = () => liveStatus()?.setup ?? runtime()?.setup
+  createEffect(() => {
+    if (setupLog()?.ok === false) setLogOpen(true)
+  })
+
   const status = () => {
     const m = machine()
-    if (!m) return 'No machine yet: the next thread makes one.'
+    if (!m) return 'No machine yet: press Wake or start a thread to make one.'
     const word = {
       connected: 'Awake',
       asleep: 'Asleep',
@@ -68,12 +102,20 @@ export function ProjectPage(props: { id: string }) {
   const placeKey = () => (makes() ? p()?.provider : `machine:${p()?.default_machine}`)
   const kinds = () => providerOf(p()?.provider)?.kinds ?? []
   const kind = () => kindOf(p()?.provider, p()?.kind)
+  const canWake = () => makes() && (!machine() || machine()!.status === 'asleep' || machine()!.status === 'failed')
+  const canSleep = () => makes() && machine()?.status === 'connected'
+
+  const deleteProject = () =>
+    run(async () => {
+      await call({ op: 'delete_project', project: props.id })
+      location.hash = '#/'
+    })
 
   return (
     <div class="min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-2xl px-4 pt-4 pb-16 sm:px-6 md:pt-10">
         <Show when={p()} fallback={<p class="text-[13.5px] text-mute">This project isn't on the hub.</p>}>
-          <div class="mb-8 flex items-center gap-2">
+          <div class="mb-6 flex items-center gap-2">
             <a
               href="#/"
               aria-label="Back"
@@ -84,11 +126,33 @@ export function ProjectPage(props: { id: string }) {
             <h1 class="text-[20px] font-semibold tracking-tight">{p()!.name}</h1>
           </div>
 
+          <Show when={stage()}>
+            <div class="mb-4 flex items-center gap-2.5 rounded-xl border border-line bg-panel px-4 py-2.5 text-[13px] text-ink">
+              <span class="size-2 shrink-0 rounded-full bg-accent pulse" />
+              <span>{stage()}</span>
+            </div>
+          </Show>
+
           <div class="grid grid-cols-1 overflow-hidden rounded-xl border border-line sm:grid-cols-[10rem_1fr] [&>*]:px-4 [&>div]:border-b [&>div]:border-line [&>div]:pt-1.5 [&>div]:pb-4 [&>div:last-child]:border-b-0 [&>span]:!pt-4 [&>span]:font-medium [&>span]:text-ink sm:[&>div]:pt-3.5 sm:[&>div]:pl-0 sm:[&>span]:border-b sm:[&>span]:border-line sm:[&>span:nth-last-child(2)]:border-b-0">
             <span class="pt-1 text-[13px] text-mute">Repos</span>
             <div>
               <div class="space-y-1">
-                <For each={p()!.repos}>{(r) => <div class="font-mono text-[12.5px]">{r.github ?? r.name}</div>}</For>
+                <For each={p()!.repos} fallback={<span class="text-[13px] text-faint">None</span>}>
+                  {(r) => (
+                    <div class="flex items-center gap-2 font-mono text-[12.5px]">
+                      <span class="min-w-0 truncate">{r.github ?? r.name}</span>
+                      <button
+                        aria-label={`Remove ${r.github ?? r.name}`}
+                        title="Remove repo"
+                        disabled={busy()}
+                        class="flex size-5 shrink-0 items-center justify-center rounded text-faint hover:bg-ink/5 hover:text-ink"
+                        onClick={() => void run(() => call({ op: 'remove_repo', project: props.id, name: r.name }))}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  )}
+                </For>
               </div>
               <div class="mt-2">
                 <RepoPicker
@@ -153,20 +217,56 @@ export function ProjectPage(props: { id: string }) {
                     <ChevronDown size={13} class="text-faint" />
                   </Menu>
                 </Show>
-                <Show when={machine() && makes()}>
+                <Show when={canWake()}>
                   <Btn
-                    kind="danger"
-                    disabled={busy()}
-                    onClick={() =>
-                      confirm(
-                        'Reset the machine? Its disk is erased: anything not pushed is lost. The next thread starts on a fresh machine with the setup run again.',
-                      ) && void run(() => call({ op: 'reset_machine', project: props.id }))
-                    }
+                    kind="ghost"
+                    disabled={busy() || !!stage()}
+                    onClick={() => void run(() => call({ op: 'wake_project', project: props.id }))}
                   >
+                    <Play size={13} />
+                    Wake
+                  </Btn>
+                </Show>
+                <Show when={canSleep()}>
+                  <Btn
+                    kind="ghost"
+                    disabled={busy() || !!stage()}
+                    onClick={() => void run(() => call({ op: 'sleep_project', project: props.id }))}
+                  >
+                    <Moon size={13} />
+                    Sleep
+                  </Btn>
+                </Show>
+                <Show when={machine() && makes() && !confirmReset()}>
+                  <Btn kind="danger" disabled={busy() || !!stage()} onClick={() => setConfirmReset(true)}>
                     Reset machine
                   </Btn>
                 </Show>
               </div>
+              <Show when={confirmReset()}>
+                <div class="mt-2.5 rounded-lg border border-bad/30 bg-bad/5 p-3 text-[12.5px]">
+                  <p class="text-ink">
+                    Reset the machine? Its disk is erased: anything not pushed is lost. The next wake starts fresh with setup run again.
+                  </p>
+                  <div class="mt-2 flex gap-2">
+                    <Btn
+                      kind="danger"
+                      disabled={busy()}
+                      onClick={() =>
+                        void run(async () => {
+                          await call({ op: 'reset_machine', project: props.id })
+                          setConfirmReset(false)
+                        })
+                      }
+                    >
+                      Confirm reset
+                    </Btn>
+                    <Btn kind="ghost" disabled={busy()} onClick={() => setConfirmReset(false)}>
+                      Cancel
+                    </Btn>
+                  </div>
+                </div>
+              </Show>
               <Show when={makes() && kind()?.about}>
                 <p class="mt-1.5 text-[12.5px] text-faint">{kind()!.about}</p>
               </Show>
@@ -174,22 +274,67 @@ export function ProjectPage(props: { id: string }) {
 
             <span class="pt-1.5 text-[13px] text-mute">Setup</span>
             <div>
-              <Menu
-                label="Setup"
-                class={pill}
-                items={[
-                  { label: 'None', checked: !p()!.setup, onSelect: () => void update({ setup: '' }) },
-                  ...(setups() ?? []).map((s) => ({
-                    label: s.name,
-                    checked: s.name === p()!.setup,
-                    onSelect: () => void update({ setup: s.name }),
-                  })),
-                ]}
-              >
-                <span>{p()!.setup ?? 'None'}</span>
-                <ChevronDown size={13} class="text-faint" />
-              </Menu>
-              <p class="mt-1 text-[12.5px] text-faint">A change runs at the machine's next wake.</p>
+              <div class="flex flex-wrap items-center gap-2">
+                <Menu
+                  label="Setup"
+                  class={pill}
+                  items={[
+                    { label: 'None', checked: !p()!.setup, onSelect: () => void update({ setup: '' }) },
+                    ...(setups() ?? []).map((s) => ({
+                      label: s.name,
+                      checked: s.name === p()!.setup,
+                      onSelect: () => void update({ setup: s.name }),
+                    })),
+                  ]}
+                >
+                  <span>{p()!.setup ?? 'None'}</span>
+                  <ChevronDown size={13} class="text-faint" />
+                </Menu>
+                <Btn
+                  kind="ghost"
+                  disabled={busy() || !!stage()}
+                  onClick={() =>
+                    void run(async () => {
+                      await call({ op: 'rerun_setup', project: props.id })
+                      setLogOpen(true)
+                    })
+                  }
+                >
+                  <RotateCw size={13} />
+                  Re-run setup
+                </Btn>
+              </div>
+              <p class="mt-1 text-[12.5px] text-faint">A change runs at the machine's next wake, or immediately with Re-run setup.</p>
+              <Show when={setupLog()}>
+                {(s) => (
+                  <div class="mt-2.5 rounded-lg border border-line bg-panel">
+                    <button
+                      type="button"
+                      class="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] hover:bg-ink/[0.03]"
+                      onClick={() => setLogOpen(!logOpen())}
+                    >
+                      <ChevronRight
+                        size={13}
+                        class="shrink-0 text-faint transition-transform duration-100"
+                        classList={{ 'rotate-90': logOpen() }}
+                      />
+                      <span class="font-medium" classList={{ 'text-ok': s().ok, 'text-bad': !s().ok }}>
+                        {s().ok ? 'Last setup succeeded' : 'Last setup failed'}
+                      </span>
+                      <span class="text-faint">·</span>
+                      <span class="text-mute">{ago(s().at)} ago</span>
+                      <Show when={s().setup}>
+                        <span class="font-mono text-[11.5px] text-faint">({s().setup})</span>
+                      </Show>
+                    </button>
+                    <Show when={logOpen()}>
+                      <pre class="max-h-64 overflow-auto border-t border-line px-3 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap text-mute">
+                        {s().log.trim() || 'No output recorded.'}
+                      </pre>
+                    </Show>
+                  </div>
+                )}
+              </Show>
             </div>
 
             <span class="pt-1 text-[13px] text-mute">Env vars</span>
@@ -259,24 +404,102 @@ export function ProjectPage(props: { id: string }) {
                   checked={p()!.trusted}
                   onChange={(e) => {
                     const on = e.currentTarget.checked
-                    if (
-                      on &&
-                      !confirm("Give this project's agents your real keys, every repo with nothing held back, and control of all of corra?")
-                    ) {
+                    if (on) {
                       e.currentTarget.checked = false
+                      setConfirmManager(true)
                       return
                     }
-                    void update({ trusted: on })
+                    setConfirmManager(false)
+                    void update({ trusted: false })
                   }}
                 />
                 Make this project a manager
               </label>
+              <Show when={confirmManager()}>
+                <div class="mt-2 rounded-lg border border-warn/30 bg-warn/5 p-3 text-[12.5px]">
+                  <p class="text-ink">
+                    Give this project's agents your real hub keys, push access to every repo without asking, and full control over projects,
+                    threads, machines, and credentials?
+                  </p>
+                  <div class="mt-2 flex gap-2">
+                    <Btn
+                      kind="primary"
+                      disabled={busy()}
+                      onClick={() =>
+                        void run(async () => {
+                          await update({ trusted: true })
+                          setConfirmManager(false)
+                        })
+                      }
+                    >
+                      Enable manager
+                    </Btn>
+                    <Btn kind="ghost" disabled={busy()} onClick={() => setConfirmManager(false)}>
+                      Cancel
+                    </Btn>
+                  </div>
+                </div>
+              </Show>
               <p class="mt-1 text-[12.5px] text-faint">
                 Its agents get your keys as the usual variables (GitHub, Modal, Railway, Cloudflare), reach and push any repo with nothing
                 held back, and manage every project, thread, machine and credential.
               </p>
+              <Show when={runtime()}>
+                {(info) => (
+                  <div class="mt-2.5 space-y-1.5 rounded-lg border border-line bg-panel px-3 py-2 text-[12px]">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span class="text-mute">Tools:</span>
+                      <For each={info().tools}>
+                        {(t) => <span class="rounded bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[11.5px]">{t}</span>}
+                      </For>
+                    </div>
+                    <Show when={p()!.trusted}>
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="text-mute">Manager keys injected:</span>
+                        <For each={info().manager_env} fallback={<span class="text-faint">None configured in Settings</span>}>
+                          {(k) => <span class="rounded bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[11.5px]">{k}</span>}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
+                )}
+              </Show>
             </div>
           </div>
+
+          <div class="mt-6 rounded-xl border border-line p-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div class="text-[13.5px] font-medium text-ink">Delete project</div>
+                <p class="text-[12.5px] text-faint">
+                  Removes this project, its cloud machine, and {threadCount() === 1 ? 'its 1 thread' : `all ${threadCount()} threads`}.
+                </p>
+              </div>
+              <Show when={!confirmDelete()}>
+                <Btn kind="danger" disabled={busy()} onClick={() => setConfirmDelete(true)}>
+                  <Trash size={13} />
+                  Delete project
+                </Btn>
+              </Show>
+            </div>
+            <Show when={confirmDelete()}>
+              <div class="mt-3 rounded-lg border border-bad/30 bg-bad/5 p-3 text-[12.5px]">
+                <p class="text-ink">
+                  Delete <span class="font-medium">{p()!.name}</span> permanently? Anything unpushed on its cloud machine and all its thread
+                  history will be deleted.
+                </p>
+                <div class="mt-2 flex gap-2">
+                  <Btn kind="danger" disabled={busy()} onClick={() => void deleteProject()}>
+                    Confirm delete
+                  </Btn>
+                  <Btn kind="ghost" disabled={busy()} onClick={() => setConfirmDelete(false)}>
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            </Show>
+          </div>
+
           <p class="mt-4 text-[12.5px] text-bad">{error()}</p>
         </Show>
       </div>

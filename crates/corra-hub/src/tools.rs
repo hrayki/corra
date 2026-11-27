@@ -6,6 +6,24 @@ use crate::hub::HubRef;
 
 const ASK_UNLESS_MAIN_ALLOWED: &[&str] = &["github.pr.merge"];
 
+const TOOL_ACTIONS: &[&str] = &[
+    "threads.list",
+    "threads.start",
+    "secret.request",
+    "github.pr.list",
+    "github.pr.view",
+    "github.pr.create",
+    "github.pr.update",
+    "github.pr.comment",
+    "github.pr.merge",
+    "github.checks",
+    "github.run.logs",
+    "github.issue.list",
+    "github.issue.view",
+    "github.issue.create",
+    "github.issue.comment",
+];
+
 fn tool(action: &str, description: &str, props: Value, required: &[&str]) -> ToolDef {
     ToolDef {
         action: action.into(),
@@ -165,14 +183,14 @@ pub async fn call(
         .db
         .thread(thread)?
         .ok_or_else(|| anyhow!("no such thread"))?;
-    if crate::manage::is_manage(hub, action) && is_manager(hub, machine) {
+    if crate::manage::is_manage(action) && is_manager(hub, machine) {
         return crate::manage::run(hub, &t, action, input).await;
     }
     let p = hub
         .db
         .project(t.project)?
         .ok_or_else(|| anyhow!("no such project"))?;
-    if !all_defs().iter().any(|d| d.action == action) {
+    if !TOOL_ACTIONS.contains(&action) {
         bail!("unknown tool {action}");
     }
     if action == "secret.request" {

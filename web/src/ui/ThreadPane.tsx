@@ -283,6 +283,15 @@ export function ThreadPane(props: { id: string }) {
               {error()}
             </button>
           </Show>
+          <Show when={state.projectStatus[thread()!.project]?.setup?.ok === false}>
+            <a
+              href={`#/project/${thread()!.project}`}
+              class="flex items-center justify-between border-b border-line bg-warn/10 px-5 py-1.5 text-[12.5px] text-warn hover:bg-warn/15"
+            >
+              <span>Project setup failed — some tools or repos may be missing.</span>
+              <span class="font-medium underline underline-offset-2">View setup log</span>
+            </a>
+          </Show>
           <div
             ref={scroller}
             onScroll={onScroll}
@@ -350,7 +359,8 @@ export function ThreadPane(props: { id: string }) {
               <Show when={thread()!.status === 'starting'}>
                 <div class="flex items-center gap-2 pb-4 text-[13px] text-mute">
                   <span class="size-2 rounded-full bg-accent pulse" />
-                  {machine()?.status === 'connected' ? 'Starting the agent' : machine() ? 'Waking the machine' : 'Starting a machine'}
+                  {state.projectStatus[thread()!.project]?.stage ??
+                    (machine()?.status === 'connected' ? 'Starting the agent' : machine() ? 'Waking the machine' : 'Starting a machine')}
                 </div>
               </Show>
               <Show

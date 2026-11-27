@@ -13,8 +13,9 @@ import { CodeBlock } from './tools'
 import RotateCw from 'lucide-solid/icons/rotate-cw'
 import { changesOf, refreshChanges, totals, type ChangedFile } from '../lib/changes'
 import { ago } from '../lib/format'
-import { IconBtn } from './bits'
+import { Btn, IconBtn } from './bits'
 import { inside } from '../lib/filelinks'
+import { providerOf } from '../lib/catalog'
 
 const TerminalPanel = lazy(lazyPart(() => import('./Terminal').then((m) => ({ default: m.TerminalPanel }))))
 
@@ -141,11 +142,90 @@ function DiffPanel(props: { thread: string; turn?: string; file?: string }) {
   )
 }
 
+function projectOf(thread: string) {
+  const t = state.threads[thread]
+  return t ? state.projects[t.project] : undefined
+}
+
+function machineOf(thread: string) {
+  const t = state.threads[thread]
+  if (!t) return undefined
+  if (t.machine && state.machines[t.machine]) return state.machines[t.machine]
+  return Object.values(state.machines)
+    .filter((m) => m.project === t.project && m.status !== 'destroyed')
+    .sort((a, b) => b.created_at - a.created_at)[0]
+}
+
+export function WakeNotice(props: { thread: string; compact?: boolean }) {
+  const [waking, setWaking] = createSignal(false)
+  const [err, setErr] = createSignal('')
+  const p = () => projectOf(props.thread)
+  const m = () => machineOf(props.thread)
+  const makes = () => !!providerOf(p()?.provider)?.creates_machines
+  const stage = () => (p() ? state.projectStatus[p()!.id]?.stage : undefined)
+  const needsWake = () => !!p() && makes() && m()?.status !== 'connected'
+  const wake = async () => {
+    const proj = p()
+    if (!proj) return
+    setErr('')
+    setWaking(true)
+    try {
+      await call({ op: 'wake_project', project: proj.id })
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setWaking(false)
+    }
+  }
+  return (
+    <Show when={needsWake()}>
+      <div
+        class={
+          props.compact
+            ? 'flex items-center gap-2 border-b border-line bg-panel px-3 py-2 text-[12px]'
+            : 'm-4 rounded-xl border border-line bg-panel p-4 text-[13px]'
+        }
+      >
+        <div class="min-w-0 flex-1">
+          <Show
+            when={stage() || waking()}
+            fallback={
+              <span class="text-mute">
+                {m() ? 'This project’s machine is asleep.' : 'This project doesn’t have a running machine yet.'}
+              </span>
+            }
+          >
+            <span class="inline-flex items-center gap-2 text-ink">
+              <span class="size-2 shrink-0 rounded-full bg-accent pulse" />
+              {stage() ?? 'Waking machine…'}
+            </span>
+          </Show>
+          <Show when={err()}>
+            <div class="mt-1 text-[12px] text-bad">{err()}</div>
+          </Show>
+        </div>
+        <Show when={!stage() && !waking()}>
+          <Btn kind="primary" onClick={() => void wake()}>
+            Wake machine
+          </Btn>
+        </Show>
+      </div>
+    </Show>
+  )
+}
+
 function Uncommitted(props: { thread: string; focus?: string }) {
   const c = () => changesOf(props.thread)
   const count = () => totals(props.thread).files
+  const connected = () => machineOf(props.thread)?.status === 'connected'
+  createEffect(
+    on(connected, (ok) => {
+      if (ok) void refreshChanges(props.thread)
+    }),
+  )
   return (
     <div>
+      <WakeNotice thread={props.thread} compact />
       <div class="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px] text-mute">
         <span class="min-w-0 flex-1 truncate">
           <Show when={c()?.error && c()!.at} fallback={count() ? 'Uncommitted changes, against the last commit' : ''}>
@@ -353,22 +433,26 @@ type Entry = { name: string; dir: boolean; size: number }
 
 function FilesPanel(props: { thread: string }) {
   const [open, setOpen] = createSignal<{ path: string; line?: number } | null>(null)
+  const connected = () => machineOf(props.thread)?.status === 'connected'
+  const makes = () => !!providerOf(projectOf(props.thread)?.provider)?.creates_machines
   createEffect(
     on(panel, (p) => {
       if (p?.kind === 'files' && p.path) setOpen({ path: inside(state.threads[props.thread]?.cwd ?? '', p.path), line: p.line })
     }),
   )
   return (
-    <div class="flex h-full max-sm:flex-col">
-      <div class="w-56 shrink-0 overflow-auto border-line py-1.5 max-sm:max-h-48 max-sm:w-full max-sm:border-b sm:border-r">
-        <Dir thread={props.thread} path="" depth={0} onOpen={(path) => setOpen({ path })} selected={open()?.path ?? null} />
+    <Show when={!makes() || connected()} fallback={<WakeNotice thread={props.thread} />}>
+      <div class="flex h-full max-sm:flex-col">
+        <div class="w-56 shrink-0 overflow-auto border-line py-1.5 max-sm:max-h-48 max-sm:w-full max-sm:border-b sm:border-r">
+          <Dir thread={props.thread} path="" depth={0} onOpen={(path) => setOpen({ path })} selected={open()?.path ?? null} />
+        </div>
+        <div class="min-w-0 flex-1 overflow-auto">
+          <Show when={open()} fallback={<p class="p-5 text-[13px] text-mute">Pick a file to read it.</p>} keyed>
+            {(o) => <FileView thread={props.thread} path={o.path} line={o.line} />}
+          </Show>
+        </div>
       </div>
-      <div class="min-w-0 flex-1 overflow-auto">
-        <Show when={open()} fallback={<p class="p-5 text-[13px] text-mute">Pick a file to read it.</p>} keyed>
-          {(o) => <FileView thread={props.thread} path={o.path} line={o.line} />}
-        </Show>
-      </div>
-    </div>
+    </Show>
   )
 }
 

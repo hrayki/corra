@@ -6,13 +6,11 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use corra_proto::MachineStatus;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 use crate::auth::AppState;
-use crate::hub::hash_token;
 
 fn machine_token(headers: &HeaderMap) -> Option<String> {
     let v = headers.get("authorization")?.to_str().ok()?;
@@ -190,17 +188,11 @@ async fn handle(
     };
     let m = match s.hub.verify_git_token(&token)? {
         Some(m) => m,
-        None => match s.hub.db.machine_by_token(&hash_token(&token))? {
+        None => match s.hub.auth_machine_token(&token)? {
             Some(m) => m,
             None => return Ok(unauthorized()),
         },
     };
-    if matches!(
-        m.status,
-        MachineStatus::Destroyed | MachineStatus::Destroying
-    ) {
-        return Ok(unauthorized());
-    }
     let mut parts = path.splitn(3, '/');
     let (Some(owner), Some(repo), rest) = (parts.next(), parts.next(), parts.next().unwrap_or(""))
     else {
@@ -320,7 +312,7 @@ async fn handle(
         if !guarded.is_empty() && !project.is_some_and(|p| p.allow_main) {
             let key = approval_key(&full, &commands, &default);
             if !granted(&s, &key) {
-                let waiting = PENDING.lock().unwrap().get(&key).cloned();
+                let waiting = s.hub.git_pending.lock().unwrap().get(&key).cloned();
                 let mut rx = match waiting {
                     Some(rx) => rx,
                     None => {
@@ -333,7 +325,11 @@ async fn handle(
                             }));
                         };
                         let (tx, rx) = tokio::sync::watch::channel(None);
-                        PENDING.lock().unwrap().insert(key.clone(), rx.clone());
+                        s.hub
+                            .git_pending
+                            .lock()
+                            .unwrap()
+                            .insert(key.clone(), rx.clone());
                         let hub = s.hub.clone();
                         let input = serde_json::json!({ "repo": full, "push": guarded });
                         let k = key.clone();
@@ -354,7 +350,7 @@ async fn handle(
                                 _ => Err("the push was cancelled".to_string()),
                             };
                             let _ = tx.send(Some(answer));
-                            PENDING.lock().unwrap().remove(&k);
+                            hub.git_pending.lock().unwrap().remove(&k);
                         });
                         rx
                     }
@@ -512,12 +508,6 @@ fn rejected(refs: &[(String, String)], sideband: bool) -> Response {
     )
         .into_response()
 }
-
-type Answer = Option<Result<(), String>>;
-
-static PENDING: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<Answer>>>,
-> = std::sync::LazyLock::new(Default::default);
 
 fn granted(s: &AppState, key: &str) -> bool {
     s.hub

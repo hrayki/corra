@@ -37,6 +37,7 @@ pub async fn handle(
             setup,
             kit,
             env,
+            force,
         } => {
             crate::kit::prepare(
                 &expand(&cwd),
@@ -49,6 +50,7 @@ pub async fn handle(
                 setup.as_deref(),
                 kit.as_deref(),
                 &env,
+                force,
             )
             .await
         }

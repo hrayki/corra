@@ -27,6 +27,7 @@ pub async fn prepare(
     setup: Option<&str>,
     kit: Option<&str>,
     env: &[(String, String)],
+    force: bool,
 ) -> Result<Value> {
     tokio::fs::create_dir_all(root).await?;
     let mut log = String::new();
@@ -37,7 +38,10 @@ pub async fn prepare(
     }
     let mut ok = problems.is_empty();
     if let Some(version) = kit
-        && let Err(e) = apply(root, hub.url, hub.token, version, setup, env, &mut log).await
+        && let Err(e) = apply(
+            root, hub.url, hub.token, version, setup, env, force, &mut log,
+        )
+        .await
     {
         ok = false;
         log.push_str(&format!("{e:#}\n"));
@@ -82,6 +86,7 @@ fn write_note(root: &Path, repos: &[corra_proto::Repo], setup: Option<&str>) {
     let _ = std::fs::write(claude, "@AGENTS.md\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply(
     root: &Path,
     hub_url: &str,
@@ -89,6 +94,7 @@ async fn apply(
     version: &str,
     setup: Option<&str>,
     env: &[(String, String)],
+    force: bool,
     log: &mut String,
 ) -> Result<()> {
     let want = json!({ "version": version, "setup": setup });
@@ -96,10 +102,10 @@ async fn apply(
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    if have == want {
+    if !force && have == want {
         return Ok(());
     }
-    if have["version"] != want["version"] || !kit_dir().exists() {
+    if force || have["version"] != want["version"] || !kit_dir().exists() {
         download(hub_url, token).await?;
     }
     let dir = kit_dir();

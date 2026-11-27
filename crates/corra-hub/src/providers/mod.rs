@@ -221,6 +221,14 @@ pub fn boot_command() -> Vec<String> {
     ]
 }
 
+struct ProjectStageGuard(Arc<Hub>, ProjectId);
+
+impl Drop for ProjectStageGuard {
+    fn drop(&mut self) {
+        self.0.set_project_stage(self.1, None);
+    }
+}
+
 impl Providers {
     pub fn new(hub_url: String) -> Self {
         let mut by_name: HashMap<&'static str, Arc<dyn Provider>> = HashMap::new();
@@ -394,6 +402,16 @@ impl Providers {
         };
         self.starting.lock().unwrap().insert(m.id);
         let _starting = Starting(self.starting.clone(), m.id);
+        let _stage = ProjectStageGuard(hub.clone(), p.id);
+        let label = provider.describe().label;
+        hub.set_project_stage(
+            p.id,
+            Some(if woke {
+                format!("Waking {label} machine…")
+            } else {
+                format!("Starting {label} machine…")
+            }),
+        );
         hub.db.kv_set(&starting_key(m.id), &now_ms().to_string())?;
         hub.db.set_machine_status(m.id, MachineStatus::Creating)?;
         hub.publish_machine(m.id);
@@ -426,6 +444,7 @@ impl Providers {
         hub.db.set_machine_provider_ref(m.id, &r)?;
         hub.db
             .kv_set(&format!("awake_since:{}", m.id), &now_ms().to_string())?;
+        hub.set_project_stage(p.id, Some("Waiting for runner…".into()));
         if let Err(failure) = await_runner(hub, provider.as_ref(), m.id, &r).await {
             hub.db.set_machine_status(m.id, MachineStatus::Failed)?;
             hub.publish_machine(m.id);
