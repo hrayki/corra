@@ -56,7 +56,6 @@ export function createFind(opts: { thread: string; scroller: () => HTMLElement |
   const [result, setResult] = createSignal<{ query: string; hits: FindHit[]; capped: boolean } | null>(null)
   const [index, setIndex] = createSignal(-1)
   let input: HTMLInputElement | undefined
-  let searches = 0
   let moves = 0
 
   const spot = () => {
@@ -182,43 +181,54 @@ export function createFind(opts: { thread: string; scroller: () => HTMLElement |
     await bring(g)
   }
 
-  const search = async (q: string, jump: boolean) => {
-    const g = ++searches
-    if (!q) {
-      moves++
+  let next: { q: string; jump: boolean } | null = null
+  const waiting = () => next
+  let busy = false
+  const drain = async () => {
+    busy = true
+    for (let ask = waiting(); ask; ask = waiting()) {
+      const { q, jump } = ask
+      next = null
+      if (!q) {
+        moves++
+        batch(() => {
+          setResult(null)
+          setIndex(-1)
+        })
+        clear()
+        continue
+      }
+      const found = await findIn(thread, q).catch(() => null)
+      if (!open()) next = null
+      const newer = waiting()
+      if (newer?.q === q) newer.jump ||= jump
+      if (newer || !found || !open()) continue
+      const before = result()
       batch(() => {
-        setResult(null)
-        setIndex(-1)
+        setIndex(!jump && before?.query === q ? keep(before.hits, index(), found.hits) : nearest(found.hits))
+        setResult({ query: q, hits: found.hits, capped: found.capped })
       })
-      return clear()
+      if (jump) void go()
+      else paint()
     }
-    let found
-    try {
-      found = await findIn(thread, q)
-    } catch {
-      return
-    }
-    if (g !== searches || !open()) return
-    const before = result()
-    batch(() => {
-      setIndex(!jump && before?.query === q ? keep(before.hits, index(), found.hits) : nearest(found.hits))
-      setResult({ query: q, hits: found.hits, capped: found.capped })
-    })
-    if (jump) void go()
-    else paint()
+    busy = false
+  }
+  const search = (q: string, jump: boolean) => {
+    next = { q, jump: jump || (next?.q === q && next.jump) }
+    if (!busy) void drain()
   }
 
   let typing: number | undefined
   const type = (q: string) => {
     setQuery(q)
     clearTimeout(typing)
-    typing = window.setTimeout(() => void search(q, true), 150)
+    typing = window.setTimeout(() => search(q, true), 150)
   }
 
   const move = (by: 1 | -1) => {
     clearTimeout(typing)
     const r = result()
-    if (!r || r.query !== query()) return void search(query(), true)
+    if (!r || r.query !== query()) return search(query(), true)
     setIndex(step(index(), total(r.hits), by))
     void go()
   }
@@ -230,11 +240,11 @@ export function createFind(opts: { thread: string; scroller: () => HTMLElement |
       input?.focus()
       input?.select()
     })
-    if (!was && query()) void search(query(), true)
+    if (!was && query()) search(query(), true)
   }
 
   const close = () => {
-    searches++
+    next = null
     moves++
     clearTimeout(typing)
     setOpen(false)
@@ -260,19 +270,19 @@ export function createFind(opts: { thread: string; scroller: () => HTMLElement |
         const from = seen
         seen = last
         if (!open() || !query() || refresh !== undefined) return
-        const arrived =
-          last < from ||
-          eventsOf(thread).some(
-            (e) =>
-              e.seq > from &&
-              (e.kind === 'turn_started' ||
-                (e.kind === 'item_completed' && !e.item.parent && (e.item.type === 'agent_message' || e.item.type === 'user_message'))),
-          )
+        const events = eventsOf(thread)
+        let arrived = last < from
+        for (let i = events.length - 1; i >= 0 && !arrived && events[i].seq > from; i--) {
+          const e = events[i]
+          arrived =
+            e.kind === 'turn_started' ||
+            (e.kind === 'item_completed' && !e.item.parent && (e.item.type === 'agent_message' || e.item.type === 'user_message'))
+        }
         if (arrived)
           refresh = window.setTimeout(() => {
             refresh = undefined
-            void search(query(), false)
-          }, 500)
+            search(query(), false)
+          }, 1000)
       },
     ),
   )
