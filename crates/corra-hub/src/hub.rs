@@ -25,6 +25,7 @@ pub struct RunnerConn {
     pub prepared: HashSet<ProjectId>,
     pub conn_id: u64,
     pub takes: bool,
+    pub prompt: bool,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -55,12 +56,14 @@ pub struct Hub {
     context_seen: Mutex<HashMap<ThreadId, (u64, i64)>>,
     pub starting: Mutex<HashMap<ProjectId, Arc<tokio::sync::Notify>>>,
     pub activity: Mutex<HashMap<MachineId, i64>>,
+    pub compact_woke: Mutex<HashSet<MachineId>>,
     pub watching: Mutex<HashMap<ThreadId, usize>>,
     pub terms: Mutex<HashMap<String, (ThreadId, MachineId)>>,
     pub quiet_stops: Mutex<HashMap<ThreadId, std::time::Instant>>,
     pub delivering: Mutex<HashMap<ThreadId, usize>>,
     pub presence: Mutex<HashMap<u64, std::time::Instant>>,
     pub github_api: Mutex<String>,
+    shutdown: tokio::sync::watch::Sender<bool>,
     me: Weak<Hub>,
     next_id: AtomicU64,
 }
@@ -127,12 +130,14 @@ impl Hub {
         data: std::path::PathBuf,
     ) -> HubRef {
         let (apps, _) = broadcast::channel(4096);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         Arc::new_cyclic(|me| Hub {
             me: me.clone(),
             quiet_stops: Mutex::new(HashMap::new()),
             delivering: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
             github_api: Mutex::new("https://api.github.com".into()),
+            shutdown,
             data,
             db,
             runners: Mutex::new(HashMap::new()),
@@ -152,10 +157,57 @@ impl Hub {
             context_seen: Mutex::new(HashMap::new()),
             starting: Mutex::new(HashMap::new()),
             activity: Mutex::new(HashMap::new()),
+            compact_woke: Mutex::new(HashSet::new()),
             watching: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         })
+    }
+
+    pub fn subscribe_shutdown(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    pub fn begin_shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+
+    pub fn git_token(&self, machine: MachineId) -> Option<String> {
+        let (status, token_hash) = self.db.machine_auth(machine).ok()??;
+        if matches!(status, MachineStatus::Destroyed | MachineStatus::Destroying) {
+            return None;
+        }
+        let sig = self.secrets.derive_hex(
+            "corra-git-token-v1",
+            format!("{machine}:{token_hash}").as_bytes(),
+        );
+        Some(format!("cg_{machine}_{sig}"))
+    }
+
+    pub fn verify_git_token(&self, token: &str) -> Result<Option<crate::db::MachineAuth>> {
+        let Some(rest) = token.strip_prefix("cg_") else {
+            return Ok(None);
+        };
+        let Some((id_str, sig)) = rest.split_once('_') else {
+            return Ok(None);
+        };
+        let Ok(id) = id_str.parse::<MachineId>() else {
+            return Ok(None);
+        };
+        let Some((status, token_hash)) = self.db.machine_auth(id)? else {
+            return Ok(None);
+        };
+        if matches!(status, MachineStatus::Destroyed | MachineStatus::Destroying) {
+            return Ok(None);
+        }
+        let expected = self.secrets.derive_hex(
+            "corra-git-token-v1",
+            format!("{id}:{token_hash}").as_bytes(),
+        );
+        if !const_eq(sig.as_bytes(), expected.as_bytes()) {
+            return Ok(None);
+        }
+        Ok(Some(crate::db::MachineAuth { id, status }))
     }
 
     pub fn next_id(&self) -> u64 {
@@ -423,6 +475,9 @@ impl Hub {
                 if !matches!(&input[..], [InputPart::Text { text }] if text == crate::schedule::COMPACT)
                 {
                     self.quiet_turns.lock().unwrap().remove(&thread);
+                    if let Some(m) = self.machine_of(thread) {
+                        self.compact_woke.lock().unwrap().remove(&m);
+                    }
                 }
             }
             Event::TurnCompleted {
@@ -917,17 +972,23 @@ impl Hub {
 
     pub fn took(self: &Arc<Self>, machine: MachineId, delivery: String, taken: bool) {
         let key = format!("delivery:{delivery}");
-        if taken {
-            let _ = self.db.kv_delete(&key);
-            return;
-        }
-        let Some(d) = self
+        let d = self
             .db
             .kv_get(&key)
             .ok()
             .flatten()
-            .and_then(|s| serde_json::from_str::<Delivery>(&s).ok())
-        else {
+            .and_then(|s| serde_json::from_str::<Delivery>(&s).ok());
+        if taken {
+            let _ = self.db.kv_delete(&key);
+            if let Some(d) = d {
+                let _ = self
+                    .db
+                    .kv_delete(&format!("thread:{}:moved_from", d.thread));
+                let _ = self.db.kv_delete(&format!("thread:{}:resume_at", d.thread));
+            }
+            return;
+        }
+        let Some(d) = d else {
             return;
         };
         if let Some(c) = self.runners.lock().unwrap().get_mut(&machine) {
@@ -1357,6 +1418,11 @@ impl Hub {
         {
             return Ok(self.queued(thread).iter().any(|q| q.id == *id));
         }
+        if !matches!(&input[..], [InputPart::Text { text }] if text == crate::schedule::COMPACT)
+            && let Some(m) = self.machine_of(thread)
+        {
+            self.compact_woke.lock().unwrap().remove(&m);
+        }
         if queue && self.busy(thread) {
             self.enqueue(thread, input, client_id);
             return Ok(true);
@@ -1458,6 +1524,60 @@ impl Hub {
             env
         };
         let mark = crate::follow::spec_mark(&tools, &agent_env);
+        let (takes, prompt) = self
+            .runners
+            .lock()
+            .unwrap()
+            .get(&machine)
+            .map(|c| (c.takes, c.prompt))
+            .unwrap_or((false, false));
+        if !takes && let Some(d) = &delivery {
+            let _ = self.db.kv_delete(&format!("delivery:{d}"));
+        }
+        let delivery = delivery.filter(|_| takes);
+        if prompt {
+            let moved_from = if takes {
+                self.thread_kv(thread, "moved_from")
+            } else {
+                self.take_thread_kv(thread, "moved_from")
+            };
+            let resume_at = if takes {
+                self.thread_kv(thread, "resume_at")
+            } else {
+                self.take_thread_kv(thread, "resume_at")
+            };
+            let spec = StartSpec {
+                thread,
+                agent: t.agent,
+                cwd: t.cwd.clone(),
+                extra_dirs: vec![],
+                resume_session: t.session_id.clone(),
+                settings: t.settings.clone(),
+                next_seq: self.db.runner_seq(thread)? + 1,
+                tools,
+                repos: p.repos.clone(),
+                agent_env,
+                moved_from,
+                fork_of: self
+                    .thread_kv(thread, "fork_of")
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                resume_at,
+            };
+            self.send_runner(
+                machine,
+                HubMsg::Prompt {
+                    spec: Box::new(spec),
+                    input,
+                    settings,
+                    delivery,
+                },
+            )?;
+            self.set_thread_kv(thread, "spec", &mark);
+            if let Some(c) = self.runners.lock().unwrap().get_mut(&machine) {
+                c.live.insert(thread);
+            }
+            return Ok(());
+        }
         let mut live = self.thread_live(machine, thread);
         let idle = matches!(t.status, ThreadStatus::Idle | ThreadStatus::Error);
         if live && idle && self.thread_kv(thread, "spec").as_deref() != Some(mark.as_str()) {
@@ -1470,16 +1590,6 @@ impl Hub {
             }
             live = false;
         }
-        let takes = self
-            .runners
-            .lock()
-            .unwrap()
-            .get(&machine)
-            .is_some_and(|c| c.takes);
-        if !takes && let Some(d) = &delivery {
-            let _ = self.db.kv_delete(&format!("delivery:{d}"));
-        }
-        let delivery = delivery.filter(|_| takes);
         if live {
             self.send_runner(
                 machine,
@@ -1816,6 +1926,36 @@ impl Hub {
         Ok(())
     }
 
+    pub fn runner_supports_prompt(&self, machine: MachineId) -> bool {
+        self.runners
+            .lock()
+            .unwrap()
+            .get(&machine)
+            .is_some_and(|c| c.prompt)
+    }
+
+    pub async fn stop_session(&self, machine: MachineId, thread: ThreadId) {
+        let supports_prompt = {
+            let mut runners = self.runners.lock().unwrap();
+            let Some(c) = runners.get_mut(&machine) else {
+                return;
+            };
+            c.live.remove(&thread);
+            c.prompt
+        };
+        if supports_prompt {
+            let _ = self
+                .runner_request_timeout(
+                    machine,
+                    RunnerRequest::Stop { thread },
+                    Duration::from_secs(12),
+                )
+                .await;
+        } else {
+            let _ = self.send_runner(machine, HubMsg::Stop { thread });
+        }
+    }
+
     pub fn stop_live(&self, t: &Thread) {
         if let Some(m) = t.machine {
             let live = self
@@ -1877,8 +2017,12 @@ impl Hub {
         if let Some(m) = t.machine
             && self.runner_connected(m)
         {
-            self.stop_live(&t);
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            if self.runner_supports_prompt(m) {
+                self.stop_session(m, thread).await;
+            } else {
+                self.stop_live(&t);
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
             self.runner_request_timeout(
                 m,
                 RunnerRequest::SaveWork {
@@ -1997,7 +2141,7 @@ impl Hub {
             Some(m) if self.runner_connected(m) => m,
             _ => self.ensure_machine(&mut t).await?,
         };
-        self.stop_live(&t);
+        self.stop_session(machine, thread).await;
         self.runner_request_timeout(
             machine,
             RunnerRequest::Rewind {
@@ -2066,6 +2210,14 @@ pub fn hash_token(token: &str) -> String {
     use sha2::{Digest, Sha256};
     let d = Sha256::digest(token.as_bytes());
     d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn const_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 pub fn new_token(prefix: &str) -> String {

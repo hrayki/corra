@@ -24,6 +24,7 @@ pub async fn handle(
     req: RunnerRequest,
     hub_url: &str,
     token: &str,
+    git_token: &str,
     sync: Option<crate::sync::SyncRef>,
 ) -> Result<Value> {
     match req {
@@ -40,8 +41,11 @@ pub async fn handle(
             crate::kit::prepare(
                 &expand(&cwd),
                 &repos,
-                hub_url,
-                token,
+                crate::kit::HubAuth {
+                    url: hub_url,
+                    token,
+                    git_token,
+                },
                 setup.as_deref(),
                 kit.as_deref(),
                 &env,
@@ -81,7 +85,9 @@ pub async fn handle(
             let path = crate::secrets::write(&dir, &name, &value)?;
             Ok(json!({ "path": path.to_string_lossy() }))
         }
-        RunnerRequest::TermOpen { .. } | RunnerRequest::TermAttach { .. } => {
+        RunnerRequest::TermOpen { .. }
+        | RunnerRequest::TermAttach { .. }
+        | RunnerRequest::Stop { .. } => {
             bail!("handled elsewhere")
         }
     }
@@ -179,16 +185,19 @@ async fn list_dir(path: &Path) -> Result<Value> {
 }
 
 async fn read_file(path: &Path, max_bytes: u64) -> Result<Value> {
-    let meta = tokio::fs::metadata(path)
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
+    let meta = file.metadata().await?;
     if meta.is_dir() {
         bail!("{} is a folder", path.display());
     }
     let size = meta.len();
-    let mut data = tokio::fs::read(path).await?;
+    let cap = size.min(max_bytes).min(16 << 20) as usize;
+    let mut data = Vec::with_capacity(cap);
+    file.take(max_bytes).read_to_end(&mut data).await?;
     let truncated = size > max_bytes;
-    data.truncate(max_bytes as usize);
     let (text, base64) = match String::from_utf8(data) {
         Ok(s) => (Some(s), None),
         Err(e) => {

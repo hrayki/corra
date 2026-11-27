@@ -172,7 +172,11 @@ pub async fn compact_idle(hub: &HubRef, now: i64) -> Result<()> {
         return Ok(());
     }
     let ttl = cache_ttl(hub);
-    let lead = ttl / 6;
+    let (lead, min_left) = if ttl <= 10 * 60 * 1000 {
+        (90_000, 15_000)
+    } else {
+        (12 * 60 * 1000, 30_000)
+    };
     let over = compact_over(hub);
     for key in hub.db.kv_keys("cache:")? {
         let Some(thread) = key
@@ -184,7 +188,7 @@ pub async fn compact_idle(hub: &HubRef, now: i64) -> Result<()> {
         let Some(mut c) = cache_use(hub, thread) else {
             continue;
         };
-        if c.tried || c.tokens < over || now < c.at + ttl - lead || now > c.at + ttl - 30_000 {
+        if c.tried || c.tokens < over || now < c.at + ttl - lead || now > c.at + ttl - min_left {
             continue;
         }
         let Some(t) = hub.db.thread(thread)? else {
@@ -203,6 +207,11 @@ pub async fn compact_idle(hub: &HubRef, now: i64) -> Result<()> {
         save_cache_use(hub, thread, c);
         tracing::info!(%thread, tokens = c.tokens, "compacting an idle thread before its cache expires");
         quiet_turn(hub, thread);
+        if let Some(m) = t.machine
+            && !hub.runner_connected(m)
+        {
+            hub.compact_woke.lock().unwrap().insert(m);
+        }
         hub.send(
             thread,
             vec![InputPart::Text {

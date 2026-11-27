@@ -63,6 +63,7 @@ fn connect(
             prepared: Default::default(),
             conn_id: 1,
             takes,
+            prompt: false,
         },
     );
     rx
@@ -77,7 +78,9 @@ async fn got(rx: &mut mpsc::UnboundedReceiver<HubMsg>) -> HubMsg {
 
 fn delivery_of(m: &HubMsg) -> Option<String> {
     match m {
-        HubMsg::Send { delivery, .. } | HubMsg::Start { delivery, .. } => delivery.clone(),
+        HubMsg::Send { delivery, .. }
+        | HubMsg::Start { delivery, .. }
+        | HubMsg::Prompt { delivery, .. } => delivery.clone(),
         _ => None,
     }
 }
@@ -150,4 +153,78 @@ async fn an_older_runner_gets_no_delivery_ids_and_nothing_is_kept_for_it() {
     assert_eq!(delivery_of(&m), None);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(hub.deliveries().is_empty());
+}
+
+#[tokio::test]
+async fn a_prompt_capable_runner_always_gets_idempotent_prompt_and_keeps_moved_from_until_took() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread, machine) = setup(dir.path());
+    hub.set_thread_kv(thread, "moved_from", "~/old");
+    hub.set_thread_kv(thread, "resume_at", "msg-1");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    hub.runners.lock().unwrap().insert(
+        machine,
+        RunnerConn {
+            tx,
+            live: [thread].into_iter().collect(),
+            prepared: Default::default(),
+            conn_id: 1,
+            takes: true,
+            prompt: true,
+        },
+    );
+    hub.send(thread, text("hello"), None, false).await.unwrap();
+    let first = got(&mut rx).await;
+    let id = match &first {
+        HubMsg::Prompt { spec, delivery, .. } => {
+            assert_eq!(spec.moved_from.as_deref(), Some("~/old"));
+            assert_eq!(spec.resume_at.as_deref(), Some("msg-1"));
+            delivery.clone().expect("delivery id")
+        }
+        other => panic!("expected HubMsg::Prompt, got {other:?}"),
+    };
+    // Before Took, moved_from and resume_at remain persisted for redelivery!
+    assert_eq!(
+        hub.thread_kv(thread, "moved_from").as_deref(),
+        Some("~/old")
+    );
+    assert_eq!(hub.thread_kv(thread, "resume_at").as_deref(), Some("msg-1"));
+
+    hub.took(machine, id, true);
+    assert!(hub.thread_kv(thread, "moved_from").is_none());
+    assert!(hub.thread_kv(thread, "resume_at").is_none());
+}
+
+#[tokio::test]
+async fn stop_session_awaits_runner_stop_request_without_sleeping() {
+    use corra_proto::runner::RunnerRequest;
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread, machine) = setup(dir.path());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    hub.runners.lock().unwrap().insert(
+        machine,
+        RunnerConn {
+            tx,
+            live: [thread].into_iter().collect(),
+            prepared: Default::default(),
+            conn_id: 1,
+            takes: true,
+            prompt: true,
+        },
+    );
+    let hub2 = hub.clone();
+    let responder = tokio::spawn(async move {
+        if let Some(HubMsg::Request {
+            id,
+            body: RunnerRequest::Stop { thread: t },
+        }) = rx.recv().await
+        {
+            assert_eq!(t, thread);
+            hub2.resolve_pending(machine, id, Ok(serde_json::json!({})));
+        }
+    });
+    let began = std::time::Instant::now();
+    hub.stop_session(machine, thread).await;
+    responder.await.unwrap();
+    assert!(began.elapsed() < Duration::from_secs(1));
 }

@@ -13,6 +13,7 @@ use crate::hub::Hub;
 
 pub struct Modal {
     helper: std::path::PathBuf,
+    base_image_lock: tokio::sync::Mutex<()>,
 }
 
 impl Modal {
@@ -25,7 +26,10 @@ impl Modal {
                     .and_then(|e| e.parent().map(|d| d.join("corra-modal")))
             })
             .unwrap_or_else(|| "corra-modal".into());
-        Modal { helper }
+        Modal {
+            helper,
+            base_image_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     async fn call(&self, hub: &Hub, req: Value) -> Result<Value> {
@@ -183,6 +187,10 @@ impl Provider for Modal {
             "modal.base_image:{}",
             crate::hub::hash_token(BASE_DOCKERFILE)
         );
+        if let Some(id) = hub.db.kv_get(&key)? {
+            return Ok(id);
+        }
+        let _guard = self.base_image_lock.lock().await;
         if let Some(id) = hub.db.kv_get(&key)? {
             return Ok(id);
         }

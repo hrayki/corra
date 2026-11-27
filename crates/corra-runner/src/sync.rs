@@ -4,17 +4,32 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use corra_proto::ThreadId;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SentState {
+    Append(u64),
+    Full([u8; 32]),
+}
 
 pub struct Syncer {
     http: reqwest::Client,
     base: String,
     token: String,
-    sent: Mutex<HashMap<(ThreadId, String), u64>>,
+    sent: std::sync::Mutex<HashMap<(ThreadId, String), SentState>>,
     locks: std::sync::Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>,
 }
 
 pub type SyncRef = Arc<Syncer>;
+
+fn is_append_only(rel: &str) -> bool {
+    rel.ends_with(".jsonl")
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
 
 impl Syncer {
     pub fn new(hub: &str, token: &str) -> SyncRef {
@@ -25,7 +40,7 @@ impl Syncer {
                 .expect("http client"),
             base: hub.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            sent: Mutex::new(HashMap::new()),
+            sent: std::sync::Mutex::new(HashMap::new()),
             locks: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -37,6 +52,14 @@ impl Syncer {
             .entry(thread)
             .or_default()
             .clone()
+    }
+
+    fn get_sent(&self, key: &(ThreadId, String)) -> Option<SentState> {
+        self.sent.lock().unwrap().get(key).copied()
+    }
+
+    fn set_sent(&self, key: (ThreadId, String), state: SentState) {
+        self.sent.lock().unwrap().insert(key, state);
     }
 
     async fn remote_sizes(&self, thread: ThreadId) -> Result<HashMap<String, u64>> {
@@ -58,7 +81,6 @@ impl Syncer {
     pub async fn upload(&self, thread: ThreadId, base: &Path, files: Vec<PathBuf>) -> Result<()> {
         let lock = self.lock(thread);
         let _g = lock.lock().await;
-        let mut sent = self.sent.lock().await;
         let mut remote: Option<HashMap<String, u64>> = None;
         for file in files {
             let Ok(rel) = file.strip_prefix(base) else {
@@ -68,76 +90,104 @@ impl Syncer {
             let Ok(meta) = tokio::fs::metadata(&file).await else {
                 continue;
             };
-            let size = meta.len();
             let key = (thread, rel.clone());
-            let known = match sent.get(&key) {
-                Some(n) => *n,
-                None => {
-                    if remote.is_none() {
-                        remote = Some(self.remote_sizes(thread).await?);
+            if is_append_only(&rel) {
+                let size = meta.len();
+                let known = match self.get_sent(&key) {
+                    Some(SentState::Append(n)) => n,
+                    _ => {
+                        if remote.is_none() {
+                            remote = Some(self.remote_sizes(thread).await?);
+                        }
+                        remote.as_ref().unwrap().get(&rel).copied().unwrap_or(0)
                     }
-                    remote.as_ref().unwrap().get(&rel).copied().unwrap_or(0)
+                };
+                if known == size {
+                    self.set_sent(key, SentState::Append(size));
+                    continue;
                 }
-            };
-            if known == size {
-                sent.insert(key, size);
-                continue;
-            }
-            let data = tokio::fs::read(&file).await?;
-            let (offset, body, replace) =
-                if (known as usize) < data.len() && !rel.ends_with(".json") {
+                let data = tokio::fs::read(&file).await?;
+                let (offset, body, replace) = if (known as usize) < data.len() {
                     (known, data[known as usize..].to_vec(), false)
                 } else {
                     (0, data.clone(), true)
                 };
-            let r = self
-                .http
-                .put(format!("{}/runner/file/{thread}", self.base))
-                .query(&[
-                    ("path", rel.as_str()),
-                    ("offset", &offset.to_string()),
-                    ("replace", if replace { "true" } else { "false" }),
-                ])
-                .bearer_auth(&self.token)
-                .body(body)
-                .send()
-                .await?;
-            if r.status() == reqwest::StatusCode::CONFLICT {
+                let r = self
+                    .http
+                    .put(format!("{}/runner/file/{thread}", self.base))
+                    .query(&[
+                        ("path", rel.as_str()),
+                        ("offset", &offset.to_string()),
+                        ("replace", if replace { "true" } else { "false" }),
+                    ])
+                    .bearer_auth(&self.token)
+                    .body(body)
+                    .send()
+                    .await?;
+                if r.status() == reqwest::StatusCode::CONFLICT {
+                    let r = self
+                        .http
+                        .put(format!("{}/runner/file/{thread}", self.base))
+                        .query(&[("path", rel.as_str()), ("offset", "0"), ("replace", "true")])
+                        .bearer_auth(&self.token)
+                        .body(data.clone())
+                        .send()
+                        .await?;
+                    if !r.status().is_success() {
+                        bail!("hub answered {} for {rel}", r.status());
+                    }
+                } else if !r.status().is_success() {
+                    bail!("hub answered {} for {rel}", r.status());
+                }
+                self.set_sent(key, SentState::Append(data.len() as u64));
+            } else {
+                let data = tokio::fs::read(&file).await?;
+                let hash = sha256(&data);
+                if self.get_sent(&key) == Some(SentState::Full(hash)) {
+                    continue;
+                }
                 let r = self
                     .http
                     .put(format!("{}/runner/file/{thread}", self.base))
                     .query(&[("path", rel.as_str()), ("offset", "0"), ("replace", "true")])
                     .bearer_auth(&self.token)
-                    .body(data.clone())
+                    .body(data)
                     .send()
                     .await?;
                 if !r.status().is_success() {
                     bail!("hub answered {} for {rel}", r.status());
                 }
-            } else if !r.status().is_success() {
-                bail!("hub answered {} for {rel}", r.status());
+                self.set_sent(key, SentState::Full(hash));
             }
-            sent.insert(key, data.len() as u64);
         }
         Ok(())
     }
 
-    pub async fn restore(&self, thread: ThreadId, base: &Path) -> Result<usize> {
+    pub async fn restore(
+        &self,
+        thread: ThreadId,
+        base: &Path,
+        force_mutable: bool,
+    ) -> Result<usize> {
         let lock = self.lock(thread);
         let _g = lock.lock().await;
         let remote = self.remote_sizes(thread).await?;
         let mut n = 0;
-        let mut sent = self.sent.lock().await;
         for (rel, size) in remote {
             if rel.starts_with("work/") {
                 continue;
             }
             let path = base.join(&rel);
-            let local = tokio::fs::metadata(&path)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if local >= size {
+            let append_only = is_append_only(&rel);
+            if append_only {
+                let local = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if local >= size {
+                    continue;
+                }
+            } else if !force_mutable && tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 continue;
             }
             let r = self
@@ -155,7 +205,12 @@ impl Syncer {
                 tokio::fs::create_dir_all(parent).await?;
             }
             tokio::fs::write(&path, &bytes).await?;
-            sent.insert((thread, rel), bytes.len() as u64);
+            let state = if append_only {
+                SentState::Append(bytes.len() as u64)
+            } else {
+                SentState::Full(sha256(&bytes))
+            };
+            self.set_sent((thread, rel), state);
             n += 1;
         }
         Ok(n)

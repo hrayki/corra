@@ -156,6 +156,7 @@ async fn a_stop_hands_the_queue_back_and_nothing_is_sent_after_it() {
             prepared: Default::default(),
             conn_id: 1,
             takes: false,
+            prompt: false,
         },
     );
 
@@ -436,6 +437,30 @@ async fn an_idle_thread_compacts_once_before_its_cache_expires() {
         1,
         "compacted after the cache expired"
     );
+
+    // 5-minute API-key TTL uses a 90s lead window (3m30s..4m45s) and marks offline machines compact_woke
+    hub.secrets.set("anthropic.api_key", "sk-ant-test").unwrap();
+    let offline_machine = new_id();
+    let mut t = hub.db.thread(thread).unwrap().unwrap();
+    t.machine = Some(offline_machine);
+    t.status = ThreadStatus::Idle;
+    hub.db.update_thread(&t).unwrap();
+    let t0 = now_ms();
+    note_cache_use(&hub, thread, 150_000, t0);
+    compact_idle(&hub, t0 + 180_000).await.unwrap();
+    assert_eq!(tried_to_send(&hub, thread).await, 1, "compacted at 3m00s");
+    compact_idle(&hub, t0 + 225_000).await.unwrap();
+    assert_eq!(
+        tried_to_send(&hub, thread).await,
+        2,
+        "didn't compact inside 5m TTL 3m30s..4m45s window"
+    );
+    assert!(hub.compact_woke.lock().unwrap().contains(&offline_machine));
+    // Real user message clears compact_woke
+    hub.send(thread, text("real prompt"), None, false)
+        .await
+        .unwrap();
+    assert!(!hub.compact_woke.lock().unwrap().contains(&offline_machine));
 }
 
 #[tokio::test]

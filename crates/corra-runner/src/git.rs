@@ -67,9 +67,14 @@ pub async fn uncommitted(root: &Path) -> serde_json::Value {
         }
         if let Ok(list) = git(&path, &["ls-files", "--others", "--exclude-standard"], &[]).await {
             for p in list.lines().filter(|l| !l.is_empty()).take(500) {
-                let (lines, binary) = match std::fs::read(path.join(p)) {
-                    Ok(bytes) if bytes.len() > 4 << 20 || bytes.contains(&0) => (0, true),
-                    Ok(bytes) => (line_count(&bytes), false),
+                let file_path = path.join(p);
+                let (lines, binary) = match tokio::fs::metadata(&file_path).await {
+                    Ok(meta) if meta.len() > 4 << 20 => (0, true),
+                    Ok(_) => match tokio::fs::read(&file_path).await {
+                        Ok(bytes) if bytes.len() > 4 << 20 || bytes.contains(&0) => (0, true),
+                        Ok(bytes) => (line_count(&bytes), false),
+                        Err(_) => (0, false),
+                    },
                     Err(_) => (0, false),
                 };
                 files.push(serde_json::json!({
@@ -211,6 +216,26 @@ pub async fn checkpoint_all(
         });
     }
     out
+}
+
+pub fn thread_header_env(cmd: &mut Command, hub_url: &str, thread: ThreadId) {
+    let base = hub_url.trim_end_matches('/');
+    if base.is_empty() {
+        return;
+    }
+    let n: usize = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    cmd.env("GIT_CONFIG_COUNT", (n + 1).to_string())
+        .env(
+            format!("GIT_CONFIG_KEY_{n}"),
+            format!("http.{base}/.extraHeader"),
+        )
+        .env(
+            format!("GIT_CONFIG_VALUE_{n}"),
+            format!("X-Corra-Thread: {thread}"),
+        );
 }
 
 pub async fn ensure_repos(

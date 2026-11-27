@@ -191,6 +191,7 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
     for (k, v) in &ctx.spec.agent_env {
         cmd.env(k, v);
     }
+    crate::git::thread_header_env(&mut cmd, &ctx.hub_url, ctx.spec.thread);
     #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {

@@ -60,6 +60,7 @@ fn connect(
             prepared: Default::default(),
             conn_id: 1,
             takes: false,
+            prompt: false,
         },
     );
     rx
