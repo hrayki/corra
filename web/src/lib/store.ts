@@ -14,6 +14,8 @@ import type { StoredEvent } from '../proto/StoredEvent'
 import type { AppCall } from '../proto/AppCall'
 import type { Found } from '../proto/Found'
 import type { SetupLog } from '../proto/SetupLog'
+import type { AgentKind } from '../proto/AgentKind'
+import type { AgentUsage } from '../proto/AgentUsage'
 
 export type ProjectRuntimeStatus = {
   stage?: string
@@ -40,7 +42,7 @@ type State = {
   earlier: Record<string, number | null>
   live: Record<string, LiveStatus>
   queues: Record<string, Queued[]>
-  usage: { at: number; limits: unknown } | null
+  usage: Partial<Record<AgentKind, AgentUsage>>
   pending: Record<string, { id: number; parts: InputPart[]; queued: boolean; client?: string }[]>
   restore: Record<string, string[]>
 }
@@ -57,7 +59,7 @@ const [state, setState] = createStore<State>({
   earlier: {},
   live: {},
   queues: {},
-  usage: null,
+  usage: {},
   pending: {},
   restore: {},
 })
@@ -273,6 +275,15 @@ export function findIn(id: string, query: string) {
   return call<Found>({ op: 'find', thread: id, query })
 }
 
+export async function refreshUsage(agent?: AgentKind) {
+  const r = await call<AgentUsage | AgentUsage[]>({ op: 'refresh_usage', ...(agent ? { agent } : {}) })
+  const list = Array.isArray(r) ? r : r ? [r] : []
+  batch(() => {
+    for (const u of list) setState('usage', u.agent, u)
+  })
+  return list
+}
+
 function putThread(t: Thread) {
   setState('threads', t.id, {
     machine: undefined,
@@ -354,7 +365,7 @@ function onMessage(m: HubToApp) {
       setState('live', m.thread, m.status as LiveStatus)
       break
     case 'usage':
-      setState('usage', { at: m.at, limits: m.limits })
+      setState('usage', m.usage.agent, m.usage)
       break
     case 'queue':
       setState('queues', m.thread, m.items)

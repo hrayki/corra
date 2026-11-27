@@ -69,6 +69,8 @@ pub struct Hub {
     pub delivering: Mutex<HashMap<ThreadId, usize>>,
     pub presence: Mutex<HashMap<u64, Instant>>,
     pub github_api: Mutex<String>,
+    pub claude_usage_url: Mutex<String>,
+    pub usage: crate::usage::UsageTracker,
     pub kit_cache: Mutex<Option<(Instant, Arc<crate::kit::Kit>)>>,
     pub git_pending: GitPendingMap,
     pub project_stages: Mutex<HashMap<ProjectId, String>>,
@@ -126,6 +128,8 @@ impl Hub {
             delivering: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
             github_api: Mutex::new("https://api.github.com".into()),
+            claude_usage_url: Mutex::new(crate::usage::CLAUDE_USAGE_URL.into()),
+            usage: crate::usage::UsageTracker::default(),
             kit_cache: Mutex::new(None),
             git_pending: Mutex::new(HashMap::new()),
             project_stages: Mutex::new(HashMap::new()),
@@ -354,12 +358,8 @@ impl Hub {
         }
     }
 
-    pub fn usage(&self) -> Option<HubToApp> {
-        let v: Value = serde_json::from_str(&self.db.kv_get("usage").ok()??).ok()?;
-        Some(HubToApp::Usage {
-            at: v["at"].as_i64()?,
-            limits: v["limits"].clone(),
-        })
+    pub fn usage_messages(&self) -> Vec<HubToApp> {
+        crate::usage::all_messages(self)
     }
 
     pub fn set_live_status(&self, thread: ThreadId, status: Value) {
@@ -369,15 +369,15 @@ impl Hub {
                 .unwrap()
                 .insert(thread, (n, now_ms()));
         }
-        if !status["rate_limit"].is_null() {
-            let limits = status["rate_limit"].clone();
-            tracing::info!("usage reported: {limits}");
-            let at = now_ms();
-            let _ = self.db.kv_set(
-                "usage",
-                &serde_json::json!({ "at": at, "limits": limits }).to_string(),
+        if !status["rate_limit"].is_null()
+            && let Ok(Some(t)) = self.db.thread(thread)
+        {
+            tracing::info!(
+                agent = %t.agent.as_str(),
+                "usage reported: {}",
+                status["rate_limit"]
             );
-            self.publish(Outbound::All(HubToApp::Usage { at, limits }));
+            crate::usage::ingest_rate_limit(self, t.agent, &status["rate_limit"]);
         }
         let merged = {
             let mut all = self.live_status.lock().unwrap();

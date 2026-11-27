@@ -13,7 +13,6 @@ import { AGENT_NAMES, fitEffort, pickerState } from '../lib/choices'
 import { Menu, Picture } from './bits'
 import { draftFor, setDraftFor } from './Timeline'
 import { continueList, loadDraft, saveDraftImages, saveDraftText } from '../lib/drafts'
-import { usageWindows } from '../lib/seen'
 import { paired } from '../lib/catalog'
 
 type Image = { media_type: string; data: string }
@@ -332,52 +331,6 @@ export function SendButton(props: { disabled?: boolean; onClick: () => void; lab
 
 const TOUCH = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches
 const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'
-
-export function UsageRing() {
-  const windows = createMemo(() => (state.usage ? usageWindows(state.usage.limits).filter((w) => w.used !== undefined || w.blocked) : []))
-  const top = () => windows().reduce((m, w) => Math.max(m, w.blocked ? 100 : (w.used ?? 0)), 0)
-  const blocked = () => windows().some((w) => w.blocked)
-  const when = (ms: number) =>
-    ms - Date.now() > 20 * 3600_000
-      ? new Date(ms).toLocaleDateString([], { weekday: 'short' })
-      : new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  const R = 7
-  const C = 2 * Math.PI * R
-  return (
-    <Show when={windows().length}>
-      <Menu
-        label={`Usage: ${top()}% of your limit`}
-        align="end"
-        class="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12px] text-mute hover:bg-ink/5 hover:text-ink"
-        items={[
-          { heading: 'Usage' },
-          ...windows().map((w) => ({
-            label: w.blocked ? `${w.name} reached` : `${w.name} ${w.used ?? 0}%`,
-            hint: w.resets && w.resets > Date.now() ? `resets ${when(w.resets)}` : '',
-            onSelect: () => {},
-          })),
-        ]}
-      >
-        <svg viewBox="0 0 20 20" class="size-[18px] -rotate-90" aria-hidden="true">
-          <circle cx="10" cy="10" r={R} fill="none" stroke="var(--line)" stroke-width="2.5" />
-          <circle
-            cx="10"
-            cy="10"
-            r={R}
-            fill="none"
-            stroke={blocked() || top() >= 90 ? 'var(--bad)' : top() >= 70 ? 'var(--warn)' : 'var(--mute)'}
-            stroke-width="2.5"
-            stroke-linecap="round"
-            stroke-dasharray={`${(C * Math.min(100, top())) / 100} ${C}`}
-          />
-        </svg>
-        <span class="num max-sm:hidden" classList={{ 'text-bad': blocked() }}>
-          {blocked() ? 'Limited' : `${top()}%`}
-        </span>
-      </Menu>
-    </Show>
-  )
-}
 
 export function Composer(props: { thread: Thread }) {
   const input = useInput(() => props.thread.id)

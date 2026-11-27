@@ -24,7 +24,7 @@ pub fn new_id() -> uuid::Uuid {
     uuid::Uuid::now_v7()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum AgentKind {
@@ -33,6 +33,8 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    pub const ALL: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Antigravity];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
@@ -220,6 +222,38 @@ pub struct SetupLog {
     #[ts(optional)]
     pub setup: Option<String>,
     pub log: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageWindow {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub used_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resets_at: Option<i64>,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentUsage {
+    pub agent: AgentKind,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
