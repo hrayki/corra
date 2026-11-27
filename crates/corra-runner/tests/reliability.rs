@@ -389,3 +389,204 @@ async fn read_file_streams_only_up_to_max_bytes() {
     assert_eq!(v["truncated"].as_bool(), Some(true));
     assert_eq!(v["text"].as_str().unwrap().len(), 128);
 }
+
+#[tokio::test]
+async fn sync_protects_sqlite_db_from_stale_wal_and_shm_on_restore() {
+    let store: StoreMap = Default::default();
+    let tid = new_id();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let store = store.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    let mut got = Vec::new();
+                    let header_end = loop {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        if let Some(pos) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&got[..header_end]).to_string();
+                    let content_len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while got.len() - header_end < content_len {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                    }
+                    let body = got[header_end..header_end + content_len].to_vec();
+                    let first = head.lines().next().unwrap_or("");
+                    let mut parts = first.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let target = parts.next().unwrap_or("");
+                    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+                    let params: HashMap<&str, &str> = query
+                        .split('&')
+                        .filter_map(|kv| kv.split_once('='))
+                        .collect();
+
+                    if method == "GET" && path.starts_with("/runner/files/") {
+                        let id = path.trim_start_matches("/runner/files/");
+                        let list: Vec<serde_json::Value> = store
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|((t, _), _)| t == id)
+                            .map(|((_, p), b)| serde_json::json!({ "path": p, "size": b.len() }))
+                            .collect();
+                        let resp_body = serde_json::to_vec(&list).unwrap();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            resp_body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.write_all(&resp_body).await;
+                    } else if method == "PUT" && path.starts_with("/runner/file/") {
+                        let id = path.trim_start_matches("/runner/file/").to_string();
+                        let rel = params
+                            .get("path")
+                            .copied()
+                            .unwrap_or("")
+                            .replace("%2F", "/")
+                            .replace("%2f", "/");
+                        let replace = params.get("replace").copied() == Some("true");
+                        {
+                            let mut st = store.lock().unwrap();
+                            let entry = st.entry((id, rel)).or_default();
+                            if replace {
+                                *entry = body;
+                            } else {
+                                entry.extend_from_slice(&body);
+                            }
+                        }
+                        let _ = sock
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                            )
+                            .await;
+                    } else if method == "GET" && path.starts_with("/runner/file/") {
+                        let id = path.trim_start_matches("/runner/file/").to_string();
+                        let rel = params
+                            .get("path")
+                            .copied()
+                            .unwrap_or("")
+                            .replace("%2F", "/")
+                            .replace("%2f", "/");
+                        let data = store.lock().unwrap().get(&(id, rel)).cloned();
+                        if let Some(data) = data {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                data.len()
+                            );
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            let _ = sock.write_all(&data).await;
+                        } else {
+                            let _ = sock
+                                .write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .await;
+                        }
+                    }
+                });
+            }
+        })
+    };
+
+    let sync = corra_runner::sync::Syncer::new(&format!("http://{addr}"), "tok");
+    let dir = tempfile::tempdir().unwrap();
+    let conv = dir.path().join("conversations");
+    tokio::fs::create_dir_all(&conv).await.unwrap();
+    let db = conv.join("s1.db");
+    let wal = conv.join("s1.db-wal");
+    let shm = conv.join("s1.db-shm");
+    tokio::fs::write(&db, b"db-v1").await.unwrap();
+    tokio::fs::write(&wal, b"wal-v1").await.unwrap();
+    tokio::fs::write(&shm, b"shm-v1").await.unwrap();
+
+    sync.upload(tid, dir.path(), vec![db.clone(), wal.clone(), shm.clone()])
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .lock()
+            .unwrap()
+            .contains_key(&(tid.to_string(), "conversations/s1.db-shm".into()))
+    );
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get(&(tid.to_string(), "conversations/s1.db-wal".into()))
+            .unwrap(),
+        b"wal-v1"
+    );
+
+    store.lock().unwrap().insert(
+        (tid.to_string(), "conversations/s1.db-shm".into()),
+        b"legacy-shm".to_vec(),
+    );
+
+    tokio::fs::write(&db, b"db-v2-checkpointed").await.unwrap();
+    tokio::fs::remove_file(&wal).await.unwrap();
+    tokio::fs::remove_file(&shm).await.unwrap();
+
+    assert_eq!(sync.restore(tid, dir.path(), false).await.unwrap(), 0);
+    assert_eq!(tokio::fs::read(&db).await.unwrap(), b"db-v2-checkpointed");
+    assert!(!tokio::fs::try_exists(&wal).await.unwrap());
+    assert!(!tokio::fs::try_exists(&shm).await.unwrap());
+
+    sync.upload(tid, dir.path(), vec![db.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get(&(tid.to_string(), "conversations/s1.db-wal".into()))
+            .unwrap(),
+        b""
+    );
+
+    let fresh = tempfile::tempdir().unwrap();
+    assert_eq!(sync.restore(tid, fresh.path(), false).await.unwrap(), 1);
+    assert_eq!(
+        tokio::fs::read(fresh.path().join("conversations/s1.db"))
+            .await
+            .unwrap(),
+        b"db-v2-checkpointed"
+    );
+    assert!(
+        !tokio::fs::try_exists(fresh.path().join("conversations/s1.db-wal"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !tokio::fs::try_exists(fresh.path().join("conversations/s1.db-shm"))
+            .await
+            .unwrap()
+    );
+
+    server.abort();
+}

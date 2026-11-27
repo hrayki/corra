@@ -230,6 +230,15 @@ impl Acp {
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Result<Result<Value, (i64, String)>> {
+        self.call_filtered(method, params, |_| false).await
+    }
+
+    async fn call_filtered(
+        &mut self,
+        method: &str,
+        params: Value,
+        drop_msg: impl Fn(&Value) -> bool,
+    ) -> Result<Result<Value, (i64, String)>> {
         let id = self.request(method, params).await?;
         loop {
             let Some(msg) = self.read().await? else {
@@ -244,7 +253,9 @@ impl Acp {
                 }
                 return Ok(Ok(msg["result"].clone()));
             }
-            self.early.push_back(msg);
+            if !drop_msg(&msg) {
+                self.early.push_back(msg);
+            }
         }
     }
 
@@ -520,7 +531,7 @@ pub fn store_dir() -> PathBuf {
 pub fn session_files(session: &str) -> Vec<PathBuf> {
     let base = store_dir();
     let mut out = vec![];
-    for suffix in ["", "-wal", "-shm", "-journal"] {
+    for suffix in ["", "-wal", "-journal"] {
         let p = base.join(format!("conversations/{session}.db{suffix}"));
         if p.exists() {
             out.push(p);
@@ -597,6 +608,83 @@ async fn initialize_acp(acp: &mut Acp) -> Result<()> {
     Ok(())
 }
 
+fn is_replay_update(msg: &Value) -> bool {
+    if msg["method"].as_str() != Some("session/update") {
+        return false;
+    }
+    !matches!(
+        msg["params"]["update"]["sessionUpdate"].as_str(),
+        Some(
+            "available_commands_update"
+                | "current_mode_update"
+                | "config_option_update"
+                | "config_options_update"
+        )
+    )
+}
+
+async fn reopen_session(
+    acp: &mut Acp,
+    id: &str,
+    cwd: &str,
+    servers: &[Value],
+    dirs: &[String],
+) -> Result<Result<Value, (i64, String)>> {
+    let params = json!({
+        "sessionId": id,
+        "cwd": cwd,
+        "mcpServers": servers,
+        "additionalDirectories": dirs,
+    });
+    match acp.call("session/resume", params.clone()).await? {
+        Ok(r) => return Ok(Ok(r)),
+        Err((code, msg)) if code == -32002 => return Ok(Err((code, msg))),
+        Err(_) => {}
+    }
+    if acp.can_respawn {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    match acp.call("session/resume", params.clone()).await? {
+        Ok(r) => return Ok(Ok(r)),
+        Err((code, msg)) if code == -32002 => return Ok(Err((code, msg))),
+        Err(_) => {}
+    }
+    acp.call_filtered("session/load", params, is_replay_update)
+        .await
+}
+
+fn absorb_choice_updates(acp: &mut Acp, st: &mut State) {
+    let mut keep = VecDeque::with_capacity(acp.early.len());
+    while let Some(msg) = acp.early.pop_front() {
+        if msg["method"].as_str() == Some("session/update") {
+            let u = &msg["params"]["update"];
+            match u["sessionUpdate"].as_str().unwrap_or("") {
+                "available_commands_update" => {
+                    st.slash = u["availableCommands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["name"].as_str().map(String::from))
+                        .collect();
+                    continue;
+                }
+                "current_mode_update" => {
+                    st.choices
+                        .mode_is(u["currentModeId"].as_str().map(String::from));
+                    continue;
+                }
+                "config_option_update" | "config_options_update" => {
+                    st.choices.read(u);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        keep.push_back(msg);
+    }
+    acp.early = keep;
+}
+
 async fn respawn_without_bypass(
     ctx: &mut SessionCtx,
     acp: &mut Acp,
@@ -619,22 +707,17 @@ async fn respawn_without_bypass(
         .map(|d| d.to_string_lossy().to_string())
         .collect();
     let cwd = ctx.cwd.to_string_lossy().to_string();
-    let params = json!({
-        "sessionId": st.session,
-        "cwd": cwd,
-        "mcpServers": servers,
-        "additionalDirectories": dirs,
-    });
-    match acp.call("session/resume", params).await? {
+    match reopen_session(acp, &st.session, &cwd, servers, &dirs).await? {
         Ok(r) => {
             st.choices.read(&r);
-            announce(ctx, st);
+            absorb_choice_updates(acp, st);
         }
         Err((_, m)) => {
             bail!("Antigravity couldn't reopen the session after leaving bypass mode: {m}")
         }
     }
     apply_settings(ctx, acp, st, st.settings.clone(), true).await?;
+    announce(ctx, st);
     Ok(())
 }
 
@@ -683,6 +766,7 @@ async fn talk(
     authenticate(ctx, acp, bin, &mut st).await?;
     open_session(ctx, acp, &mut st, &servers).await?;
     apply_settings(ctx, acp, &mut st, ctx.spec.settings.clone(), true).await?;
+    announce(ctx, &st);
     while let Some(msg) = acp.early.pop_front() {
         on_message(ctx, acp, bin, &servers, &mut st, msg).await?;
     }
@@ -903,12 +987,11 @@ async fn open_session(
         .collect();
     let cwd = ctx.cwd.to_string_lossy().to_string();
     if let Some(id) = &ctx.spec.resume_session {
-        let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": servers, "additionalDirectories": dirs });
-        match acp.call("session/resume", params).await? {
+        match reopen_session(acp, id, &cwd, servers, &dirs).await? {
             Ok(r) => {
                 st.session = id.clone();
                 st.choices.read(&r);
-                announce(ctx, st);
+                absorb_choice_updates(acp, st);
                 return Ok(());
             }
             Err((_, m)) => emit(
@@ -934,7 +1017,7 @@ async fn open_session(
         bail!("Antigravity opened a conversation without an id");
     }
     st.choices.read(&r);
-    announce(ctx, st);
+    absorb_choice_updates(acp, st);
     Ok(())
 }
 
@@ -988,6 +1071,43 @@ async fn set_option(acp: &mut Acp, st: &mut State, config: &str, value: &str) ->
     Ok(())
 }
 
+async fn set_option_wait(
+    ctx: &SessionCtx,
+    acp: &mut Acp,
+    st: &mut State,
+    config: &str,
+    value: &str,
+    first: bool,
+) -> Result<bool> {
+    match acp
+        .call(
+            "session/set_config_option",
+            json!({ "sessionId": st.session, "configId": config, "value": value }),
+        )
+        .await?
+    {
+        Ok(r) => {
+            st.choices.read(&r);
+            absorb_choice_updates(acp, st);
+            Ok(true)
+        }
+        Err((_, m)) => {
+            if first {
+                tracing::warn!("agy didn't set {config} to {value}: {m}");
+            } else {
+                emit(
+                    ctx,
+                    Event::Notice {
+                        level: NoticeLevel::Warning,
+                        text: format!("Antigravity didn't change {config}: {m}"),
+                    },
+                );
+            }
+            Ok(false)
+        }
+    }
+}
+
 async fn apply_settings(
     ctx: &SessionCtx,
     acp: &mut Acp,
@@ -995,6 +1115,7 @@ async fn apply_settings(
     s: AgentSettings,
     first: bool,
 ) -> Result<()> {
+    let await_reply = first || st.turn.is_none();
     let mut changed = AgentSettings::default();
     let mut switched = None;
     if let (Some(m), Some((id, list, now))) = (&s.model, st.choices.model.clone())
@@ -1002,21 +1123,46 @@ async fn apply_settings(
         && m != &now
         && list.iter().any(|c| &c.id == m)
     {
-        set_option(acp, st, &id, m).await?;
-        changed.model = Some(m.clone());
-        switched = Some(m.clone());
+        let ok = if await_reply {
+            set_option_wait(ctx, acp, st, &id, m, first).await?
+        } else {
+            set_option(acp, st, &id, m).await?;
+            true
+        };
+        if ok {
+            changed.model = Some(m.clone());
+            switched = Some(m.clone());
+        }
     }
     if let (Some(e), Some((id, list, now))) = (&s.effort, st.choices.effort.clone()) {
+        let effort_refreshed = switched.as_deref().is_some_and(|m| {
+            st.choices
+                .model
+                .as_ref()
+                .is_some_and(|(_, _, cur)| cur == m)
+        });
         let list = match &switched {
-            Some(m) => st.choices.efforts_of(m),
-            None => list,
+            Some(m) if !effort_refreshed => st.choices.efforts_of(m),
+            _ => list,
         };
-        if (first || switched.is_some() || Some(e) != st.settings.effort.as_ref())
+        let needs_effort = if effort_refreshed {
+            true
+        } else {
+            first || switched.is_some() || Some(e) != st.settings.effort.as_ref()
+        };
+        if needs_effort
             && let Some(v) = effort_for(e, &list)
-            && (switched.is_some() || v != now)
+            && ((!effort_refreshed && switched.is_some()) || v != now)
         {
-            set_option(acp, st, &id, &v).await?;
-            changed.effort = Some(e.clone());
+            let ok = if await_reply {
+                set_option_wait(ctx, acp, st, &id, &v, first).await?
+            } else {
+                set_option(acp, st, &id, &v).await?;
+                true
+            };
+            if ok {
+                changed.effort = Some(e.clone());
+            }
         }
     }
     let mut mode_changed = false;
@@ -1031,7 +1177,7 @@ async fn apply_settings(
                     let target = mode_for("acceptEdits", &st.choices.mode_ids())
                         .or_else(|| mode_for("default", &st.choices.mode_ids()));
                     if let Some(mode) = target {
-                        set_acp_mode(acp, st, &mode).await?;
+                        set_acp_mode(ctx, acp, st, &mode, await_reply, first).await?;
                     }
                 }
                 if !first {
@@ -1057,9 +1203,10 @@ async fn apply_settings(
                 }
             }
             if let Some(mode) = mode_for(&norm, &st.choices.mode_ids()) {
-                set_acp_mode(acp, st, &mode).await?;
-                changed.permission_mode = Some(norm);
-                mode_changed = true;
+                if set_acp_mode(ctx, acp, st, &mode, await_reply, first).await? {
+                    changed.permission_mode = Some(norm);
+                    mode_changed = true;
+                }
             } else if was_bypass {
                 changed.permission_mode = st.choices.mode_current().map(|m| mode_to_corra(&m));
                 mode_changed = true;
@@ -1080,21 +1227,70 @@ async fn apply_settings(
     Ok(())
 }
 
-async fn set_acp_mode(acp: &mut Acp, st: &mut State, mode: &str) -> Result<()> {
+async fn set_acp_mode(
+    ctx: &SessionCtx,
+    acp: &mut Acp,
+    st: &mut State,
+    mode: &str,
+    await_reply: bool,
+    first: bool,
+) -> Result<bool> {
     match st.choices.mode.clone() {
-        Some((id, _, now)) if now != mode => set_option(acp, st, &id, mode).await?,
-        None if st.choices.mode_now.as_deref() != Some(mode) => {
-            let rid = acp
-                .request(
-                    "session/set_mode",
-                    json!({ "sessionId": st.session, "modeId": mode }),
-                )
-                .await?;
-            st.pending.insert(rid, json!({ "mode": mode }));
+        Some((id, _, now)) if now != mode => {
+            if await_reply {
+                let ok = set_option_wait(ctx, acp, st, &id, mode, first).await?;
+                if ok {
+                    st.choices.mode_is(Some(mode.to_string()));
+                }
+                Ok(ok)
+            } else {
+                set_option(acp, st, &id, mode).await?;
+                Ok(true)
+            }
         }
-        _ => {}
+        None if st.choices.mode_now.as_deref() != Some(mode) => {
+            if await_reply {
+                match acp
+                    .call(
+                        "session/set_mode",
+                        json!({ "sessionId": st.session, "modeId": mode }),
+                    )
+                    .await?
+                {
+                    Ok(r) => {
+                        st.choices.read(&r);
+                        absorb_choice_updates(acp, st);
+                        st.choices.mode_is(Some(mode.to_string()));
+                        Ok(true)
+                    }
+                    Err((_, m)) => {
+                        if first {
+                            tracing::warn!("agy didn't set mode to {mode}: {m}");
+                        } else {
+                            emit(
+                                ctx,
+                                Event::Notice {
+                                    level: NoticeLevel::Warning,
+                                    text: format!("Antigravity didn't change mode: {m}"),
+                                },
+                            );
+                        }
+                        Ok(false)
+                    }
+                }
+            } else {
+                let rid = acp
+                    .request(
+                        "session/set_mode",
+                        json!({ "sessionId": st.session, "modeId": mode }),
+                    )
+                    .await?;
+                st.pending.insert(rid, json!({ "mode": mode }));
+                Ok(true)
+            }
+        }
+        _ => Ok(true),
     }
-    Ok(())
 }
 
 fn content(input: &[InputPart]) -> Vec<Value> {
@@ -1318,6 +1514,9 @@ async fn on_command(
                 if st.needs_respawn && st.turn.is_none() {
                     respawn_without_bypass(ctx, acp, bin, servers, st).await?;
                 }
+                while let Some(msg) = acp.early.pop_front() {
+                    on_message(ctx, acp, bin, servers, st, msg).await?;
+                }
             }
             match st.turn.clone() {
                 None => {
@@ -1355,6 +1554,9 @@ async fn on_command(
             apply_settings(ctx, acp, st, s, false).await?;
             if st.needs_respawn && st.turn.is_none() {
                 respawn_without_bypass(ctx, acp, bin, servers, st).await?;
+            }
+            while let Some(msg) = acp.early.pop_front() {
+                on_message(ctx, acp, bin, servers, st, msg).await?;
             }
         }
         SessionCmd::Stop => {
@@ -2066,6 +2268,17 @@ mod tests {
         mpsc::UnboundedReceiver<AgentOut>,
         mpsc::UnboundedSender<SessionCmd>,
     ) {
+        start_with(settings, None)
+    }
+
+    fn start_with(
+        settings: AgentSettings,
+        resume_session: Option<String>,
+    ) -> (
+        Agy,
+        mpsc::UnboundedReceiver<AgentOut>,
+        mpsc::UnboundedSender<SessionCmd>,
+    ) {
         let (ours, theirs) = tokio::io::duplex(1 << 20);
         let (our_r, our_w) = tokio::io::split(ours);
         let (their_r, their_w) = tokio::io::split(theirs);
@@ -2083,7 +2296,7 @@ mod tests {
                 agent: AgentKind::Antigravity,
                 cwd: "/tmp".into(),
                 extra_dirs: vec![],
-                resume_session: None,
+                resume_session,
                 settings,
                 next_seq: 1,
                 tools: vec![],
@@ -2623,6 +2836,239 @@ mod tests {
             said,
             ["Working on it.", "Docs too."],
             "the turn ended before the second prompt finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_retries_and_falls_back_to_session_load_without_replaying_history() {
+        let (mut agy, mut rx, _cmd) = start_with(
+            AgentSettings {
+                permission_mode: Some("auto".into()),
+                ..Default::default()
+            },
+            Some("old-sid".into()),
+        );
+        let init = agy.expect("initialize").await;
+        agy.answer(&init, json!({ "protocolVersion": 1 })).await;
+        let auth = agy.expect("authenticate").await;
+        agy.answer(&auth, json!({})).await;
+
+        let r1 = agy.expect("session/resume").await;
+        assert_eq!(r1["params"]["sessionId"], "old-sid");
+        agy.send(json!({
+            "jsonrpc": "2.0",
+            "id": r1["id"],
+            "error": { "code": -32603, "message": "Failed to read session old-sid; retry, or load it with session/load" }
+        }))
+        .await;
+
+        let r2 = agy.expect("session/resume").await;
+        assert_eq!(r2["params"]["sessionId"], "old-sid");
+        agy.send(json!({
+            "jsonrpc": "2.0",
+            "id": r2["id"],
+            "error": { "code": -32603, "message": "Failed to read session old-sid; retry, or load it with session/load" }
+        }))
+        .await;
+
+        let load = agy.expect("session/load").await;
+        assert_eq!(load["params"]["sessionId"], "old-sid");
+        agy.update(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "old question" } })).await;
+        agy.update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "old answer" } })).await;
+        agy.update(json!({ "sessionUpdate": "tool_call", "toolCallId": "old-tool", "title": "old cmd", "kind": "execute", "status": "completed" })).await;
+        agy.answer(
+            &load,
+            json!({
+                "modes": { "currentModeId": "default", "availableModes": [
+                    { "id": "default", "name": "Default" },
+                    { "id": "auto", "name": "Auto" }
+                ] },
+                "configOptions": [
+                    { "id": "mode", "name": "Mode", "category": "mode", "currentValue": "default", "options": [
+                        { "value": "default", "name": "Default" },
+                        { "value": "auto", "name": "Auto" }
+                    ] }
+                ]
+            }),
+        )
+        .await;
+
+        let set_mode = agy.next().await;
+        assert_eq!(
+            (
+                set_mode["method"].as_str(),
+                set_mode["params"]["configId"].as_str(),
+                set_mode["params"]["value"].as_str(),
+            ),
+            (
+                Some("session/set_config_option"),
+                Some("mode"),
+                Some("auto")
+            )
+        );
+        agy.answer(&set_mode, json!({})).await;
+
+        let p = agy.next().await;
+        assert_eq!(p["method"], "session/prompt");
+        assert_eq!(p["params"]["sessionId"], "old-sid");
+        agy.update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "fresh answer" } })).await;
+        agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
+
+        let out = drain(&mut rx, ended).await;
+        let session = out.iter().find_map(|o| match o {
+            AgentOut::Event(Event::Session {
+                session_id,
+                permission_mode,
+                ..
+            }) => Some((session_id.clone(), permission_mode.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            session,
+            Some(("old-sid".to_string(), Some("auto".to_string())))
+        );
+        let texts: Vec<&str> = out
+            .iter()
+            .filter_map(|o| match o {
+                AgentOut::Event(Event::ItemCompleted {
+                    item:
+                        Item {
+                            body: ItemBody::AgentMessage { text },
+                            ..
+                        },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["fresh answer"]);
+        assert!(!out.iter().any(|o| matches!(
+            o,
+            AgentOut::Event(Event::ItemStarted {
+                item: Item {
+                    body: ItemBody::ToolCall { .. },
+                    ..
+                },
+                ..
+            })
+        )));
+    }
+
+    #[tokio::test]
+    async fn startup_awaits_model_effort_and_mode_before_first_prompt() {
+        let (mut agy, mut rx, _cmd) = start(AgentSettings {
+            model: Some("gemini-4-neon".into()),
+            effort: Some("xhigh".into()),
+            permission_mode: Some("auto".into()),
+        });
+        let init = agy.expect("initialize").await;
+        agy.answer(&init, json!({ "protocolVersion": 1 })).await;
+        let auth = agy.expect("authenticate").await;
+        agy.answer(&auth, json!({})).await;
+        let new = agy.expect("session/new").await;
+        agy.answer(
+            &new,
+            json!({
+                "sessionId": "s2",
+                "configOptions": [
+                    { "id": "model", "name": "Model", "category": "model", "currentValue": "gemini-3.1-pro", "options": [
+                        { "value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+                        { "value": "gemini-4-neon", "name": "Gemini 4 Neon" }
+                    ] },
+                    { "id": "thought_level", "name": "Thinking", "category": "thought_level", "currentValue": "high", "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "high", "name": "High" }
+                    ] },
+                    { "id": "mode", "name": "Mode", "category": "mode", "currentValue": "default", "options": [
+                        { "value": "default", "name": "Default" },
+                        { "value": "auto", "name": "Auto" }
+                    ] }
+                ]
+            }),
+        )
+        .await;
+
+        let req_model = agy.next().await;
+        assert_eq!(
+            (
+                req_model["method"].as_str(),
+                req_model["params"]["configId"].as_str(),
+                req_model["params"]["value"].as_str(),
+            ),
+            (
+                Some("session/set_config_option"),
+                Some("model"),
+                Some("gemini-4-neon")
+            )
+        );
+        agy.answer(
+            &req_model,
+            json!({
+                "configOptions": [
+                    { "id": "model", "name": "Model", "category": "model", "currentValue": "gemini-4-neon", "options": [
+                        { "value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+                        { "value": "gemini-4-neon", "name": "Gemini 4 Neon" }
+                    ] },
+                    { "id": "thought_level", "name": "Thinking", "category": "thought_level", "currentValue": "high", "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "high", "name": "High" },
+                        { "value": "xhigh", "name": "XHigh" }
+                    ] },
+                    { "id": "mode", "name": "Mode", "category": "mode", "currentValue": "default", "options": [
+                        { "value": "default", "name": "Default" },
+                        { "value": "auto", "name": "Auto" }
+                    ] }
+                ]
+            }),
+        )
+        .await;
+
+        let req_effort = agy.next().await;
+        assert_eq!(
+            (
+                req_effort["method"].as_str(),
+                req_effort["params"]["configId"].as_str(),
+                req_effort["params"]["value"].as_str(),
+            ),
+            (
+                Some("session/set_config_option"),
+                Some("thought_level"),
+                Some("xhigh")
+            )
+        );
+        agy.answer(&req_effort, json!({})).await;
+
+        let req_mode = agy.next().await;
+        assert_eq!(
+            (
+                req_mode["method"].as_str(),
+                req_mode["params"]["configId"].as_str(),
+                req_mode["params"]["value"].as_str(),
+            ),
+            (
+                Some("session/set_config_option"),
+                Some("mode"),
+                Some("auto")
+            )
+        );
+        agy.answer(&req_mode, json!({})).await;
+
+        let p = agy.next().await;
+        assert_eq!(p["method"], "session/prompt");
+        agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
+
+        let out = drain(&mut rx, ended).await;
+        let session = out.iter().find_map(|o| match o {
+            AgentOut::Event(Event::Session {
+                model,
+                permission_mode,
+                ..
+            }) => Some((model.clone(), permission_mode.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            session,
+            Some((Some("gemini-4-neon".to_string()), Some("auto".to_string())))
         );
     }
 }
