@@ -108,8 +108,9 @@ goes through for an hour. A push that unpacks to more than 256 MB is refused. A 
 branches and head commit, and merges only that commit; if the branch has moved since, GitHub refuses and the agent is
 told to ask again. Approvals wait in the hub's memory; when it restarts, any still open are cancelled with a notice in
 their thread. An answer goes only to a request that still waits, and only once, so a second device or a double click is
-refused. Pull requests, checks, issues and merging are hub tools. A workflow that runs on any branch still runs that
-branch's code with the repo's secrets, so secrets belong in workflows that run on the default branch or tags.
+refused. When a turn ends, the hub requests it left waiting are cancelled, except a push. Pull requests, checks, issues
+and merging are hub tools. A workflow that runs on any branch still runs that branch's code with the repo's secrets, so
+secrets belong in workflows that run on the default branch or tags.
 
 What an agent may do is its own permission mode, Claude Code's or Antigravity's, picked per thread, plus for Claude Code
 the rules in the kit's `claude-settings.json`. Corra adds no approvals of its own: every request the agent makes comes
