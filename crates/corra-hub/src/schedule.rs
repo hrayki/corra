@@ -85,18 +85,11 @@ pub const COMPACT: &str = "/compact";
 const DEFAULT_OVER: u64 = 200_000;
 const QUIET_FOR: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum IdleCompaction {
-    Never,
-    WhenIReturn,
-    BeforeExpiry,
-}
-
-pub fn idle_compaction(hub: &Hub) -> IdleCompaction {
-    match hub.settings()["compact_idle"].as_str() {
-        Some("never") => IdleCompaction::Never,
-        Some("before") => IdleCompaction::BeforeExpiry,
-        _ => IdleCompaction::WhenIReturn,
+pub fn compact_idle_enabled(hub: &Hub) -> bool {
+    match &hub.settings()["compact_idle"] {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(s) => s != "never",
+        _ => true,
     }
 }
 
@@ -139,22 +132,16 @@ fn save_cache_use(hub: &Hub, thread: ThreadId, c: CacheUse) {
     }
 }
 
-pub fn cache_status(hub: &Hub, c: &CacheUse) -> serde_json::Value {
-    json!({
-        "tokens": c.tokens,
-        "until": c.at + cache_ttl(hub),
-        "compact": idle_compaction(hub) != IdleCompaction::Never && c.tokens >= compact_over(hub),
-    })
-}
-
 pub fn note_cache_use(hub: &Hub, thread: ThreadId, tokens: u64, at: i64) {
-    let c = CacheUse {
-        tokens,
-        at,
-        tried: false,
-    };
-    save_cache_use(hub, thread, c);
-    hub.set_live_status(thread, json!({ "cache": cache_status(hub, &c) }));
+    save_cache_use(
+        hub,
+        thread,
+        CacheUse {
+            tokens,
+            at,
+            tried: false,
+        },
+    );
 }
 
 pub fn quiet_turn(hub: &Hub, thread: ThreadId) {
@@ -180,37 +167,8 @@ pub fn take_quiet_turn(hub: &Hub, thread: ThreadId) -> bool {
         .is_some_and(|at| at.elapsed() < QUIET_FOR)
 }
 
-pub async fn compact_then_send(
-    hub: &HubRef,
-    thread: ThreadId,
-    input: Vec<InputPart>,
-    settings: Option<AgentSettings>,
-    client_id: Option<String>,
-) -> Result<()> {
-    if let Some(id) = &client_id
-        && !hub.first_send(id)
-    {
-        return Ok(());
-    }
-    if hub.busy(thread) {
-        hub.enqueue(thread, input, client_id);
-        return Ok(());
-    }
-    hub.enqueue_front(thread, input, client_id);
-    quiet_turn(hub, thread);
-    hub.send(
-        thread,
-        vec![InputPart::Text {
-            text: COMPACT.into(),
-        }],
-        settings,
-        false,
-    )
-    .await
-}
-
 pub async fn compact_idle(hub: &HubRef, now: i64) -> Result<()> {
-    if idle_compaction(hub) != IdleCompaction::BeforeExpiry {
+    if !compact_idle_enabled(hub) {
         return Ok(());
     }
     let ttl = cache_ttl(hub);

@@ -5,8 +5,6 @@ export type Panel =
   | { kind: 'diff'; turn?: string; file?: string }
   | { kind: 'files'; path?: string; line?: number }
   | { kind: 'terminal' }
-  | { kind: 'browser' }
-  | { kind: 'phone' }
   | { kind: 'agent'; tool: string }
 
 const [panel, setPanel] = createSignal<Panel | null>(null)

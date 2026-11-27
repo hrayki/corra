@@ -13,9 +13,7 @@ clap = { version = "4.6.8", features = ["derive", "env"] }
 corra-proto = { version = "0.1.0", path = "../corra-proto" }
 flate2 = "1.1.11"
 futures-util = "0.3.34"
-jpeg-encoder = "0.7.1"
 libc = "0.2.191"
-png = "0.18.1"
 pty-process = { version = "0.5.4", features = ["async"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "query"] }
 serde = { version = "1.0.229", features = ["derive"] }

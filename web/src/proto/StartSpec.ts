@@ -5,4 +5,4 @@ import type { ForkSource } from "./ForkSource";
 import type { Repo } from "./Repo";
 import type { ToolDef } from "./ToolDef";
 
-export type StartSpec = { thread: string, agent: AgentKind, cwd: string, extra_dirs: Array<string>, resume_session?: string, settings: AgentSettings, next_seq: number, tools: Array<ToolDef>, repos: Array<Repo>, agent_env?: Array<[string, string]>, moved_from?: string | null, resume_at?: string | null, fork_of?: ForkSource | null, browser: boolean, };
+export type StartSpec = { thread: string, agent: AgentKind, cwd: string, extra_dirs: Array<string>, resume_session?: string, settings: AgentSettings, next_seq: number, tools: Array<ToolDef>, repos: Array<Repo>, agent_env?: Array<[string, string]>, moved_from?: string | null, resume_at?: string | null, fork_of?: ForkSource | null, };

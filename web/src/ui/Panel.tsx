@@ -17,8 +17,6 @@ import { IconBtn } from './bits'
 import { inside } from '../lib/filelinks'
 
 const TerminalPanel = lazy(lazyPart(() => import('./Terminal').then((m) => ({ default: m.TerminalPanel }))))
-const BrowserPanel = lazy(lazyPart(() => import('./Browser').then((m) => ({ default: m.BrowserPanel }))))
-const PhonePanel = lazy(lazyPart(() => import('./Phone').then((m) => ({ default: m.PhonePanel }))))
 
 function Part(props: { what: string; children: JSX.Element }) {
   return (
@@ -79,12 +77,6 @@ export function SidePanel(props: { thread: string }) {
           <Tab active={tab() === 'terminal'} onClick={() => setPanel({ kind: 'terminal' })}>
             Terminal
           </Tab>
-          <Tab active={tab() === 'browser'} onClick={() => setPanel({ kind: 'browser' })}>
-            Browser
-          </Tab>
-          <Tab active={tab() === 'phone'} onClick={() => setPanel({ kind: 'phone' })}>
-            Phone
-          </Tab>
           <Show when={tab() === 'agent'}>
             <Tab active onClick={() => {}}>
               Agent
@@ -110,16 +102,6 @@ export function SidePanel(props: { thread: string }) {
         <Show when={tab() === 'terminal'}>
           <Part what="the terminal">
             <TerminalPanel thread={props.thread} />
-          </Part>
-        </Show>
-        <Show when={tab() === 'browser'}>
-          <Part what="the browser">
-            <BrowserPanel thread={props.thread} />
-          </Part>
-        </Show>
-        <Show when={tab() === 'phone'}>
-          <Part what="the phone">
-            <PhonePanel />
           </Part>
         </Show>
         <Show when={panel()?.kind === 'agent' && (panel() as { tool: string }).tool} keyed>

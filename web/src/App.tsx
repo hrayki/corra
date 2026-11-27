@@ -51,7 +51,7 @@ export default function App() {
 function Main() {
   const r = route
   const [dragging, setDragging] = createSignal(false)
-  const offline = () => state.loaded.hub && state.conn.hub !== 'open'
+  const offline = () => state.loaded && state.conn !== 'open'
   return (
     <div class="flex h-full">
       <PictureViewer />
@@ -121,12 +121,6 @@ function Main() {
       <main class="flex min-w-0 flex-1 flex-col" classList={{ 'max-md:hidden': r().kind === 'home' }}>
         <Show when={offline()}>
           <div class="border-b border-line bg-warn/10 px-5 py-1.5 text-[12.5px]">Reconnecting. You can read saved threads meanwhile.</div>
-        </Show>
-        <Show when={state.offline}>
-          <div class="border-b border-line bg-warn/10 px-5 py-1.5 text-[12.5px]">
-            {(state.offline ?? '').replace(/^https?:\/\//, '')} can't be reached, so this is corra's own copy on this computer. Threads you
-            start here move to the hub when it's back.
-          </div>
         </Show>
         <Switch>
           <Match when={r().kind === 'thread' && (r() as { id: string }).id} keyed>

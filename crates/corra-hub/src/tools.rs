@@ -142,16 +142,8 @@ fn is_manager(hub: &HubRef, machine: MachineId) -> bool {
     hub.machine_trusted(machine)
 }
 
-pub fn defs_for(hub: &HubRef, project: &Project, machine: MachineId) -> Vec<ToolDef> {
-    let phone = project.tools.iter().any(|t| t == "phone");
-    let mut defs: Vec<ToolDef> = all_defs()
-        .into_iter()
-        .chain(if phone {
-            crate::phone::defs(hub)
-        } else {
-            vec![]
-        })
-        .collect();
+pub fn defs_for(hub: &HubRef, _project: &Project, machine: MachineId) -> Vec<ToolDef> {
+    let mut defs: Vec<ToolDef> = all_defs();
     if is_manager(hub, machine) {
         let manage = crate::manage::defs(hub);
         defs.retain(|d| !manage.iter().any(|m| m.action == d.action));
@@ -172,22 +164,15 @@ pub async fn call(
         .db
         .thread(thread)?
         .ok_or_else(|| anyhow!("no such thread"))?;
-    let phone = crate::phone::is_phone(action);
-    if (crate::manage::is_manage(hub, action) || phone) && is_manager(hub, machine) {
-        if phone {
-            return crate::phone::run(hub, machine, action, input).await;
-        }
+    if crate::manage::is_manage(hub, action) && is_manager(hub, machine) {
         return crate::manage::run(hub, &t, action, input).await;
     }
     let p = hub
         .db
         .project(t.project)?
         .ok_or_else(|| anyhow!("no such project"))?;
-    if !phone && !all_defs().iter().any(|d| d.action == action) {
+    if !all_defs().iter().any(|d| d.action == action) {
         bail!("unknown tool {action}");
-    }
-    if phone && !p.tools.iter().any(|t| t == "phone") {
-        bail!("the test phone is switched off for this project");
     }
     if action == "secret.request" {
         return secret_request(hub, machine, thread, turn, &input).await;
@@ -209,9 +194,6 @@ pub async fn call(
             }
             _ => bail!("The request was cancelled."),
         }
-    }
-    if phone {
-        return crate::phone::run(hub, machine, action, input).await;
     }
     run(hub, &t, &p, action, input).await
 }
@@ -320,10 +302,6 @@ pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
             missing: (!missing.is_empty()).then(|| format!("Needs a {label} key")),
         }
     };
-    let phone_host = crate::phone::host(hub);
-    let phone_ready = phone_host
-        .as_ref()
-        .is_some_and(|h| crate::phone::check_host(hub, h).is_ok());
     vec![
         tool(
             "github",
@@ -332,30 +310,6 @@ pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
             &["github.token"],
             None,
         ),
-        tool(
-            "browser",
-            "Browser",
-            "A Chromium on the project's machine that agents drive and you can watch.",
-            &[],
-            None,
-        ),
-        ToolInfo {
-            ready: phone_ready,
-            missing: (!phone_ready).then(|| {
-                if phone_host.is_some() {
-                    "Its machine's provider isn't connected".to_string()
-                } else {
-                    "Off: pick where it runs".to_string()
-                }
-            }),
-            ..tool(
-                "phone",
-                "Android phone",
-                "A test phone in the cloud that agents drive and you can watch. Its apps and data go when it stops.",
-                &[],
-                Some("kvm"),
-            )
-        },
         tool(
             "threads",
             "Other threads",

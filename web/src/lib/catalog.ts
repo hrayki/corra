@@ -1,16 +1,16 @@
 import { createResource, createRoot } from 'solid-js'
-import { callOn, state } from './store'
+import { call, state } from './store'
 import type { ProviderInfo } from '../proto/ProviderInfo'
 import type { ToolInfo } from '../proto/ToolInfo'
 import type { KindInfo } from '../proto/KindInfo'
 
-const hubUp = () => state.conn.hub === 'open'
+const hubUp = () => state.conn === 'open'
 
 const [providerList, providerRes] = createRoot(() =>
-  createResource(hubUp, (up) => (up ? callOn<ProviderInfo[]>('hub', { op: 'list_providers' }) : Promise.resolve([]))),
+  createResource(hubUp, (up) => (up ? call<ProviderInfo[]>({ op: 'list_providers' }) : Promise.resolve([]))),
 )
 const [toolList, toolRes] = createRoot(() =>
-  createResource(hubUp, (up) => (up ? callOn<ToolInfo[]>('hub', { op: 'list_tools' }) : Promise.resolve([]))),
+  createResource(hubUp, (up) => (up ? call<ToolInfo[]>({ op: 'list_tools' }) : Promise.resolve([]))),
 )
 
 export const providers = () => providerList() ?? []

@@ -376,71 +376,6 @@ async fn a_limit_doesnt_continue_a_trashed_waiting_or_resumed_thread_or_loop() {
     );
 }
 
-fn started(hub: &HubRef, thread: ThreadId, id: &str, input: &str) {
-    hub.append(
-        thread,
-        None,
-        now_ms(),
-        Event::TurnStarted {
-            turn: id.into(),
-            input: text(input),
-            settings: AgentSettings::default(),
-            cause: None,
-        },
-    )
-    .unwrap();
-}
-
-#[tokio::test]
-async fn compacting_first_sends_the_message_after_the_summary_and_tells_no_follower() {
-    use corra_hub::schedule::compact_then_send;
-    let dir = tempfile::tempdir().unwrap();
-    let (hub, thread) = setup(dir.path());
-    let follower = {
-        let mut t = hub.db.thread(thread).unwrap().unwrap();
-        t.id = new_id();
-        hub.db.insert_thread(&t).unwrap();
-        t.id
-    };
-    hub.set_thread_kv(thread, "follower", &follower.to_string());
-
-    compact_then_send(&hub, thread, text("my question"), None, Some("c1".into()))
-        .await
-        .unwrap();
-    compact_then_send(&hub, thread, text("my question"), None, Some("c1".into()))
-        .await
-        .unwrap();
-    assert_eq!(waiting(&hub, thread), ["my question"]);
-    assert_eq!(
-        tried_to_send(&hub, thread).await,
-        1,
-        "the summary wasn't asked for once"
-    );
-    let told = tried_to_send(&hub, follower).await;
-
-    started(&hub, thread, "c", "/compact");
-    turn(&hub, thread, "c", Some(TurnOutcome::Completed));
-    assert!(waiting(&hub, thread).is_empty());
-    assert_eq!(
-        tried_to_send(&hub, thread).await,
-        2,
-        "the message didn't follow"
-    );
-    assert_eq!(
-        tried_to_send(&hub, follower).await,
-        told + 1,
-        "the follower heard about the summary, not just the failed send"
-    );
-
-    started(&hub, thread, "m", "my question");
-    turn(&hub, thread, "m", Some(TurnOutcome::Completed));
-    assert_eq!(
-        tried_to_send(&hub, follower).await,
-        told + 2,
-        "the follower missed a real turn"
-    );
-}
-
 #[tokio::test]
 async fn an_idle_thread_compacts_once_before_its_cache_expires() {
     use corra_hub::schedule::{compact_idle, note_cache_use};
@@ -456,7 +391,7 @@ async fn an_idle_thread_compacts_once_before_its_cache_expires() {
     hub.db
         .kv_set(
             "settings",
-            r#"{"compact_idle":"return","compact_over":"100000"}"#,
+            r#"{"compact_idle":"never","compact_over":"100000"}"#,
         )
         .unwrap();
     note_cache_use(&hub, thread, 150_000, now_ms());
@@ -465,7 +400,7 @@ async fn an_idle_thread_compacts_once_before_its_cache_expires() {
     assert_eq!(
         tried_to_send(&hub, thread).await,
         0,
-        "compacted when set to wait for me"
+        "compacted when disabled"
     );
 
     hub.db

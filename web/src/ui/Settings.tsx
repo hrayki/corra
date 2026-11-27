@@ -9,26 +9,23 @@ import History from 'lucide-solid/icons/rotate-ccw-clock'
 import TriangleAlert from 'lucide-solid/icons/triangle-exclamation-point'
 import ArrowUpRight from 'lucide-solid/icons/arrow-up-right'
 import CircleArrowUp from 'lucide-solid/icons/circle-arrow-up'
-import { callOn, state, type MachineX } from '../lib/store'
+import { call, state } from '../lib/store'
 import { newPairingCode, signOut } from '../lib/auth'
 import { renderSVG } from 'uqr'
-import { choice, omarchy, setChoice, type ThemeChoice } from '../lib/theme'
+import { choice, setChoice, type ThemeChoice } from '../lib/theme'
 import { ago } from '../lib/format'
 import { runningLine, when } from '../lib/hubversion'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
-import { kindOf, paired, providerLabel, providerOf, providers, refreshCatalog, sizeLabel, sizesFor, tools } from '../lib/catalog'
+import { paired, providerLabel, providerOf, providers, refreshCatalog, tools } from '../lib/catalog'
 import type { KindInfo } from '../proto/KindInfo'
+import type { Machine } from '../proto/Machine'
 import type { ProviderInfo } from '../proto/ProviderInfo'
-import type { PhoneHost } from '../proto/PhoneHost'
-import type { Leftover } from '../proto/Leftover'
 import type { HubVersion } from '../proto/HubVersion'
 
-const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
-
 export function Settings() {
-  const hubUp = () => state.conn.hub === 'open'
+  const hubUp = () => state.conn === 'open'
   const pages = createMemo(() => {
     const all: { key: string; label: string; show: boolean }[] = [
       { key: 'general', label: 'General', show: true },
@@ -38,7 +35,7 @@ export function Settings() {
       { key: 'machines', label: 'Machines', show: true },
       { key: 'env', label: 'Env vars', show: hubUp() },
       { key: 'setup', label: 'Setup repo', show: hubUp() },
-      { key: 'data', label: 'Backups and data', show: hubUp() },
+      { key: 'data', label: 'Data', show: hubUp() },
       { key: 'devices', label: 'Devices', show: true },
     ]
     return all.filter((p) => p.show)
@@ -98,9 +95,6 @@ export function Settings() {
                 <Compaction />
                 <Version />
               </Show>
-              <Show when={state.connectUrl}>
-                <HubLink />
-              </Show>
             </Show>
             <Show when={on() === 'machines'}>
               <Machines />
@@ -121,7 +115,6 @@ export function Settings() {
               <MachineSetup />
             </Show>
             <Show when={on() === 'data'}>
-              <Backups />
               <Data />
               <Trash />
             </Show>
@@ -152,19 +145,15 @@ function Card(props: { children: JSX.Element }) {
 }
 
 function Appearance() {
-  const options = createMemo(() => {
-    const o: { value: ThemeChoice; label: string }[] = [
-      { value: 'auto', label: 'Auto' },
-      { value: 'light', label: 'Light' },
-      { value: 'dark', label: 'Dark' },
-    ]
-    if (omarchy()) o.push({ value: 'omarchy', label: 'Omarchy' })
-    return o
-  })
+  const options: { value: ThemeChoice; label: string }[] = [
+    { value: 'auto', label: 'Auto' },
+    { value: 'light', label: 'Light' },
+    { value: 'dark', label: 'Dark' },
+  ]
   return (
     <Section title="Appearance">
       <div class="inline-flex rounded-lg border border-line p-0.5">
-        <For each={options()}>
+        <For each={options}>
           {(o) => (
             <button
               class="h-7 rounded-md px-3 text-[13px]"
@@ -177,23 +166,18 @@ function Appearance() {
           )}
         </For>
       </div>
-      <Show when={choice() === 'omarchy' && omarchy()}>
-        <p class="mt-2 text-[12.5px] text-mute">
-          Following your Omarchy theme{omarchy()!.name ? `, ${omarchy()!.name.replace(/-/g, ' ')}` : ''}. It changes when you switch themes.
-        </p>
-      </Show>
     </Section>
   )
 }
 
 function Compaction() {
-  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
+  const [settings, { refetch }] = createResource(() => call<Record<string, unknown>>({ op: 'get_settings' }))
   const [over, setOver] = createSignal<string | null>(null)
   const [error, setError] = createSignal('')
-  const mode = () => String(settings()?.compact_idle ?? 'return')
+  const enabled = () => settings()?.compact_idle !== 'never' && settings()?.compact_idle !== false
   const shown = () => over() ?? Number(settings()?.compact_over ?? 200000).toLocaleString('en-US')
-  const setMode = async (m: string) => {
-    await callOn('hub', { op: 'set_settings', settings: { compact_idle: m } })
+  const setEnabled = async (on: boolean) => {
+    await call({ op: 'set_settings', settings: { compact_idle: on ? 'before' : 'never' } })
     await refetch()
   }
   const save = async () => {
@@ -203,28 +187,27 @@ function Compaction() {
       return
     }
     setError('')
-    await callOn('hub', { op: 'set_settings', settings: { compact_over: v } })
+    await call({ op: 'set_settings', settings: { compact_over: v } })
     setOver(null)
     await refetch()
   }
   const options = [
-    { value: 'never', label: 'Never' },
-    { value: 'return', label: 'When I return' },
-    { value: 'before', label: 'Before the cache expires' },
+    { value: true, label: 'Before the cache expires' },
+    { value: false, label: 'Never' },
   ]
   return (
     <Section
       title="Compact idle threads"
-      hint="Claude's prompt cache lasts about an hour on a subscription. A long thread you return to after that reads its whole history again at full price, unless it's summarized first."
+      hint="Claude's prompt cache lasts about an hour on a subscription. Compacting an idle long thread shortly before its cache expires keeps the summary cheap."
     >
       <div class="inline-flex max-w-full flex-wrap rounded-lg border border-line p-0.5">
         <For each={options}>
           {(o) => (
             <button
               class="h-7 rounded-md px-3 text-[13px]"
-              classList={{ 'bg-ink text-bg font-medium': mode() === o.value, 'text-mute hover:text-ink': mode() !== o.value }}
-              aria-pressed={mode() === o.value}
-              onClick={() => void setMode(o.value)}
+              classList={{ 'bg-ink text-bg font-medium': enabled() === o.value, 'text-mute hover:text-ink': enabled() !== o.value }}
+              aria-pressed={enabled() === o.value}
+              onClick={() => void setEnabled(o.value)}
             >
               {o.label}
             </button>
@@ -232,16 +215,11 @@ function Compaction() {
         </For>
       </div>
       <p class="mt-2 text-[12.5px] text-mute">
-        <Show when={mode() === 'never'}>Threads keep their full history. You can still send /compact yourself.</Show>
-        <Show when={mode() === 'return'}>
-          A Compact button by Send summarizes a long thread before your next message, once its cache has expired.
-        </Show>
-        <Show when={mode() === 'before'}>
-          Corra sends /compact to an idle long thread shortly before its cache expires, while the summary is cheap. If it misses that, the
-          Compact button shows instead.
+        <Show when={enabled()} fallback="Threads keep their full history. You can still send /compact yourself.">
+          Corra sends /compact to an idle long thread shortly before its cache expires, while the summary is cheap.
         </Show>
       </p>
-      <Show when={mode() !== 'never'}>
+      <Show when={enabled()}>
         <div class="mt-3 flex flex-wrap items-center gap-2 text-[13px]">
           <span>For threads over</span>
           <input
@@ -269,13 +247,13 @@ const KINDS = [
 ]
 
 function Notifications() {
-  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
-  const [push, { refetch: recheck }] = createResource<PushState>(() => (state.desktop ? Promise.resolve('on') : pushState()))
+  const [settings, { refetch }] = createResource(() => call<Record<string, unknown>>({ op: 'get_settings' }))
+  const [push, { refetch: recheck }] = createResource<PushState>(() => pushState())
   const [busy, setBusy] = createSignal(false)
   const [note, setNote] = createSignal('')
   const kinds = () => (settings()?.notify ?? {}) as Record<string, boolean>
   const setKind = async (k: string, on: boolean) => {
-    await callOn('hub', { op: 'set_settings', settings: { notify: { ...kinds(), [k]: on } } })
+    await call({ op: 'set_settings', settings: { notify: { ...kinds(), [k]: on } } })
     await refetch()
   }
   const act = async (f: () => Promise<unknown>) => {
@@ -291,7 +269,6 @@ function Notifications() {
     }
   }
   const status = () => {
-    if (state.desktop) return 'The desktop app shows them while it runs.'
     switch (push()) {
       case 'on':
         return 'On'
@@ -313,20 +290,20 @@ function Notifications() {
             <Bell size={15} />
           </span>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[13.5px] font-medium">{state.desktop ? 'This computer' : 'This browser'}</div>
+            <div class="truncate text-[13.5px] font-medium">This browser</div>
             <div class="text-[12.5px] text-mute">{status()}</div>
           </div>
-          <Show when={!state.desktop && push() === 'off'}>
+          <Show when={push() === 'off'}>
             <Btn small disabled={busy()} onClick={() => void act(turnOn)}>
               Turn on
             </Btn>
           </Show>
-          <Show when={state.desktop || push() === 'on'}>
-            <Btn small kind="ghost" disabled={busy()} onClick={() => void act(() => callOn('hub', { op: 'push_test' }))}>
+          <Show when={push() === 'on'}>
+            <Btn small kind="ghost" disabled={busy()} onClick={() => void act(() => call({ op: 'push_test' }))}>
               Send a test
             </Btn>
           </Show>
-          <Show when={!state.desktop && push() === 'on'}>
+          <Show when={push() === 'on'}>
             <Btn small disabled={busy()} onClick={() => void act(turnOff)}>
               Turn off
             </Btn>
@@ -355,51 +332,17 @@ function Notifications() {
   )
 }
 
-function HubLink() {
-  const here = () => (state.thisMachine ? state.machines[state.thisMachine] : undefined)
-  return (
-    <Section
-      title="This computer"
-      hint="It's one of the hub's machines. When the hub can't be reached, corra keeps working here and hands the threads over when it's back."
-    >
-      <Card>
-        <div class="flex items-center gap-3 px-3.5 py-3">
-          <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ink/[0.05] text-mute">
-            <Laptop size={15} />
-          </span>
-          <div class="min-w-0 flex-1">
-            <div class="truncate text-[13.5px] font-medium">{here()?.name ?? 'This computer'}</div>
-            <div class="truncate text-[12.5px] text-mute">
-              {state.offline ? `${state.offline} can't be reached` : `Connected to ${location.host}`}
-            </div>
-          </div>
-          <a class="text-[13px] text-mute underline decoration-line underline-offset-4 hover:text-ink" href={state.connectUrl!}>
-            Use another hub
-          </a>
-        </div>
-      </Card>
-    </Section>
-  )
-}
-
 function Machines() {
   const list = createMemo(() =>
     Object.values(state.machines)
       .filter((m) => m.status !== 'destroyed')
-      .sort(
-        (a, b) =>
-          Number(b.id === state.thisMachine) - Number(a.id === state.thisMachine) ||
-          Number(b.status === 'connected') - Number(a.status === 'connected') ||
-          b.created_at - a.created_at,
-      ),
+      .sort((a, b) => Number(b.status === 'connected') - Number(a.status === 'connected') || b.created_at - a.created_at),
   )
-  const label = (m: MachineX) => (m.id === state.thisMachine ? 'This computer' : m.name)
-  const gone = (m: MachineX) => providers().length > 0 && !providerOf(m.provider)
-  const detail = (m: MachineX) => {
+  const gone = (m: Machine) => providers().length > 0 && !providerOf(m.provider)
+  const detail = (m: Machine) => {
     const parts: string[] = []
-    if (m.id === state.thisMachine) parts.push(m.name)
-    else if (gone(m)) return `From ${m.provider}, no longer in corra`
-    else parts.push(paired(m.provider) ? 'Paired' : providerLabel(m.provider))
+    if (gone(m)) return `From ${m.provider}, no longer in corra`
+    parts.push(paired(m.provider) ? 'Paired' : providerLabel(m.provider))
     if (m.project && state.projects[m.project]) parts.push(state.projects[m.project].name)
     if (m.info?.disk_used_mb) parts.push(`${(m.info.disk_used_mb / 1024).toFixed(1)} GB of disk`)
     parts.push(m.status === 'connected' ? 'awake' : m.status === 'offline' && m.last_seen ? `seen ${ago(m.last_seen)} ago` : m.status)
@@ -409,7 +352,7 @@ function Machines() {
     <Section
       title="Machines"
       hint={
-        state.conn.hub === 'open'
+        state.conn === 'open'
           ? 'Machines corra makes sleep after 15 idle minutes, with their disk kept, and wake with the next message.'
           : undefined
       }
@@ -423,7 +366,7 @@ function Machines() {
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 text-[13.5px] font-medium">
-                  <span class="truncate">{label(m)}</span>
+                  <span class="truncate">{m.name}</span>
                   <span
                     class="size-1.5 shrink-0 rounded-full"
                     classList={{
@@ -441,7 +384,7 @@ function Machines() {
                   small
                   kind="ghost"
                   title="Removes it from corra. Anything it left on its provider stays there."
-                  onClick={() => void callOn('hub', { op: 'destroy_machine', machine: m.id })}
+                  onClick={() => void call({ op: 'destroy_machine', machine: m.id })}
                 >
                   Forget
                 </Btn>
@@ -456,8 +399,8 @@ function Machines() {
 
 const [secretNames, secretsRes] = createRoot(() =>
   createResource(
-    () => state.conn.hub === 'open',
-    (up) => (up ? callOn<string[]>('hub', { op: 'list_secrets' }) : Promise.resolve([] as string[])),
+    () => state.conn === 'open',
+    (up) => (up ? call<string[]>({ op: 'list_secrets' }) : Promise.resolve([] as string[])),
   ),
 )
 const hasSecret = (n: string) => !!secretNames()?.includes(n)
@@ -473,7 +416,7 @@ function KeyRow(props: { name: string; label: string; hint?: string; inset?: boo
   const save = async () => {
     setError('')
     try {
-      await callOn('hub', { op: 'set_secret', name: props.name, value: value() })
+      await call({ op: 'set_secret', name: props.name, value: value() })
       setValue('')
       setOpen(false)
       refreshKeys()
@@ -507,8 +450,7 @@ function KeyRow(props: { name: string; label: string; hint?: string; inset?: boo
               {
                 label: 'Remove',
                 danger: true,
-                onSelect: () =>
-                  confirm(`Remove ${props.label}?`) && void callOn('hub', { op: 'delete_secret', name: props.name }).then(refreshKeys),
+                onSelect: () => confirm(`Remove ${props.label}?`) && void call({ op: 'delete_secret', name: props.name }).then(refreshKeys),
               },
             ]}
           >
@@ -585,9 +527,6 @@ function ProviderRow(props: { p: ProviderInfo }) {
           <div class="divide-y divide-line">
             <For each={props.p.credentials}>{(c) => <KeyRow inset name={c.name} label={c.label} hint={c.hint} />}</For>
           </div>
-          <Show when={props.p.name === 'digitalocean'}>
-            <Region />
-          </Show>
           <div>
             <div class="mb-1 text-[12px] font-medium text-mute">{props.p.kinds.length > 1 ? 'Kinds of machine' : 'Machines'}</div>
             <div class="divide-y divide-line rounded-lg border border-line">
@@ -611,169 +550,21 @@ function ProviderRow(props: { p: ProviderInfo }) {
   )
 }
 
-function Region() {
-  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
-  const [value, setValue] = createSignal<string | null>(null)
-  const current = () => value() ?? String(settings()?.['digitalocean.region'] ?? '')
-  const save = async () => {
-    await callOn('hub', { op: 'set_settings', settings: { 'digitalocean.region': current().trim() } })
-    setValue(null)
-    await refetch()
-  }
-  return (
-    <div class="flex flex-wrap items-center gap-2 text-[13px]">
-      <span class="text-mute">Region</span>
-      <input
-        class={`${inputClass} w-24 font-mono text-[12.5px]`}
-        placeholder="sfo3"
-        spellcheck={false}
-        value={current()}
-        onInput={(e) => setValue(e.currentTarget.value)}
-        onKeyDown={(e) => e.key === 'Enter' && void save()}
-      />
-      <Btn small disabled={value() === null} onClick={() => void save()}>
-        Save
-      </Btn>
-      <span class="text-[12px] text-faint">New droplets start here; one already made wakes where it slept.</span>
-    </div>
-  )
-}
-
 function Providers() {
   const list = () => providers().filter((p) => p.creates_machines)
   return (
-    <>
-      <Section title="Providers" hint="Where corra's machines come from. A project picks one, with a kind and a size, on its own page.">
-        <Card>
-          <For each={list()}>{(p) => <ProviderRow p={p} />}</For>
-        </Card>
-        <p class="mt-2 text-[12.5px] text-mute">Any Linux computer can also be a machine: pair it under Machines.</p>
-      </Section>
-      <Leftovers />
-    </>
-  )
-}
-
-function Leftovers() {
-  const [list, { mutate }] = createResource(() => callOn<Leftover[]>('hub', { op: 'leftovers' }).catch(() => []))
-  const [busy, setBusy] = createSignal(false)
-  const retry = async () => {
-    setBusy(true)
-    try {
-      mutate(await callOn<Leftover[]>('hub', { op: 'retry_leftovers' }))
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <Show when={list()?.length}>
-      <Section
-        title="Left behind"
-        hint="Corra couldn't delete these when it moved off a provider, so they may still be billed. Try again, or delete them in the provider's own console."
-      >
-        <Card>
-          <For each={list()}>
-            {(l) => (
-              <div class="px-3.5 py-2.5">
-                <div class="flex flex-wrap items-baseline gap-x-2">
-                  <span class="text-[13px] font-medium">{l.what.charAt(0).toUpperCase() + l.what.slice(1)}</span>
-                  <span class="text-[12px] text-faint">
-                    {providerLabel(l.provider)} {l.thing === 'image' ? 'image' : 'machine'} <span class="font-mono">{l.reference}</span>
-                  </span>
-                </div>
-                <div class="mt-0.5 truncate text-[12.5px] text-bad">{l.error}</div>
-              </div>
-            )}
-          </For>
-        </Card>
-        <div class="mt-2">
-          <Btn small disabled={busy()} onClick={() => void retry()}>
-            {busy() ? 'Trying…' : 'Try again'}
-          </Btn>
-        </div>
-      </Section>
-    </Show>
-  )
-}
-
-function PhoneHostPicker() {
-  const [info, { refetch }] = createResource(() => callOn<{ host: PhoneHost | null }>('hub', { op: 'phone_host' }))
-  const [error, setError] = createSignal('')
-  const host = () => info()?.host ?? null
-  const set = async (h: PhoneHost | null) => {
-    setError('')
-    if (host() && (!h || h.provider !== host()!.provider || h.kind !== host()!.kind)) {
-      if (
-        !confirm("Move the phone? Its machine and saved image on the current provider are deleted, and it's built again at the next start.")
-      )
-        return
-    }
-    try {
-      await callOn('hub', h ? { op: 'set_phone_host', host: h } : { op: 'set_phone_host' })
-      await refetch()
-      refreshCatalog()
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
-  const options = () =>
-    providers()
-      .filter((p) => p.creates_machines)
-      .flatMap((p) => p.kinds.map((k) => ({ p, k })))
-  const label = (h: PhoneHost | null) => {
-    if (!h) return 'Off'
-    const p = providerOf(h.provider)
-    const k = p?.kinds.find((x) => x.name === h.kind)
-    return p ? (p.kinds.length > 1 ? `${p.label} ${k?.label ?? h.kind}` : p.label) : h.provider
-  }
-  const kind = () => (host() ? kindOf(host()!.provider, host()!.kind) : undefined)
-  return (
-    <div class="mt-2.5 flex flex-wrap items-center gap-2">
-      <span class="text-[12.5px] text-mute">Runs on</span>
-      <Menu
-        label="Where the phone runs"
-        class={pill}
-        items={[
-          { label: 'Off', checked: !host(), onSelect: () => void set(null) },
-          ...options().map(({ p, k }) => ({
-            label: p.kinds.length > 1 ? `${p.label} ${k.label}` : p.label,
-            hint: !k.kvm ? 'No KVM' : !p.connected ? 'Not connected' : undefined,
-            disabled: !k.kvm || !p.connected,
-            checked: host()?.provider === p.name && host()?.kind === k.name,
-            onSelect: () => void set({ provider: p.name, kind: k.name, size: host()?.size ?? '8x16' }),
-          })),
-        ]}
-      >
-        <span>{label(host())}</span>
-        <ChevronDown size={13} class="text-faint" />
-      </Menu>
-      <Show when={host() && kind()}>
-        <Menu
-          label="The phone's machine size"
-          class={pill}
-          items={sizesFor(kind()).map((s) => ({
-            label: sizeLabel(s),
-            checked: s === host()!.size,
-            onSelect: () => void set({ ...host()!, size: s }),
-          }))}
-        >
-          <span>{sizeLabel(host()!.size)}</span>
-          <ChevronDown size={13} class="text-faint" />
-        </Menu>
-      </Show>
-      <Show when={error()}>
-        <p class="w-full text-[12.5px] text-bad">{error()}</p>
-      </Show>
-    </div>
+    <Section title="Providers" hint="Where corra's machines come from. A project picks one and a size on its own page.">
+      <Card>
+        <For each={list()}>{(p) => <ProviderRow p={p} />}</For>
+      </Card>
+      <p class="mt-2 text-[12.5px] text-mute">Any Linux computer can also be a machine: pair it under Machines.</p>
+    </Section>
   )
 }
 
 function Tools() {
   return (
-    <Section
-      title="Tools"
-      hint="What agents can use besides Claude Code's own tools. A project turns the browser and the phone on or off on its page."
-    >
+    <Section title="Tools" hint="What agents can use besides their own tools.">
       <Card>
         <For each={tools()}>
           {(t) => (
@@ -792,9 +583,6 @@ function Tools() {
                     hint="Fine-grained, for your repos: Contents, Pull requests and Issues read and write, Actions and Checks read, no Workflows."
                   />
                 </div>
-              </Show>
-              <Show when={t.name === 'phone'}>
-                <PhoneHostPicker />
               </Show>
             </div>
           )}
@@ -815,9 +603,7 @@ function Keys() {
     'github.token',
   ])
   const others = () =>
-    (secretNames() ?? []).filter(
-      (n) => !known.has(n) && !n.startsWith('backup.') && !providers().some((p) => p.credentials.some((c) => c.name === n)),
-    )
+    (secretNames() ?? []).filter((n) => !known.has(n) && !providers().some((p) => p.credentials.some((c) => c.name === n)))
   return (
     <>
       <Section
@@ -864,8 +650,8 @@ function Keys() {
 }
 
 function Data() {
-  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
-  const [status] = createResource(() => callOn<{ db_bytes: number | null }>('hub', { op: 'backup_status' }))
+  const [settings, { refetch }] = createResource(() => call<Record<string, unknown>>({ op: 'get_settings' }))
+  const [status] = createResource(() => call<{ db_bytes: number | null }>({ op: 'db_stats' }))
   const [days, setDays] = createSignal<string | null>(null)
   const [error, setError] = createSignal('')
   const value = () => days() ?? String(settings()?.retention_days ?? '')
@@ -876,7 +662,7 @@ function Data() {
       return
     }
     setError('')
-    await callOn('hub', { op: 'set_settings', settings: { retention_days: v } })
+    await call({ op: 'set_settings', settings: { retention_days: v } })
     setDays(null)
     await refetch()
   }
@@ -931,15 +717,14 @@ function Trash() {
                   {state.projects[t.project]?.name ?? 'No project'} · trashed {ago(t.hidden_at!)} ago
                 </div>
               </div>
-              <Btn small onClick={() => run(callOn(t.src, { op: 'update_thread', thread: t.id, hidden: false }))}>
+              <Btn small onClick={() => run(call({ op: 'update_thread', thread: t.id, hidden: false }))}>
                 Restore
               </Btn>
               <Btn
                 small
                 kind="ghost"
                 onClick={() =>
-                  confirm(`Delete "${t.title}" for good? This can't be undone.`) &&
-                  run(callOn(t.src, { op: 'delete_thread', thread: t.id }))
+                  confirm(`Delete "${t.title}" for good? This can't be undone.`) && run(call({ op: 'delete_thread', thread: t.id }))
                 }
               >
                 Delete
@@ -954,11 +739,11 @@ function Trash() {
 }
 
 function MachineSetup() {
-  const [settings, { refetch }] = createResource(() => callOn<Record<string, unknown>>('hub', { op: 'get_settings' }))
+  const [settings, { refetch }] = createResource(() => call<Record<string, unknown>>({ op: 'get_settings' }))
   const [saved, setSaved] = createSignal(false)
   const value = () => String(settings()?.setup_repo ?? '')
   const save = async (r: string) => {
-    await callOn('hub', { op: 'set_settings', settings: { setup_repo: r } })
+    await call({ op: 'set_settings', settings: { setup_repo: r } })
     setSaved(true)
     await refetch()
   }
@@ -976,7 +761,7 @@ function MachineSetup() {
 }
 
 function EnvVars() {
-  const [names, { refetch }] = createResource(() => callOn<string[]>('hub', { op: 'list_env' }))
+  const [names, { refetch }] = createResource(() => call<string[]>({ op: 'list_env' }))
   const [editing, setEditing] = createSignal<string | null>(null)
   const [name, setName] = createSignal('')
   const [value, setValue] = createSignal('')
@@ -984,7 +769,7 @@ function EnvVars() {
   const save = async (n: string) => {
     setError('')
     try {
-      await callOn('hub', { op: 'set_env', name: n.trim(), value: value() })
+      await call({ op: 'set_env', name: n.trim(), value: value() })
       setValue('')
       setName('')
       setEditing(null)
@@ -1007,7 +792,7 @@ function EnvVars() {
                 <Btn
                   small
                   kind="ghost"
-                  onClick={() => confirm(`Remove ${n}?`) && void callOn('hub', { op: 'delete_env', name: n }).then(() => refetch())}
+                  onClick={() => confirm(`Remove ${n}?`) && void call({ op: 'delete_env', name: n }).then(() => refetch())}
                 >
                   Remove
                 </Btn>
@@ -1067,7 +852,7 @@ type SessionRow = { id: string; kind: string; name: string; created: number; exp
 function Devices() {
   const [code, setCode] = createSignal('')
   const [error, setError] = createSignal('')
-  const [sessions, { refetch }] = createResource(() => callOn<SessionRow[]>('hub', { op: 'sessions' }))
+  const [sessions, { refetch }] = createResource(() => call<SessionRow[]>({ op: 'sessions' }))
   const label = (s: SessionRow) => (s.kind === 'device' ? s.name || 'A device' : 'A browser')
   return (
     <>
@@ -1121,7 +906,7 @@ function Devices() {
                     small
                     kind="ghost"
                     onClick={() =>
-                      confirm(`Sign ${label(s)} out?`) && void callOn('hub', { op: 'revoke_session', session: s.id }).then(() => refetch())
+                      confirm(`Sign ${label(s)} out?`) && void call({ op: 'revoke_session', session: s.id }).then(() => refetch())
                     }
                   >
                     Sign out
@@ -1133,102 +918,6 @@ function Devices() {
         </Show>
       </Section>
     </>
-  )
-}
-
-type BackupStatus = { configured: boolean; error: string | null; last: { at: number; db_bytes: number } | null }
-
-function Backups() {
-  const [status, { refetch }] = createResource(() => callOn<BackupStatus>('hub', { op: 'backup_status' }))
-  const [open, setOpen] = createSignal(false)
-  const [busy, setBusy] = createSignal(false)
-  const [error, setError] = createSignal('')
-  const [form, setForm] = createSignal({ endpoint: '', bucket: '', access_key: '', secret_key: '' })
-  const save = async () => {
-    setError('')
-    try {
-      for (const [k, v] of Object.entries(form())) if (v.trim()) await callOn('hub', { op: 'set_secret', name: `backup.${k}`, value: v })
-      setForm({ endpoint: '', bucket: '', access_key: '', secret_key: '' })
-      setOpen(false)
-      await refetch()
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
-  const now = async () => {
-    setBusy(true)
-    setError('')
-    try {
-      await callOn('hub', { op: 'backup_now' })
-    } catch (e) {
-      setError((e as Error).message)
-    }
-    setBusy(false)
-    await refetch()
-  }
-  const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`
-  const field = (k: keyof ReturnType<typeof form>, placeholder: string, secret = false) => (
-    <input
-      class={`${inputClass} w-full ${secret ? '' : 'font-mono text-[12.5px]'}`}
-      type={secret ? 'password' : 'text'}
-      autocomplete="off"
-      spellcheck={false}
-      placeholder={placeholder}
-      value={form()[k]}
-      onInput={(e) => setForm({ ...form(), [k]: e.currentTarget.value })}
-    />
-  )
-  return (
-    <Section
-      title="Backups"
-      hint="Every 6 hours the hub copies its database and every session file to S3-compatible storage, such as Cloudflare R2."
-    >
-      <Card>
-        <div class="flex items-center gap-3 px-3.5 py-3">
-          <span
-            class="size-2 shrink-0 rounded-full"
-            classList={{
-              'bg-ok': !!status()?.configured && !status()?.error,
-              'bg-bad': !!status()?.error,
-              'bg-faint/60': !status()?.configured,
-            }}
-          />
-          <div class="min-w-0 flex-1 text-[13px]">
-            <Show when={status()?.configured} fallback={<span class="text-mute">Not set up</span>}>
-              <Show when={status()?.last} fallback={<span class="text-mute">No backup yet</span>}>
-                <span>Last backup {ago(status()!.last!.at)} ago</span>
-                <span class="text-mute"> · {mb(status()!.last!.db_bytes)}</span>
-              </Show>
-            </Show>
-            <Show when={status()?.error}>
-              <div class="text-[12.5px] text-bad">{status()!.error}</div>
-            </Show>
-          </div>
-          <Btn small kind="ghost" onClick={() => setOpen(!open())}>
-            {status()?.configured ? 'Change' : 'Set up'}
-          </Btn>
-          <Show when={status()?.configured}>
-            <Btn small disabled={busy()} onClick={() => void now()}>
-              {busy() ? 'Backing up' : 'Back up now'}
-            </Btn>
-          </Show>
-        </div>
-        <Show when={open()}>
-          <div class="grid gap-2 px-3.5 py-3 sm:grid-cols-2">
-            {field('endpoint', 'https://<account>.r2.cloudflarestorage.com')}
-            {field('bucket', 'bucket name')}
-            {field('access_key', 'access key id')}
-            {field('secret_key', 'secret access key', true)}
-            <div class="sm:col-span-2">
-              <Btn kind="primary" onClick={() => void save()}>
-                Save
-              </Btn>
-            </div>
-          </div>
-        </Show>
-      </Card>
-      <p class="mt-2 text-[12.5px] text-bad">{error()}</p>
-    </Section>
   )
 }
 
@@ -1261,12 +950,12 @@ function VersionRow(props: {
 }
 
 function Version() {
-  const [info, { mutate, refetch }] = createResource(() => callOn<HubVersion>('hub', { op: 'hub_version', check: false }))
+  const [info, { mutate, refetch }] = createResource(() => call<HubVersion>({ op: 'hub_version', check: false }))
   const [checking, setChecking] = createSignal(false)
   const [going, setGoing] = createSignal<{ to: string; restarting: boolean } | null>(null)
   createEffect(
     on(
-      () => state.conn.hub,
+      () => state.conn,
       (c) => {
         if (c !== 'open') return
         if (going()?.restarting) setGoing(null)
@@ -1283,7 +972,7 @@ function Version() {
     setChecking(true)
     setError('')
     try {
-      mutate(await callOn<HubVersion>('hub', { op: 'hub_version', check: true }))
+      mutate(await call<HubVersion>({ op: 'hub_version', check: true }))
     } catch (e) {
       setError((e as Error).message)
     }
@@ -1295,7 +984,7 @@ function Version() {
     setError('')
     setGoing({ to, restarting: false })
     try {
-      await callOn('hub', { op: 'switch_hub', version: to })
+      await call({ op: 'switch_hub', version: to })
       setGoing({ to, restarting: true })
     } catch (e) {
       setError((e as Error).message)

@@ -16,47 +16,32 @@ The README says what corra is. This is how it fits together.
   corra's releases, and goes back to the version before when a new one doesn't come up.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
   through its stream-json interface, or Antigravity through `agy`'s Agent Client Protocol server, and serves the
-  thread's panel: changes, files, terminal, browser, phone. When the hub serves a newer runner, a runner switches to it
-  once nothing has needed it for two minutes: no turn running and no terminal open, except the desktop app's, which
-  comes with the app. On Linux it starts as a small parent that takes in and reaps the processes orphaned below it,
-  since a machine's PID 1 may not (Modal's doesn't).
-- **Desktop core** (`crates/corra-local`): inside the desktop app. It adds the laptop to the hub as one of its machines
-  and runs its runner. It also holds a built-in hub, the same code as the real one: when the hub can't be reached for a
-  minute, the window moves to it, and when the hub is back, the threads started there move to the hub with their events
-  and session files, and the window follows.
-- **App** (`web`, SolidJS): served by the hub, and by the built-in hub while the hub is down. `apps/app` is its Tauri
-  shell for desktop and Android. The hub tells the app which build it serves; an app on another build saves its drafts
-  and reloads, and so does one that can't load a part after a deploy.
+  thread's panel: changes, files, terminal. When the hub serves a newer runner, a runner switches to it
+  once nothing has needed it for two minutes: no turn running and no terminal open. On Linux it starts as a small parent
+  that takes in and reaps the processes orphaned below it, since a machine's PID 1 may not (Modal's doesn't).
+- **App** (`web`, SolidJS): served by the hub as an installable PWA. The hub tells the app which build it serves; an app
+  on another build saves its drafts and reloads, and so does one that can't load a part after a deploy.
 - `crates/corra-proto` holds the types everything shares (the app's are generated from them), `helpers/modal` a small
-  Go helper for Modal, whose SDK has no Rust version, and `machines` the base image and the phone's setup script.
+  Go helper for Modal, whose SDK has no Rust version, and `machines` the base image Dockerfile.
 
 ## Machines
 
 A project has one machine, with its repos in `~/projects/<project>/<repo>`. Each provider describes itself in code: what
-it is, its keys, and the kinds of machine it makes, each with its sizes, how it sleeps, any time limit and whether it
-has KVM. The app and the manager's tools read those descriptions, so nothing outside a provider's own file names it. A
-project picks a provider, a kind and a size, on one of:
+it is, its keys, and the kinds of machine it makes, each with its sizes, how it sleeps and any time limit. The app and
+the manager's tools read those descriptions, so nothing outside a provider's own file names it. A project runs on:
 
 - **Modal** (VM mode): asks for a quarter of a core and 1 GB and bursts up to the project's size, so it's billed on
   what it uses. Asleep, it's a snapshot of its disk. A machine lives 24 hours at most, so one still awake is put to
   sleep before then, even mid-turn. Modal writes a machine's DNS servers into `/etc/resolv.conf` on every boot and
   can't write through a link, so before a Modal machine sleeps its helper turns that file back into a plain one.
-- **Agent37**: a VM, which has KVM, or a container, which is cheaper and doesn't. Both are billed on their size while
-  awake. Asleep, it's stopped and only its disk is billed.
-- **DigitalOcean** (droplet, with KVM): billed by the hour while it exists. The first machine waits while corra builds a
-  base snapshot from the base image's Dockerfile. Asleep, it's a snapshot: the droplet is shut down, snapshotted and
-  deleted, since a stopped droplet is still billed. It wakes as a new droplet from that snapshot in the same region
-  (`digitalocean.region` in Settings, `sfo3` by default).
 - **A machine paired by hand**: any Linux computer running the runner. The hub never starts or stops it.
-
-The runner reports in its machine info whether `/dev/kvm` opens.
 
 The first thread makes the machine: the runner downloads itself from the hub, clones the repos through it and applies
 the setup kit. After 15 idle minutes, or an hour while an app shows the thread or a question waits, the hub puts it to
 sleep. The next message wakes it as it was: dependencies, caches, files outside git; running programs aren't kept. A
-machine that dies comes back with the next message: from its last sleep on Modal, as it was on Agent37, fresh if it
-never slept. Resetting from the project's page deletes the machine and its disk, and the next thread starts fresh.
-Every ten minutes the hub deletes any machine on its providers that it doesn't know.
+machine that dies comes back with the next message: from its last sleep on Modal, or fresh if it never slept. Resetting
+from the project's page deletes the machine and its disk, and the next thread starts fresh. Every ten minutes the hub
+deletes any machine on its providers that it doesn't know.
 
 ## The setup kit
 
@@ -72,11 +57,11 @@ own `AGENTS.md`.
 
 ## Keys and permissions
 
-Signing in is one access key, for browsers, the desktop app and phones, and changing it signs them all out. A phone can
-also scan a QR code from Settings that holds the hub's address and a one-time code.
+Signing in is one access key, for browsers and phones, and changing it signs them all out. A phone browser can also
+scan a QR code from Settings that holds the hub's address and a one-time code.
 
-The hub keeps the keys: GitHub, the providers, DigitalOcean and the env vars. A machine holds only the Claude token,
-its own hub token and the project's env vars, so those should be test keys with spending caps.
+The hub keeps the keys: GitHub, Modal and the env vars. A machine holds only the Claude token, its own hub token and
+the project's env vars, so those should be test keys with spending caps.
 
 Antigravity signs in on each machine with Google through `agy`'s own login, whose code a card in the thread takes.
 Signed in that way, only I prompt its threads: agents can't send to or start one, and the hub doesn't continue it. A
@@ -91,13 +76,13 @@ setups only), read and write the session files of its own threads and its projec
 project's repos. It can't reach another project's threads, repos or setups.
 
 A manager project is trusted with everything. Its machine gets the hub's own keys as the usual variables
-(`GH_TOKEN`, `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, `DIGITALOCEAN_ACCESS_TOKEN`, `AGENT37_API_KEY`,
-`RAILWAY_API_TOKEN`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, for the ones set), reaches any repo through the
-hub with no push guard, merges without asking, and gets the tools that manage corra. Only the app can turn it on.
+(`GH_TOKEN`, `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, `RAILWAY_API_TOKEN`, `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID`, for the ones set), reaches any repo through the hub with no push guard, merges without asking,
+and gets the tools that manage corra. Only the app can turn it on.
 
-The hub sends a Content-Security-Policy with the app, and so does the built-in hub: scripts only from the app itself,
-plus WebAssembly for the terminal; no frames; and connections only to its own address. The markdown sanitizer is no
-longer the only guard against a script injected into a thread.
+The hub sends a Content-Security-Policy with the app: scripts only from the app itself, plus WebAssembly for the
+terminal; no frames; and connections only to its own address. The markdown sanitizer is no longer the only guard against
+a script injected into a thread.
 
 An agent can ask me for a secret with `secret.request`: a card in the thread takes it, and the hub passes it straight to
 the thread's machine, which keeps it for a day in `~/.corra/secrets/`, readable only by the agent. The hub never stores
@@ -124,12 +109,7 @@ message to an idle thread restarts the process on the same session; a thread tha
 its next message.
 
 Beside Claude Code's own tools, agents get corra's: other threads, GitHub, and in a manager project, managing corra
-itself. A project can also turn on a browser on its machine and the Android test phone. The phone runs on an ordinary
-machine of a kind with KVM, picked in Settings under Tools. On DigitalOcean its first start sets it up and keeps a
-snapshot as its template, and each start after makes a new droplet from that. On Agent37 the same VM is stopped and
-started. Either way the emulator starts from the same saved state and keeps nothing, so a phone's apps and data go when
-it stops. Changing where it runs, or moving a project to another provider or kind, deletes what's left on the old one,
-and lists in Settings anything that couldn't be deleted.
+itself.
 
 ## The storage lease
 
@@ -210,9 +190,8 @@ waits on me, or has started another turn since; the queue then drains as usual. 
 limit again, it stops.
 
 Claude's prompt cache lasts about an hour on a subscription and five minutes with an API key, and a thread used after
-that reads its whole history again at full price. Settings pick what happens to threads over a size: nothing; a Compact
-button by Send once the cache has expired, which runs `/compact` before the message; or `/compact` sent by the hub to an
-idle thread about ten minutes before its cache expires, falling back to the button when that's missed. A follower isn't
+that reads its whole history again at full price. When enabled in Settings (on by default), the hub sends `/compact` to
+an idle thread over the token threshold shortly before its cache expires, while the summary is cheap. A follower isn't
 told about a `/compact` the hub sent.
 
 A turn whose machine restarts, sleeps or is destroyed is closed as stopped, and its waiting requests are cancelled. So
@@ -227,7 +206,7 @@ thread that started it, and shows under it in the sidebar. A thread has one foll
 and a stop the follower asked for isn't reported back to it.
 
 When a thread waits on me, finishes or fails, the hub notifies me, unless one of my apps is open and focused. It sends
-Web Push to each browser where I turned it on in Settings, and the desktop app shows them itself. Pushes are signed with
+Web Push to each browser where I turned it on in Settings. Pushes are signed with
 the hub's own VAPID key, kept with the credentials, and encrypted (RFC 8291), so the push service can't read them. A
 finish isn't sent while the queue still holds a message, after a `/compact` the hub sent, or for a thread another thread
 follows. Settings pick which of the three to send, and signing a device out ends its notifications.

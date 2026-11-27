@@ -56,7 +56,6 @@ pub struct HubCall {
 }
 
 pub struct SessionCtx {
-    pub browser_cdp: Option<String>,
     pub baseline: std::sync::Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
     pub hub_url: String,
     pub hub_token: String,

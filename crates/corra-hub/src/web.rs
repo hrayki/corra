@@ -59,7 +59,7 @@ pub async fn static_handler(uri: Uri) -> Response {
         )
             .into_response();
     }
-    let api = ["dist/", "git/", "runner", "auth/", "api/", "blob/", "app"];
+    let api = ["dist/", "git/", "runner", "auth/", "app"];
     if path.contains('.') || api.iter().any(|p| path.starts_with(p)) {
         return StatusCode::NOT_FOUND.into_response();
     }

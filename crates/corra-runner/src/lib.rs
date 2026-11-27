@@ -1,16 +1,12 @@
 pub mod agents;
-pub mod browser;
 pub mod files;
 pub mod git;
-mod image;
 pub mod kit;
-pub mod phone;
 #[cfg(target_os = "linux")]
 pub mod reaper;
 pub mod secrets;
 pub mod sync;
 pub mod term;
-pub mod tunnel;
 mod update;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -102,9 +98,6 @@ struct Runner {
     switch_at: Option<tokio::time::Instant>,
     took: std::collections::VecDeque<String>,
     connected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    browser: browser::Browser,
-    phone: phone::Phone,
-    tunnels: tunnel::Tunnels,
 }
 
 pub async fn run(cli: Options) -> Result<()> {
@@ -114,7 +107,6 @@ pub async fn run(cli: Options) -> Result<()> {
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
     let (hub_tx, mut hub_rx) = mpsc::unbounded_channel::<HubCall>();
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<RunnerMsg>();
-    let tunnels = tunnel::Tunnels::new(bg_tx.clone());
     let mut runner = Runner {
         sessions: HashMap::new(),
         outbox: Outbox::default(),
@@ -138,9 +130,6 @@ pub async fn run(cli: Options) -> Result<()> {
         switch_at: None,
         took: Default::default(),
         connected: cli.connected.clone(),
-        browser: browser::Browser::start(bg_tx.clone(), cli.sync),
-        phone: phone::Phone::new(bg_tx.clone(), tunnels.clone()),
-        tunnels,
         bg_tx,
     };
     let mut sync_tick = tokio::time::interval(Duration::from_secs(120));
@@ -528,53 +517,6 @@ impl Runner {
             HubMsg::TermInput { term, data } => self.terms.input(&term, &data),
             HubMsg::TermResize { term, cols, rows } => self.terms.resize(&term, cols, rows),
             HubMsg::TermClose { term } => self.terms.close(&term),
-            HubMsg::BrowserInput { method, params } => self.browser.input(method, params),
-            HubMsg::BrowserStop => self.browser.stop(),
-            HubMsg::PhoneInput { input } => self.phone.send(input),
-            HubMsg::PhoneStop => self.phone.stop(),
-            HubMsg::TunnelOpen { id, port } => self.tunnels.open(id, port),
-            HubMsg::TunnelData { id, data } => self.tunnels.data(&id, &data),
-            HubMsg::TunnelClose { id } => self.tunnels.close(&id),
-            HubMsg::Request {
-                id,
-                body: corra_proto::runner::RunnerRequest::Phone { action },
-            } => {
-                let (phone, out) = (self.phone.clone(), out.clone());
-                tokio::spawn(async move {
-                    let _ = out.send(match phone.handle(action).await {
-                        Ok(v) => RunnerMsg::Reply {
-                            id,
-                            ok: Some(v),
-                            err: None,
-                        },
-                        Err(e) => RunnerMsg::Reply {
-                            id,
-                            ok: None,
-                            err: Some(format!("{e:#}")),
-                        },
-                    });
-                });
-            }
-            HubMsg::Request {
-                id,
-                body: corra_proto::runner::RunnerRequest::BrowserOpen { width, height },
-            } => {
-                let (browser, out) = (self.browser.clone(), out.clone());
-                tokio::spawn(async move {
-                    let _ = out.send(match browser.open(width, height).await {
-                        Ok(v) => RunnerMsg::Reply {
-                            id,
-                            ok: Some(v),
-                            err: None,
-                        },
-                        Err(e) => RunnerMsg::Reply {
-                            id,
-                            ok: None,
-                            err: Some(format!("{e:#}")),
-                        },
-                    });
-                });
-            }
             HubMsg::Request {
                 id,
                 body:
@@ -751,8 +693,6 @@ impl Runner {
             status: ThreadStatus::Starting,
         });
         agents::spawn(SessionCtx {
-            browser_cdp: (self.sync.is_some() && browser::find_binary().is_some())
-                .then(|| format!("http://127.0.0.1:{}", browser::CDP_PORT)),
             baseline: self.sessions[&thread].baseline.clone(),
             hub_url: self.hub_url.clone(),
             hub_token: self.token.clone(),

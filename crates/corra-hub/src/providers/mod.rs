@@ -1,5 +1,3 @@
-mod agent37;
-pub mod digitalocean;
 mod existing;
 mod modal;
 
@@ -226,12 +224,8 @@ pub fn boot_command() -> Vec<String> {
 impl Providers {
     pub fn new(hub_url: String) -> Self {
         let mut by_name: HashMap<&'static str, Arc<dyn Provider>> = HashMap::new();
-        let all: Vec<Arc<dyn Provider>> = vec![
-            Arc::new(existing::Existing),
-            Arc::new(modal::Modal::new()),
-            Arc::new(agent37::Agent37),
-            Arc::new(digitalocean::DigitalOcean::new()),
-        ];
+        let all: Vec<Arc<dyn Provider>> =
+            vec![Arc::new(existing::Existing), Arc::new(modal::Modal::new())];
         for p in all {
             by_name.insert(p.name(), p);
         }

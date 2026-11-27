@@ -9,7 +9,8 @@ import ChevronUp from 'lucide-solid/icons/chevron-up'
 import Pin from 'lucide-solid/icons/pin'
 import FolderPlus from 'lucide-solid/icons/folder-plus'
 import SlidersHorizontal from 'lucide-solid/icons/sliders-horizontal'
-import { state, type ThreadX } from '../lib/store'
+import { state } from '../lib/store'
+import type { Thread } from '../proto/Thread'
 import { StatusMark, openContextMenu, statusWord } from './bits'
 import { threadActions } from './actions'
 import { ago } from '../lib/format'
@@ -42,13 +43,13 @@ export function Sidebar() {
     const needle = q().trim().toLowerCase()
     return Object.values(state.threads).filter((t) => !t.hidden_at && (!needle || t.title.toLowerCase().includes(needle)))
   })
-  const projectName = (t: ThreadX) => state.projects[t.project]?.name ?? 'Other'
+  const projectName = (t: Thread) => state.projects[t.project]?.name ?? 'Other'
   createEffect(() => knowThreads(Object.values(state.threads)))
   createEffect(() => {
     const t = current() ? state.threads[current()!] : undefined
     if (t && t.status === 'idle') markSeen(t.id, t.last_seq)
   })
-  const shown = (t: ThreadX) => shownStatus(t.status, unread(t), t.id === current())
+  const shown = (t: Thread) => shownStatus(t.status, unread(t), t.id === current())
   const pinned = createMemo(() =>
     threads()
       .filter((t) => t.pinned_at)
@@ -64,13 +65,13 @@ export function Sidebar() {
         const all = threads().filter((t) => projectName(t) === name)
         const open = ts.filter((t) => !t.settled_at)
         const here = new Set(open.map((t) => t.id))
-        const kids = new Map<string, ThreadX[]>()
+        const kids = new Map<string, Thread[]>()
         for (const t of open)
           if (t.started_by && here.has(t.started_by) && t.started_by !== t.id)
             kids.set(t.started_by, [...(kids.get(t.started_by) ?? []), t])
-        const latest = (t: ThreadX, seen = new Set<string>()): number =>
+        const latest = (t: Thread, seen = new Set<string>()): number =>
           seen.has(t.id) ? t.updated_at : Math.max(t.updated_at, ...(kids.get(t.id) ?? []).map((k) => latest(k, new Set([...seen, t.id]))))
-        const keep = (t: ThreadX, seen = new Set<string>()): boolean =>
+        const keep = (t: Thread, seen = new Set<string>()): boolean =>
           !seen.has(t.id) &&
           (needsYou(shown(t)) || t.id === current() || (kids.get(t.id) ?? []).some((k) => keep(k, new Set([...seen, t.id]))))
         return {
@@ -93,7 +94,7 @@ export function Sidebar() {
       .sort((a, b) => b.updated_at - a.updated_at),
   )
   const hubProject = (name: string) => Object.values(state.projects).find((p) => p.name === name)
-  const empty = () => state.loaded.hub && Object.keys(state.projects).length === 0 && threads().length === 0
+  const empty = () => state.loaded && Object.keys(state.projects).length === 0 && threads().length === 0
   return (
     <aside class="flex h-full w-full flex-col bg-panel">
       <div class="flex h-[52px] shrink-0 items-center gap-1 px-2.5">
@@ -215,13 +216,12 @@ export function Sidebar() {
 }
 
 function HubBadge() {
-  const label = () => (state.offline ? 'Hub offline' : state.conn.hub === 'open' ? '' : 'Reconnecting')
-  const up = () => state.conn.hub === 'open'
+  const up = () => state.conn === 'open'
   return (
-    <Show when={label()}>
+    <Show when={!up()}>
       <a href="#/settings" class="flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12px] text-faint hover:text-mute">
-        <span class="size-1.5 rounded-full" classList={{ 'bg-ok': up() && !state.offline, 'bg-warn': !up() || !!state.offline }} />
-        {label()}
+        <span class="size-1.5 rounded-full bg-warn" />
+        Reconnecting
       </a>
     </Show>
   )
@@ -306,7 +306,7 @@ const FLAG: Partial<Record<Shown, string>> = {
   done: 'A thread here is done',
 }
 
-function Tree(props: { t: ThreadX; kids: Map<string, ThreadX[]>; current?: string; depth: number }) {
+function Tree(props: { t: Thread; kids: Map<string, Thread[]>; current?: string; depth: number }) {
   return (
     <>
       <Card t={props.t} active={props.current === props.t.id} depth={props.depth} />
@@ -319,7 +319,7 @@ function Tree(props: { t: ThreadX; kids: Map<string, ThreadX[]>; current?: strin
   )
 }
 
-function Card(props: { t: ThreadX; active: boolean; project?: string; depth?: number }) {
+function Card(props: { t: Thread; active: boolean; project?: string; depth?: number }) {
   const shown = () => shownStatus(props.t.status, unread(props.t), props.active)
   const word = () => (shown() === 'error' && limitedNow(state.usage) ? 'Limited' : statusWord[shown()])
   const strong = () => shown() === 'waiting' || shown() === 'done'

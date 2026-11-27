@@ -1,6 +1,6 @@
 # Corra
 
-<img src="apps/app/logo/mark.svg" width="56" alt="">
+<img src="web/public/favicon.svg" width="56" alt="">
 
 A very personal agent development environment, built around the features I use. It's public in case someone works
 the way I do and finds it useful.
@@ -8,21 +8,19 @@ the way I do and finds it useful.
 I recommend you **don't** use it. There's no support promise: I keep it up to date as I use it and add what I want.
 You can open an issue or a pull request, but I'll likely pass on anything I don't need myself.
 
-Corra is a hub in the cloud and an app for the desktop, Android and the browser. In the app I pick repos from my GitHub,
-and the hub starts a machine on one of my cloud providers, clones the repos onto it, sets it up from my setup repo and
-runs Claude Code or Google's Antigravity there. Corra isn't a harness itself.
+Corra is a hub in the cloud and an installable web app (PWA). In the app I pick repos from my GitHub, and the hub
+starts a Modal VM, clones the repos onto it, sets it up from my setup repo and runs Claude Code or Google's Antigravity
+there. Corra isn't a harness itself.
 
 Corra drives Claude Code through interfaces that aren't documented, so any Claude Code update can break it.
 
-The hub holds the keys for GitHub, the machine providers, backups and the Android test phone, and does the GitHub work
-agents need as tools: pull requests, checks, issues and merging. Machines reach GitHub only through the hub. A machine
-does hold some keys: the Claude Code token, the env vars its project uses (make those test keys with spending caps),
-and its own hub token, which sits in each repo's `.git/config`. A manager project is the exception: its
-machine gets the hub's own keys and every repo. Pushing to the default branch or a tag, and merging, wait for my yes
-unless the project allows them.
+The hub holds the keys for GitHub and Modal, and does the GitHub work agents need as tools: pull requests, checks,
+issues and merging. Machines reach GitHub only through the hub. A machine does hold some keys: the Claude Code token,
+the env vars its project uses (make those test keys with spending caps), and its own hub token, which sits in each
+repo's `.git/config`. A manager project is the exception: its machine gets the hub's own keys and every repo. Pushing
+to the default branch or a tag, and merging, wait for my yes unless the project allows them.
 
-Machines sleep when they're idle, each provider in its own way, with their whole disk kept, and wake with the next
-message.
+Machines sleep when they're idle, with their whole disk snapshotted, and wake with the next message.
 
 Corra was built by AI with close to no supervision, and so were most of these docs.
 
@@ -69,11 +67,10 @@ Open the address, sign in with the key, and in Settings add:
 - `gemini.api_key`, optional: without it each machine signs in to Antigravity with Google.
 - `github.token`: fine-grained, for your repos, with Contents, Pull requests and Issues read and write, Actions and
   Checks read, and no Workflows.
-- `modal.token_id` and `modal.token_secret`, or `agent37.key`, for machines. `digitalocean.token` adds the Android test
-  phone.
+- `modal.token_id` and `modal.token_secret` for Modal machines.
 - `railway.token`, `cloudflare.token` and `cloudflare.account_id` if a manager project needs them; only those
   projects get them.
-- Your setup repo, the env vars your projects need, a bucket for backups, and how long to keep hidden threads.
+- Your setup repo, the env vars your projects need, and how long to keep hidden threads.
 - Notifications, in each browser that should get them.
 
 Settings › Version shows which version runs and, when there's a newer release, an Update button. The hub restarts into
@@ -82,28 +79,12 @@ rolled back automatically, and Settings says why. Roll back, there, returns to t
 can't open the database the newer one changed. A change to the image itself, the launcher or Litestream, still needs a
 deploy.
 
-## The apps
-
-The desktop app needs Claude Code, signed in, and builds on Linux with Rust, pnpm and Tauri's [system
-packages](https://tauri.app/start/prerequisites/):
-
-    cd web && pnpm install && pnpm build
-    cd ../apps/app && pnpm install && pnpm tauri build
-
-On first start it asks for the hub's address and key, or a pairing code, and adds the laptop to the hub as a machine.
-While the hub can't be reached, it carries on with a built-in hub and hands those threads to the hub when it's back. It
-keeps its own data in `CORRA_LOCAL_DATA`, by default `~/.local/share/corra`.
-
-The Android app is `pnpm tauri android build --apk`, signed with the `keystore.properties` file that
-`CORRA_ANDROID_SIGNING` points to. It signs in with the key, or with a pairing code from the hub's Settings, whose QR
-code holds the address too.
-
 ## A machine of your own
 
 Any Linux computer can be a machine: `corra-hub machine add NAME --token-file FILE` on the hub, then run
 `corra-runner` there with `CORRA_HUB` set to the hub's address and `CORRA_TOKEN_FILE` (or `CORRA_TOKEN`) to its
 token. The runner also reads `CORRA_PARK_MINUTES` (how long an idle Claude Code process is kept, default 30) and, where
-the defaults don't fit, `CORRA_CLAUDE_BIN`, `CORRA_CHROMIUM` and `CORRA_ADB`.
+the default doesn't fit, `CORRA_CLAUDE_BIN`.
 
 ## The setup repo
 
@@ -133,7 +114,6 @@ A setup runs on a project's first machine and again after it changes, so it has 
     scripts/build                                       # everything, as static binaries
     scripts/release DIR                                 # a release's files, as CI publishes them
     cargo run -p corra-hub -- serve                     # a hub on 127.0.0.1:7810
-    cargo run -p corra-local                            # the desktop app's core, without its window
     cd web && pnpm dev                                  # the app on :7820, against the hub at CORRA_HUB
     cargo test --workspace                              # the tests
     rm -rf web/src/proto && cargo test -p corra-proto   # the app's types, after changing the protocol

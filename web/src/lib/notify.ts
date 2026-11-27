@@ -1,18 +1,18 @@
 import { createEffect, createRoot } from 'solid-js'
-import { callOn, state } from './store'
+import { call, state } from './store'
 
 const focused = () => document.visibilityState === 'visible' && document.hasFocus()
 let reported: boolean | null = null
 
 export function reportPresence(force = false) {
-  if (state.conn.hub !== 'open') {
+  if (state.conn !== 'open') {
     reported = null
     return
   }
   const f = focused()
   if (!force && f === reported) return
   reported = f
-  callOn('hub', { op: 'presence', focused: f }).catch(() => {
+  call({ op: 'presence', focused: f }).catch(() => {
     reported = null
   })
 }
@@ -23,7 +23,7 @@ document.addEventListener('visibilitychange', () => reportPresence())
 setInterval(() => reportPresence(focused()), 60_000)
 createRoot(() =>
   createEffect(() => {
-    if (state.conn.hub !== 'open') return
+    if (state.conn !== 'open') return
     reported = null
     reportPresence()
     void refreshPush().catch(() => {})
@@ -58,14 +58,14 @@ async function register(key: string) {
   }
   sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want })
   const j = sub.toJSON()
-  await callOn('hub', { op: 'push_subscribe', endpoint: j.endpoint!, p256dh: j.keys!.p256dh, auth: j.keys!.auth })
+  await call({ op: 'push_subscribe', endpoint: j.endpoint!, p256dh: j.keys!.p256dh, auth: j.keys!.auth })
 }
 
 export async function pushState(): Promise<PushState> {
   if (!pushSupported()) return 'unsupported'
   if (Notification.permission === 'denied') return 'blocked'
   if (Notification.permission !== 'granted') return 'off'
-  const { on } = await callOn<{ on: boolean }>('hub', { op: 'push_key' })
+  const { on } = await call<{ on: boolean }>({ op: 'push_key' })
   const reg = await navigator.serviceWorker.getRegistration()
   const sub = await reg?.pushManager.getSubscription()
   return on && sub ? 'on' : 'off'
@@ -73,7 +73,7 @@ export async function pushState(): Promise<PushState> {
 
 export async function turnOn() {
   if ((await Notification.requestPermission()) !== 'granted') throw new Error('The browser said no to notifications.')
-  const { key } = await callOn<{ key: string }>('hub', { op: 'push_key' })
+  const { key } = await call<{ key: string }>({ op: 'push_key' })
   await register(key)
 }
 
@@ -81,14 +81,14 @@ export async function turnOff() {
   const reg = await navigator.serviceWorker.getRegistration()
   const sub = await reg?.pushManager.getSubscription()
   await sub?.unsubscribe()
-  await callOn('hub', { op: 'push_unsubscribe' })
+  await call({ op: 'push_unsubscribe' })
 }
 
 export async function refreshPush() {
   if (!pushSupported() || Notification.permission !== 'granted') return
   const reg = await navigator.serviceWorker.getRegistration()
   if (!(await reg?.pushManager.getSubscription())) return
-  const { key } = await callOn<{ key: string }>('hub', { op: 'push_key' })
+  const { key } = await call<{ key: string }>({ op: 'push_key' })
   await register(key)
 }
 

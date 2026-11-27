@@ -569,9 +569,6 @@ async fn drive(ctx: &mut SessionCtx) -> Result<()> {
             "env": [],
         }));
     }
-    if let Some(cdp) = ctx.browser_cdp.as_ref().filter(|_| ctx.spec.browser) {
-        servers.push(json!({ "name": "browser", "command": "npx", "args": ["-y", "@playwright/mcp@latest", "--cdp-endpoint", cdp], "env": [] }));
-    }
     let mut acp = Acp::spawn(&bin, ctx)?;
     let result = talk(ctx, &mut acp, &bin, servers, turn).await;
     acp.kill().await;
@@ -1820,7 +1817,6 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (hub_tx, _hub_rx) = mpsc::unbounded_channel();
         let mut ctx = SessionCtx {
-            browser_cdp: None,
             baseline: Default::default(),
             hub_url: String::new(),
             hub_token: String::new(),
@@ -1840,7 +1836,6 @@ mod tests {
                 moved_from: None,
                 resume_at: None,
                 fork_of: None,
-                browser: false,
             },
             cwd: "/tmp".into(),
             extra_dirs: vec![],

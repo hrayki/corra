@@ -203,58 +203,6 @@ async fn handle_runner_msg(
 ) -> Result<()> {
     match msg {
         RunnerMsg::Hello { .. } => {}
-        RunnerMsg::TunnelOpen { id, port } => {
-            let is_phone = crate::phone::is_machine(hub, machine);
-            let target = hub.phone.forwards.lock().unwrap().get(&port).copied();
-            match target.filter(|t| is_phone && hub.runner_connected(*t)) {
-                Some(t) => {
-                    hub.phone
-                        .tunnels
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), (machine, t));
-                    hub.touch_machine(t);
-                    let _ = hub.send_runner_pub(t, HubMsg::TunnelOpen { id, port });
-                }
-                None => {
-                    let _ = tx.send(HubMsg::TunnelClose { id });
-                }
-            }
-        }
-        RunnerMsg::TunnelData { id, data } => {
-            let other = hub
-                .phone
-                .tunnels
-                .lock()
-                .unwrap()
-                .get(&id)
-                .and_then(|(a, b)| {
-                    if *a == machine {
-                        Some(*b)
-                    } else if *b == machine {
-                        Some(*a)
-                    } else {
-                        None
-                    }
-                });
-            if let Some(o) = other {
-                hub.touch_machine(machine);
-                let _ = hub.send_runner_pub(o, HubMsg::TunnelData { id, data });
-            }
-        }
-        RunnerMsg::TunnelClose { id } => {
-            let pair = {
-                let mut t = hub.phone.tunnels.lock().unwrap();
-                match t.get(&id) {
-                    Some((a, b)) if *a == machine || *b == machine => t.remove(&id),
-                    _ => None,
-                }
-            };
-            if let Some((a, b)) = pair {
-                let o = if a == machine { b } else { a };
-                let _ = hub.send_runner_pub(o, HubMsg::TunnelClose { id });
-            }
-        }
         RunnerMsg::Event {
             thread,
             seq,
@@ -323,47 +271,6 @@ async fn handle_runner_msg(
                     HubToApp::TermExit { thread, term },
                 ));
             }
-        }
-        RunnerMsg::BrowserFrame {
-            data,
-            width,
-            height,
-            url,
-            title,
-        } => {
-            hub.touch_machine(machine);
-            hub.publish(Outbound::Machine(
-                machine,
-                HubToApp::BrowserFrame {
-                    machine,
-                    data,
-                    width,
-                    height,
-                    url,
-                    title,
-                },
-            ));
-        }
-        RunnerMsg::PhoneVideo { width, height } => {
-            hub.publish(Outbound::Machine(
-                machine,
-                HubToApp::PhoneVideo {
-                    machine,
-                    width,
-                    height,
-                },
-            ));
-        }
-        RunnerMsg::PhoneFrame { data, config, key } => {
-            hub.publish(Outbound::Machine(
-                machine,
-                HubToApp::PhoneFrame {
-                    machine,
-                    data,
-                    config,
-                    key,
-                },
-            ));
         }
         RunnerMsg::Took { delivery, taken } => hub.took(machine, delivery, taken),
         RunnerMsg::ThreadEnded { thread, error } => {
@@ -470,9 +377,6 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let mut sub = hub.apps.subscribe();
     let subs: Arc<std::sync::Mutex<HashSet<ThreadId>>> = Default::default();
-    let browsers: Arc<std::sync::Mutex<HashSet<MachineId>>> = Default::default();
-    let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let w_queued = queued.clone();
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(Duration::from_secs(25));
@@ -480,13 +384,7 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
             tokio::select! {
                 m = rx.recv() => {
                     let Some(m) = m else { break };
-                    let sent = sink.send(Message::Text(m.into())).await;
-                    let _ = w_queued.try_update(
-                        std::sync::atomic::Ordering::Relaxed,
-                        std::sync::atomic::Ordering::Relaxed,
-                        |v| Some(v.saturating_sub(1)),
-                    );
-                    if sent.is_err() { break }
+                    if sink.send(Message::Text(m.into())).await.is_err() { break }
                 }
                 _ = ping.tick() => {
                     if sink.send(Message::Ping(Default::default())).await.is_err() { break }
@@ -496,12 +394,9 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
     });
 
     let fwd_tx = tx.clone();
-    let fwd_queued = queued.clone();
     let fwd_subs = subs.clone();
-    let fwd_browsers = browsers.clone();
     let fwd_client = client.clone();
     let forwarder = tokio::spawn(async move {
-        let mut skipping = false;
         loop {
             match sub.recv().await {
                 Ok(out) => {
@@ -519,32 +414,11 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
                             }
                             m
                         }
-                        Outbound::Machine(mid, m) => {
-                            if !fwd_browsers.lock().unwrap().contains(mid) {
-                                continue;
-                            }
-                            let behind = fwd_queued.load(std::sync::atomic::Ordering::Relaxed) > 32;
-                            match m {
-                                HubToApp::BrowserFrame { .. } if behind => continue,
-                                HubToApp::PhoneFrame {
-                                    config: false,
-                                    key: false,
-                                    ..
-                                } if behind || skipping => {
-                                    skipping = true;
-                                    continue;
-                                }
-                                HubToApp::PhoneFrame { key: true, .. } => skipping = false,
-                                _ => {}
-                            }
-                            m
-                        }
                     };
-                    if let Ok(s) = serde_json::to_string(msg) {
-                        fwd_queued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if fwd_tx.send(s).is_err() {
-                            break;
-                        }
+                    if let Ok(s) = serde_json::to_string(msg)
+                        && fwd_tx.send(s).is_err()
+                    {
+                        break;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => break,
@@ -576,22 +450,20 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
             let hub = hub.clone();
             let tx2 = tx.clone();
             let subs = subs.clone();
-            let browsers = browsers.clone();
             let client = client.clone();
             tokio::spawn(async move {
-                let reply =
-                    match handle_app_call(&hub, &tx2, &subs, &browsers, &client, req.body).await {
-                        Ok(v) => HubToApp::Reply {
-                            id,
-                            ok: Some(v),
-                            err: None,
-                        },
-                        Err(e) => HubToApp::Reply {
-                            id,
-                            ok: None,
-                            err: Some(format!("{e:#}")),
-                        },
-                    };
+                let reply = match handle_app_call(&hub, &tx2, &subs, &client, req.body).await {
+                    Ok(v) => HubToApp::Reply {
+                        id,
+                        ok: Some(v),
+                        err: None,
+                    },
+                    Err(e) => HubToApp::Reply {
+                        id,
+                        ok: None,
+                        err: Some(format!("{e:#}")),
+                    },
+                };
                 send_json(&tx2, &reply);
             });
             if forwarder.is_finished() {
@@ -605,9 +477,6 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
     writer.abort();
     for t in subs.lock().unwrap().drain() {
         hub.watch(t, false);
-    }
-    for m in browsers.lock().unwrap().drain() {
-        hub.browser_unwatch(m);
     }
     crate::notify::set_presence(&hub, client.id, false);
     result
@@ -623,7 +492,6 @@ async fn handle_app_call(
     hub: &HubRef,
     tx: &mpsc::UnboundedSender<String>,
     subs: &Arc<std::sync::Mutex<HashSet<ThreadId>>>,
-    browsers: &Arc<std::sync::Mutex<HashSet<MachineId>>>,
     client: &Client,
     call: AppCall,
 ) -> Result<Value> {
@@ -652,80 +520,6 @@ async fn handle_app_call(
             crate::notify::test(hub, &client.session);
             Value::Null
         }
-        AppCall::BrowserOpen {
-            thread,
-            width,
-            height,
-        } => {
-            let (_, m) = hub.machine_for_thread(thread).await?;
-            let v = hub
-                .runner_request(m, RunnerRequest::BrowserOpen { width, height })
-                .await?;
-            if browsers.lock().unwrap().insert(m) {
-                *hub.browser_watch.lock().unwrap().entry(m).or_insert(0) += 1;
-            }
-            v
-        }
-        AppCall::BrowserInput {
-            thread,
-            method,
-            params,
-        } => {
-            let (_, m) = hub.machine_for_thread(thread).await?;
-            hub.send_runner_pub(m, HubMsg::BrowserInput { method, params })?;
-            Value::Null
-        }
-        AppCall::BrowserClose { thread } => {
-            if let Ok((_, m)) = hub.machine_for_thread(thread).await
-                && browsers.lock().unwrap().remove(&m)
-            {
-                hub.browser_unwatch(m);
-            }
-            Value::Null
-        }
-        AppCall::PhoneUp => {
-            if crate::phone::host(hub).is_none() {
-                return Err(anyhow!(
-                    "the phone is off: pick where it runs in Settings, under Tools"
-                ));
-            }
-            let hub = hub.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::phone::up(&hub).await {
-                    tracing::warn!("the phone didn't start: {e:#}");
-                }
-            });
-            Value::Null
-        }
-        AppCall::PhoneDown => {
-            crate::phone::down(hub).await?;
-            Value::Null
-        }
-        AppCall::PhoneOpen => {
-            let m = crate::phone::machine(hub)
-                .map(|m| m.id)
-                .ok_or_else(|| anyhow!("no phone is running"))?;
-            if browsers.lock().unwrap().insert(m) {
-                *hub.browser_watch.lock().unwrap().entry(m).or_insert(0) += 1;
-            }
-            crate::phone::act(hub, PhoneOp::Stream).await?
-        }
-        AppCall::PhoneInput { input } => {
-            if let Some(m) = crate::phone::machine(hub) {
-                hub.touch_machine(m.id);
-                hub.send_runner_pub(m.id, HubMsg::PhoneInput { input })?;
-            }
-            Value::Null
-        }
-        AppCall::PhoneClose => {
-            if let Some(m) = crate::phone::machine(hub)
-                && browsers.lock().unwrap().remove(&m.id)
-            {
-                hub.browser_unwatch(m.id);
-            }
-            Value::Null
-        }
-        AppCall::Phone { action } => crate::phone::act(hub, action).await?,
         AppCall::Subscribe {
             thread,
             after_seq,
@@ -837,15 +631,6 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
         }
         AppCall::Subscribe { .. }
         | AppCall::Unsubscribe { .. }
-        | AppCall::BrowserOpen { .. }
-        | AppCall::BrowserInput { .. }
-        | AppCall::BrowserClose { .. }
-        | AppCall::PhoneUp
-        | AppCall::PhoneDown
-        | AppCall::PhoneOpen
-        | AppCall::PhoneInput { .. }
-        | AppCall::PhoneClose
-        | AppCall::Phone { .. }
         | AppCall::Presence { .. }
         | AppCall::PushKey
         | AppCall::PushSubscribe { .. }
@@ -946,15 +731,10 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             settings,
             queue,
             client_id,
-            compact,
         } => {
-            let queued = if compact == Some(true) {
-                crate::schedule::compact_then_send(hub, thread, input, settings, client_id).await?;
-                true
-            } else {
-                hub.send_once(thread, input, settings, queue, client_id)
-                    .await?
-            };
+            let queued = hub
+                .send_once(thread, input, settings, queue, client_id)
+                .await?;
             json!({ "queued": queued })
         }
         AppCall::DeleteThread { thread } => {
@@ -1054,8 +834,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.publish_machine(machine);
             Value::Null
         }
-        AppCall::BackupNow => bail_local(hub, crate::backup::run(hub, &hub.data).await)?,
-        AppCall::BackupStatus => crate::backup::status(hub),
+        AppCall::DbStats => json!({ "db_bytes": hub.db.size_bytes().ok() }),
         AppCall::HubVersion { check } => {
             serde_json::to_value(crate::update::status(hub, check).await)?
         }
@@ -1099,15 +878,6 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.secrets.delete(&name)?;
             Value::Null
         }
-        AppCall::PhoneHost => json!({
-            "host": crate::phone::host(hub),
-            "machine": crate::phone::machine(hub).map(|m| m.id),
-        }),
-        AppCall::SetPhoneHost { host } => {
-            serde_json::to_value(crate::phone::switch(hub, host).await?)?
-        }
-        AppCall::Leftovers => serde_json::to_value(crate::leftovers::list(hub))?,
-        AppCall::RetryLeftovers => serde_json::to_value(crate::leftovers::retry(hub).await)?,
         AppCall::ListProviders => serde_json::to_value(hub.providers.info(hub))?,
         AppCall::ListTools => serde_json::to_value(crate::tools::info(hub))?,
         AppCall::ListSecrets => json!(
@@ -1287,15 +1057,5 @@ fn resolve(cwd: &str, path: &str) -> String {
         cwd.to_string()
     } else {
         format!("{}/{}", cwd.trim_end_matches('/'), path)
-    }
-}
-
-fn bail_local(hub: &HubRef, r: Result<Value>) -> Result<Value> {
-    match r {
-        Ok(v) => {
-            let _ = hub.db.kv_delete("backup_error");
-            Ok(v)
-        }
-        Err(e) => Err(e),
     }
 }

@@ -75,33 +75,15 @@ pub async fn handle(
         RunnerRequest::ImportSession { session, cwd } => {
             tokio::task::spawn_blocking(move || import_session(&session, &cwd)).await?
         }
-        RunnerRequest::Upload { path, url } => {
-            let path = expand(&path);
-            let file = tokio::fs::File::open(&path)
-                .await
-                .with_context(|| format!("opening {}", path.display()))?;
-            let size = file.metadata().await?.len();
-            reqwest::Client::new()
-                .put(&url)
-                .header("content-length", size)
-                .body(reqwest::Body::wrap_stream(
-                    tokio_util::io::ReaderStream::new(file),
-                ))
-                .send()
-                .await?
-                .error_for_status()?;
-            Ok(json!({ "bytes": size }))
-        }
         RunnerRequest::Secret { name, value } => {
             let dir = crate::secrets::dir();
             crate::secrets::sweep(&dir, crate::secrets::KEPT_FOR);
             let path = crate::secrets::write(&dir, &name, &value)?;
             Ok(json!({ "path": path.to_string_lossy() }))
         }
-        RunnerRequest::TermOpen { .. }
-        | RunnerRequest::TermAttach { .. }
-        | RunnerRequest::BrowserOpen { .. }
-        | RunnerRequest::Phone { .. } => bail!("handled elsewhere"),
+        RunnerRequest::TermOpen { .. } | RunnerRequest::TermAttach { .. } => {
+            bail!("handled elsewhere")
+        }
     }
 }
 

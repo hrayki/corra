@@ -16,7 +16,6 @@ use crate::providers::Providers;
 pub enum Outbound {
     All(HubToApp),
     Thread(ThreadId, HubToApp),
-    Machine(MachineId, HubToApp),
     Session(String, HubToApp),
 }
 
@@ -58,8 +57,6 @@ pub struct Hub {
     pub activity: Mutex<HashMap<MachineId, i64>>,
     pub watching: Mutex<HashMap<ThreadId, usize>>,
     pub terms: Mutex<HashMap<String, (ThreadId, MachineId)>>,
-    pub browser_watch: Mutex<HashMap<MachineId, usize>>,
-    pub phone: crate::phone::PhoneState,
     pub quiet_stops: Mutex<HashMap<ThreadId, std::time::Instant>>,
     pub delivering: Mutex<HashMap<ThreadId, usize>>,
     pub presence: Mutex<HashMap<u64, std::time::Instant>>,
@@ -74,29 +71,10 @@ pub const TRUSTED_ENV: &[(&str, &str)] = &[
     ("github.token", "GH_TOKEN"),
     ("modal.token_id", "MODAL_TOKEN_ID"),
     ("modal.token_secret", "MODAL_TOKEN_SECRET"),
-    ("digitalocean.token", "DIGITALOCEAN_ACCESS_TOKEN"),
-    ("agent37.key", "AGENT37_API_KEY"),
     ("railway.token", "RAILWAY_API_TOKEN"),
     ("cloudflare.token", "CLOUDFLARE_API_TOKEN"),
     ("cloudflare.account_id", "CLOUDFLARE_ACCOUNT_ID"),
 ];
-
-#[derive(serde::Deserialize)]
-pub struct ImportProject {
-    pub name: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub settings: AgentSettings,
-}
-
-#[derive(serde::Deserialize)]
-pub struct ImportThread {
-    pub thread: Thread,
-    pub project: ImportProject,
-    #[serde(default)]
-    pub events: Vec<StoredEvent>,
-}
 
 #[derive(Default)]
 pub struct NewProject {
@@ -176,8 +154,6 @@ impl Hub {
             activity: Mutex::new(HashMap::new()),
             watching: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
-            browser_watch: Mutex::new(HashMap::new()),
-            phone: Default::default(),
             next_id: AtomicU64::new(1),
         })
     }
@@ -600,37 +576,11 @@ impl Hub {
                 settings: None,
                 queue: false,
                 client_id: None,
-                compact: None,
             };
             if let Err(e) = crate::ws::exec_call(&hub, call).await {
                 tracing::warn!(%thread, %follower, "couldn't tell the follower: {e:#}");
             }
         });
-    }
-
-    pub fn browser_unwatch(&self, machine: MachineId) {
-        let stop = {
-            let mut w = self.browser_watch.lock().unwrap();
-            let n = w.entry(machine).or_insert(0);
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                w.remove(&machine);
-                true
-            } else {
-                false
-            }
-        };
-        if stop {
-            let phone = crate::phone::is_machine(self, machine);
-            let _ = self.send_runner(
-                machine,
-                if phone {
-                    HubMsg::PhoneStop
-                } else {
-                    HubMsg::BrowserStop
-                },
-            );
-        }
     }
 
     pub fn touch_machine(&self, machine: MachineId) {
@@ -703,11 +653,6 @@ impl Hub {
                 "continue_at".into(),
                 crate::schedule::continue_time(at).into(),
             );
-        }
-        if let Some(c) = crate::schedule::cache_use(self, thread) {
-            status
-                .get_or_insert_default()
-                .insert("cache".into(), crate::schedule::cache_status(self, &c));
         }
         status.map(Value::Object)
     }
@@ -1103,8 +1048,6 @@ impl Hub {
         let has = |k: &str| self.secrets.get(k).ok().flatten().is_some();
         if has("modal.token_id") {
             "modal".into()
-        } else if has("agent37.key") {
-            "agent37".into()
         } else {
             self.providers.default_name().to_string()
         }
@@ -1514,8 +1457,7 @@ impl Hub {
             }
             env
         };
-        let browser = p.tools.iter().any(|t| t == "browser");
-        let mark = crate::follow::spec_mark(&tools, &agent_env, browser);
+        let mark = crate::follow::spec_mark(&tools, &agent_env);
         let mut live = self.thread_live(machine, thread);
         let idle = matches!(t.status, ThreadStatus::Idle | ThreadStatus::Error);
         if live && idle && self.thread_kv(thread, "spec").as_deref() != Some(mark.as_str()) {
@@ -1565,7 +1507,6 @@ impl Hub {
                     .thread_kv(thread, "fork_of")
                     .and_then(|s| serde_json::from_str(&s).ok()),
                 resume_at: self.take_thread_kv(thread, "resume_at"),
-                browser,
             };
             self.send_runner(
                 machine,
@@ -1836,86 +1777,6 @@ impl Hub {
             let _ = self.db.kv_delete(&k);
         }
         v
-    }
-
-    pub fn import_threads(&self, machine: MachineId, batch: Vec<ImportThread>) -> Result<usize> {
-        let mut imported = 0;
-        for item in batch {
-            let mut t = item.thread;
-            if let Some(existing) = self.db.thread(t.id)?
-                && existing.machine != Some(machine)
-            {
-                continue;
-            }
-            let projects = self.db.projects()?;
-            let mine = |p: &&Project| p.default_machine == Some(machine);
-            let folder =
-                |p: &Option<String>| p.as_deref().map(|x| x.trim_end_matches('/').to_string());
-            let p = match match folder(&item.project.path) {
-                Some(path) => projects
-                    .iter()
-                    .filter(mine)
-                    .find(|p| folder(&p.path).as_deref() == Some(path.as_str())),
-                None => projects
-                    .iter()
-                    .filter(mine)
-                    .find(|p| p.name == item.project.name),
-            } {
-                Some(p) => p.clone(),
-                None => {
-                    let mut name = item.project.name.clone();
-                    let mut n = 2;
-                    while projects.iter().any(|p| p.name == name) {
-                        name = format!("{}-{n}", item.project.name);
-                        n += 1;
-                    }
-                    let p = Project {
-                        id: new_id(),
-                        name,
-                        repos: vec![],
-                        default_machine: Some(machine),
-                        provider: "existing".into(),
-                        kind: None,
-                        size: "existing".into(),
-                        settings: item.project.settings.clone(),
-                        path: item.project.path.clone(),
-                        setup: None,
-                        env: vec![],
-                        tools: default_tools(),
-                        allow_main: false,
-                        trusted: false,
-                        created_at: now_ms(),
-                    };
-                    self.db.insert_project(&p)?;
-                    self.publish_project(&p);
-                    p
-                }
-            };
-            t.project = p.id;
-            t.machine = Some(machine);
-            if matches!(
-                t.status,
-                ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting
-            ) {
-                t.status = ThreadStatus::Idle;
-            }
-            self.db.upsert_imported_thread(&t)?;
-            let fresh = self.db.insert_imported_events(t.id, &item.events)?;
-            if let Some(stored) = self.db.thread(t.id)? {
-                self.publish_thread(&stored);
-            }
-            if !fresh.is_empty() {
-                self.publish(Outbound::Thread(
-                    t.id,
-                    HubToApp::Events {
-                        thread: t.id,
-                        events: fresh,
-                    },
-                ));
-            }
-            imported += 1;
-        }
-        Ok(imported)
     }
 
     pub fn retention_days(&self) -> Option<i64> {

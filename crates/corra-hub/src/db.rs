@@ -530,36 +530,6 @@ impl Db {
         })
     }
 
-    pub fn machine_by_install(&self, install_id: &str) -> Result<Option<MachineId>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT id FROM machines WHERE install_id = ?1 AND status != 'destroyed'",
-                [install_id],
-                |r| Ok(uuid(r.get(0)?)),
-            )
-            .optional()
-        })
-    }
-
-    pub fn registered_machines(&self) -> Result<Vec<MachineId>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT id FROM machines WHERE install_id IS NOT NULL AND status != 'destroyed'",
-            )?;
-            st.query_map([], |r| Ok(uuid(r.get(0)?)))?.collect()
-        })
-    }
-
-    pub fn set_machine_install(&self, id: MachineId, install_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE machines SET install_id = ?2 WHERE id = ?1",
-                params![id.to_string(), install_id],
-            )
-            .map(|_| ())
-        })
-    }
-
     pub fn machine_sleep_ref(&self, id: MachineId) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(

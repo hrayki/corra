@@ -220,7 +220,7 @@ pub struct Queued {
 }
 
 pub fn default_tools() -> Vec<String> {
-    vec!["browser".into(), "phone".into()]
+    vec![]
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -339,12 +339,6 @@ pub struct StartSpec {
     pub resume_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_of: Option<ForkSource>,
-    #[serde(default = "yes")]
-    pub browser: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -396,86 +390,6 @@ pub fn glob_match(pattern: &str, s: &str) -> bool {
         }
     }
     true
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "do", rename_all = "snake_case")]
-#[ts(export)]
-pub enum PhoneOp {
-    Setup,
-    Boot,
-    Stream,
-    Shot,
-    Ui,
-    Tap {
-        x: u32,
-        y: u32,
-    },
-    TapText {
-        text: String,
-        #[serde(default)]
-        index: u32,
-    },
-    Swipe {
-        x1: u32,
-        y1: u32,
-        x2: u32,
-        y2: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        ms: Option<u32>,
-    },
-    Text {
-        text: String,
-    },
-    Key {
-        key: String,
-    },
-    Shell {
-        command: String,
-    },
-    Install {
-        urls: Vec<String>,
-    },
-    Forward {
-        port: u16,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[ts(export)]
-pub enum PhoneInput {
-    Touch {
-        action: TouchAction,
-        x: i32,
-        y: i32,
-        width: u16,
-        height: u16,
-    },
-    Scroll {
-        x: i32,
-        y: i32,
-        width: u16,
-        height: u16,
-        dx: f32,
-        dy: f32,
-    },
-    Text {
-        text: String,
-    },
-    Key {
-        key: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export)]
-pub enum TouchAction {
-    Down,
-    Move,
-    Up,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -534,34 +448,6 @@ pub struct ToolInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub missing: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct PhoneHost {
-    pub provider: String,
-    pub kind: String,
-    pub size: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct Leftover {
-    pub id: String,
-    pub what: String,
-    pub provider: String,
-    pub thing: LeftoverThing,
-    pub reference: String,
-    pub error: String,
-    pub at: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export)]
-pub enum LeftoverThing {
-    Machine,
-    Image,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

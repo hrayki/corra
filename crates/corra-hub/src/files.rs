@@ -168,21 +168,3 @@ pub async fn runner_binary(State(s): State<AppState>, headers: HeaderMap) -> Res
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-
-pub async fn import(
-    State(s): State<AppState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    let Some(m) = machine_of(&s, &headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let batch: Vec<crate::hub::ImportThread> = match serde_json::from_slice(&body) {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    match s.hub.import_threads(m, batch) {
-        Ok(n) => Json(json!({ "imported": n })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
-    }
-}

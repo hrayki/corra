@@ -48,8 +48,29 @@ pub fn spawn(hub: Arc<Hub>) {
             }
             if rounds % 20 == 1 {
                 orphans(&hub).await;
-                let _ = hub.db.forget_sends_before(now_ms() - 24 * 3600 * 1000);
-                hub.forget_deliveries_before(now_ms() - 24 * 3600 * 1000);
+                let now = now_ms();
+                let _ = hub.db.forget_sends_before(now - 24 * 3600 * 1000);
+                hub.forget_deliveries_before(now - 24 * 3600 * 1000);
+                let swept = hub
+                    .db
+                    .kv_get("retention_last")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0);
+                if now - swept > 86_400_000 {
+                    match hub.sweep_hidden(now) {
+                        Ok(n) => {
+                            if n > 0 {
+                                tracing::info!(
+                                    "deleted {n} threads hidden longer than the retention setting"
+                                );
+                            }
+                            let _ = hub.db.kv_set("retention_last", &now.to_string());
+                        }
+                        Err(e) => tracing::warn!("couldn't delete old hidden threads: {e:#}"),
+                    }
+                }
             }
             rounds += 1;
         }
@@ -77,13 +98,6 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
                 .iter()
                 .any(|t| w.get(&t.id).copied().unwrap_or(0) > 0)
         };
-        let watched = watched
-            || hub
-                .browser_watch
-                .lock()
-                .unwrap()
-                .get(&m.id)
-                .is_some_and(|n| *n > 0);
         if running {
             hub.touch_machine(m.id);
         }
@@ -102,14 +116,6 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
         match m.status {
             MachineStatus::Connected if !hub.runner_connected(m.id) => {
                 hub.db.set_machine_status(m.id, MachineStatus::Offline)?;
-            }
-            MachineStatus::Connected if crate::phone::is_machine(hub, m.id) => {
-                if !crate::phone::busy(hub) && now - last > limit {
-                    tracing::info!(machine = %m.name, "nobody used the phone for a while");
-                    if let Err(e) = crate::phone::down(hub).await {
-                        tracing::warn!("couldn't stop the phone: {e:#}");
-                    }
-                }
             }
             MachineStatus::Connected => {
                 let since = hub
@@ -159,12 +165,7 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
                     .kv_get(&crate::providers::starting_key(m.id))?
                     .and_then(|v| v.parse::<i64>().ok())
                     .unwrap_or(m.created_at);
-                let minutes = if crate::phone::is_machine(hub, m.id) {
-                    crate::phone::SETUP_MINUTES
-                } else {
-                    15
-                };
-                if now - since > minutes * 60 * 1000 && !hub.runner_connected(m.id) {
+                if now - since > 15 * 60 * 1000 && !hub.runner_connected(m.id) {
                     lost(hub, &m).await;
                 }
             }
@@ -289,14 +290,6 @@ async fn retire(hub: &Arc<Hub>, machine: MachineId, notice: Option<&str>) {
             && let Err(e) = provider.forget(hub, &s).await
         {
             tracing::warn!(%machine, "couldn't delete the machine's sleep: {e:#}");
-            crate::leftovers::add(
-                hub,
-                &format!("{}'s saved disk", m.name),
-                &m.provider,
-                LeftoverThing::Image,
-                &s,
-                &format!("{e:#}"),
-            );
         }
         let _ = hub.db.set_machine_sleep_ref(machine, None);
     }
@@ -413,30 +406,6 @@ pub fn retire_moved(hub: &Arc<Hub>, project: ProjectId) {
         tokio::spawn(async move {
             if let Err(e) = move_off(&hub, &p, &m).await {
                 tracing::warn!(machine = %m.name, "couldn't move the threads off an old machine: {e:#}");
-                for (thing, r) in [
-                    (
-                        LeftoverThing::Machine,
-                        hub.db.machine_provider_ref(m.id).ok().flatten(),
-                    ),
-                    (
-                        LeftoverThing::Image,
-                        hub.db.machine_sleep_ref(m.id).ok().flatten(),
-                    ),
-                ] {
-                    if let Some(r) = r {
-                        crate::leftovers::add(
-                            &hub,
-                            &format!(
-                                "{}'s old machine, kept because its threads' work couldn't be saved",
-                                p.name
-                            ),
-                            &m.provider,
-                            thing,
-                            &r,
-                            &format!("{e:#}"),
-                        );
-                    }
-                }
             }
         });
     }

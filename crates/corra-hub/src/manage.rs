@@ -1,17 +1,9 @@
 use anyhow::{Result, anyhow, bail};
-use axum::Json;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum_extra::extract::CookieJar;
 use corra_proto::app::AppCall;
 use corra_proto::*;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::AppState;
-use crate::db::NewMachine;
-use crate::hub::{HubRef, hash_token, new_token};
+use crate::hub::HubRef;
 use crate::ws::exec_call;
 
 fn tool(action: &str, description: &str, props: Value, required: &[&str]) -> ToolDef {
@@ -27,17 +19,7 @@ fn kinds_line(providers: &[ProviderInfo]) -> String {
         .iter()
         .filter(|p| !p.kinds.is_empty())
         .map(|p| {
-            let kinds: Vec<String> = p
-                .kinds
-                .iter()
-                .map(|k| {
-                    if k.kvm {
-                        format!("{} (can run the phone)", k.name)
-                    } else {
-                        k.name.clone()
-                    }
-                })
-                .collect();
+            let kinds: Vec<String> = p.kinds.iter().map(|k| k.name.clone()).collect();
             format!("{} has {}", p.name, kinds.join(" and "))
         })
         .collect();
@@ -63,7 +45,6 @@ pub fn defs(hub: &HubRef) -> Vec<ToolDef> {
             "repos": { "type": "array", "items": { "type": "string" }, "description": "GitHub repos as owner/name. Replaces the list." },
             "setup": { "type": "string", "description": "The setup from the setup repo's corra/setups/ to run on its machine; empty for none." },
             "env": { "type": "array", "items": { "type": "string" }, "description": "Names of the env vars from Settings it gets. Replaces the list." },
-            "tools": { "type": "array", "items": { "type": "string", "enum": ["browser", "phone"] }, "description": "Which of the browser and the Android test phone its agents get. Replaces the list." },
             "allow_main": { "type": "boolean", "description": "Whether its machines push to the default branch and tags, and merge, without asking." }
         });
         if let (Some(p), Value::Object(m)) = (props.as_object_mut(), more) {
@@ -142,7 +123,7 @@ pub fn defs(hub: &HubRef) -> Vec<ToolDef> {
         ),
         tool(
             "projects.update",
-            "Change a project's provider, kind of machine, machine size, repos, setup, env vars, permission mode, tools or what it may push without asking.",
+            "Change a project's provider, kind of machine, machine size, repos, setup, env vars, permission mode or what it may push without asking.",
             project_settings(json!({
                 "project": { "type": "string", "description": "The project's name." },
                 "provider": { "type": "string", "enum": all_providers },
@@ -442,7 +423,6 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                     settings: None,
                     queue: input["queue"].as_bool().unwrap_or(false),
                     client_id: None,
-                    compact: None,
                 },
             )
             .await?;
@@ -593,19 +573,6 @@ fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> 
             .filter(|e| !e.is_empty())
             .collect();
     }
-    if let Some(tools) = input["tools"].as_array() {
-        let tools: Vec<String> = tools
-            .iter()
-            .filter_map(|t| t.as_str().map(String::from))
-            .collect();
-        if let Some(bad) = tools
-            .iter()
-            .find(|t| !["browser", "phone"].contains(&t.as_str()))
-        {
-            bail!("unknown tool {bad}; the tools are browser and phone");
-        }
-        p.tools = tools;
-    }
     if let Some(allow) = input["allow_main"].as_bool() {
         p.allow_main = allow;
     }
@@ -620,59 +587,6 @@ fn update_project(hub: &HubRef, mut p: Project, input: &Value) -> Result<Value> 
         "repos": p.repos.iter().map(|r| r.github.clone().unwrap_or_else(|| r.name.clone())).collect::<Vec<_>>(),
         "setup": p.setup,
         "env": p.env,
-        "tools": p.tools,
         "allow_main": p.allow_main,
     }))
-}
-
-#[derive(Deserialize)]
-pub struct LocalMachine {
-    install_id: String,
-    name: String,
-}
-
-pub async fn register_machine(
-    State(s): State<AppState>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    if !crate::auth::request_authorized(&s.hub, &s.auth, &jar, &headers, None) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Ok(body) = serde_json::from_slice::<LocalMachine>(&body) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let install = body.install_id.trim();
-    if install.len() < 16 || install.len() > 80 {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let token = new_token("cm");
-    let result: Result<MachineId> = (|| {
-        if let Some(id) = s.hub.db.machine_by_install(install)? {
-            s.hub.db.set_machine_token(id, &hash_token(&token))?;
-            s.hub.db.set_machine_name(id, &body.name)?;
-            return Ok(id);
-        }
-        let m = s.hub.db.insert_machine(NewMachine {
-            name: body.name.clone(),
-            provider: "existing".into(),
-            project: None,
-            size: "existing".into(),
-            token_hash: hash_token(&token),
-            provider_ref: None,
-            status: MachineStatus::Offline,
-            kind: None,
-        })?;
-        s.hub.db.set_machine_install(m.id, install)?;
-        s.hub.db.kv_set(&format!("machine:{}:kit", m.id), "off")?;
-        Ok(m.id)
-    })();
-    match result {
-        Ok(id) => {
-            s.hub.publish_machine(id);
-            Json(json!({ "machine": id, "token": token })).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
-    }
 }

@@ -68,8 +68,7 @@ export function ThreadPane(props: { id: string }) {
   const view = () => state.views[props.id]
   const machine = () => (thread()?.machine ? state.machines[thread()!.machine!] : undefined)
   const project = () => (thread() ? state.projects[thread()!.project] : undefined)
-  const here = () => !!thread()?.machine && thread()!.machine === state.thisMachine
-  const where = () => (here() ? 'This computer' : (machine()?.name ?? 'No machine yet'))
+  const where = () => machine()?.name ?? 'No machine yet'
   const cwd = () => {
     const c = thread()?.cwd ?? ''
     const home = machine()?.info?.home
@@ -219,7 +218,7 @@ export function ThreadPane(props: { id: string }) {
                 <span class="max-sm:hidden">{thread()!.agent === 'antigravity' ? 'Antigravity' : 'Claude Code'}</span>
                 <span class="text-faint max-sm:hidden">·</span>
                 <span class="inline-flex items-center gap-1">
-                  {here() || (machine() && paired(machine()!.provider)) ? <Laptop size={12} /> : <Cloud size={12} />}
+                  {machine() && paired(machine()!.provider) ? <Laptop size={12} /> : <Cloud size={12} />}
                   {where()}
                 </span>
                 <Show when={statusWord[thread()!.status]}>
@@ -351,13 +350,7 @@ export function ThreadPane(props: { id: string }) {
               <Show when={thread()!.status === 'starting'}>
                 <div class="flex items-center gap-2 pb-4 text-[13px] text-mute">
                   <span class="size-2 rounded-full bg-accent pulse" />
-                  {here()
-                    ? 'Starting'
-                    : machine()?.status === 'connected'
-                      ? 'Starting the agent'
-                      : machine()
-                        ? 'Waking the machine'
-                        : 'Starting a machine'}
+                  {machine()?.status === 'connected' ? 'Starting the agent' : machine() ? 'Waking the machine' : 'Starting a machine'}
                 </div>
               </Show>
               <Show
@@ -401,7 +394,7 @@ export function ThreadPane(props: { id: string }) {
 function Missing(props: { id: string }) {
   return (
     <div class="flex flex-1 items-center justify-center p-8 text-[13px] text-mute">
-      <Show when={state.loaded.hub} fallback="Loading">
+      <Show when={state.loaded} fallback="Loading">
         <div class="text-center">
           <div>This thread isn't here.</div>
           <a class="mt-2 inline-block text-ink underline decoration-line underline-offset-4" href="#/">
