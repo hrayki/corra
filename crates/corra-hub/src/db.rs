@@ -918,10 +918,15 @@ impl Db {
             .pop())
     }
 
-    pub fn messages(&self, thread: ThreadId) -> Result<Vec<StoredEvent>> {
+    pub fn messages_between(
+        &self,
+        thread: ThreadId,
+        after: i64,
+        upto: i64,
+    ) -> Result<Vec<StoredEvent>> {
         self.stored_events(
-            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind IN ('turn_started', 'item_completed') AND (kind = 'turn_started' OR (json_extract(data, '$.item.type') IN ('user_message', 'agent_message') AND json_extract(data, '$.item.parent') IS NULL)) ORDER BY seq",
-            params![thread.to_string()],
+            "SELECT seq, ts, data FROM events INDEXED BY events_by_kind WHERE thread = ?1 AND kind IN ('turn_started', 'item_completed') AND seq > ?2 AND seq <= ?3 AND (kind = 'turn_started' OR (json_extract(data, '$.item.type') IN ('user_message', 'agent_message') AND json_extract(data, '$.item.parent') IS NULL)) ORDER BY seq",
+            params![thread.to_string(), after, upto],
         )
     }
 

@@ -829,7 +829,12 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             let h = hub.history_before(thread, before_seq, turns)?;
             json!({ "events": h.events, "from_seq": h.from_seq, "earlier": h.earlier })
         }
-        AppCall::Find { thread, query } => serde_json::to_value(hub.find(thread, &query)?)?,
+        AppCall::Find { thread, query } => {
+            let hub = hub.clone();
+            serde_json::to_value(
+                tokio::task::spawn_blocking(move || hub.find(thread, &query)).await??,
+            )?
+        }
         AppCall::Subscribe { .. }
         | AppCall::Unsubscribe { .. }
         | AppCall::BrowserOpen { .. }

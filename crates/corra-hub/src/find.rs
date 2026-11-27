@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use corra_proto::app::{FindHit, Found};
-use corra_proto::{Event, InputPart, ItemBody, ThreadId};
+use corra_proto::{Event, InputPart, ItemBody, StoredEvent, ThreadId};
 
 use crate::hub::Hub;
 
 pub const LIMIT: u32 = 1000;
+const CHUNK: i64 = 2000;
 const NOTE: &str = "[corra] ";
 
 pub fn fold(s: &str) -> String {
@@ -43,79 +44,81 @@ struct Shown {
     gone: bool,
 }
 
-impl Hub {
-    pub fn find(&self, thread: ThreadId, query: &str) -> Result<Found> {
-        let needle = fold(query);
-        if needle.is_empty() {
-            return Ok(Found::default());
-        }
-        let mut shown: Vec<Shown> = vec![];
-        let mut items: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut asked: HashSet<String> = HashSet::new();
-        let mut starts: HashMap<String, i64> = HashMap::new();
-        for e in self.db.messages(thread)? {
-            match e.event {
-                Event::TurnStarted { turn, input, .. } => {
-                    let mut text = typed(&input);
-                    if input.len() == 1
-                        && let Some(note) = text.strip_prefix(NOTE)
-                    {
-                        text = note.to_string();
-                    }
-                    if !input.is_empty() {
-                        asked.insert(turn.clone());
-                    }
-                    starts.insert(turn.clone(), e.seq);
-                    shown.push(Shown {
-                        turn,
-                        start: e.seq,
-                        seq: e.seq,
-                        text,
-                        gone: false,
-                    });
+#[derive(Default)]
+struct Messages {
+    shown: Vec<Shown>,
+    items: HashMap<String, Vec<usize>>,
+    asked: HashSet<String>,
+    starts: HashMap<String, i64>,
+}
+
+impl Messages {
+    fn add(&mut self, e: StoredEvent) {
+        match e.event {
+            Event::TurnStarted { turn, input, .. } => {
+                let mut text = typed(&input);
+                if input.len() == 1
+                    && let Some(note) = text.strip_prefix(NOTE)
+                {
+                    text = note.to_string();
                 }
-                Event::ItemCompleted { turn, item } if item.parent.is_none() => {
-                    let text = match item.body {
-                        ItemBody::UserMessage { content } => typed(&content),
-                        ItemBody::AgentMessage { text } => text,
-                        _ => continue,
-                    };
-                    let same = items.entry(item.id.clone()).or_default();
-                    if item.id == format!("{turn}:input") {
-                        for &i in same.iter() {
-                            if shown[i].turn != turn {
-                                shown[i].gone = true;
-                            }
-                        }
-                        if asked.contains(&turn) {
-                            continue;
-                        }
-                    }
-                    match same
-                        .iter()
-                        .find(|&&i| shown[i].turn == turn && !shown[i].gone)
-                    {
-                        Some(&i) => shown[i].text = text,
-                        None => {
-                            same.push(shown.len());
-                            shown.push(Shown {
-                                start: starts.get(&turn).copied().unwrap_or(e.seq),
-                                turn,
-                                seq: e.seq,
-                                text,
-                                gone: false,
-                            });
-                        }
-                    }
+                if !input.is_empty() {
+                    self.asked.insert(turn.clone());
                 }
-                _ => {}
+                self.starts.insert(turn.clone(), e.seq);
+                self.shown.push(Shown {
+                    turn,
+                    start: e.seq,
+                    seq: e.seq,
+                    text,
+                    gone: false,
+                });
             }
+            Event::ItemCompleted { turn, item } if item.parent.is_none() => {
+                let text = match item.body {
+                    ItemBody::UserMessage { content } => typed(&content),
+                    ItemBody::AgentMessage { text } => text,
+                    _ => return,
+                };
+                let shown = &mut self.shown;
+                let same = self.items.entry(item.id.clone()).or_default();
+                if item.id == format!("{turn}:input") {
+                    for &i in same.iter() {
+                        if shown[i].turn != turn {
+                            shown[i].gone = true;
+                        }
+                    }
+                    if self.asked.contains(&turn) {
+                        return;
+                    }
+                }
+                match same
+                    .iter()
+                    .find(|&&i| shown[i].turn == turn && !shown[i].gone)
+                {
+                    Some(&i) => shown[i].text = text,
+                    None => {
+                        same.push(shown.len());
+                        shown.push(Shown {
+                            start: self.starts.get(&turn).copied().unwrap_or(e.seq),
+                            turn,
+                            seq: e.seq,
+                            text,
+                            gone: false,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
-        shown.sort_by_key(|s| (s.start, s.seq));
+    }
+
+    fn found(mut self, needle: &str) -> Found {
+        self.shown.sort_by_key(|s| (s.start, s.seq));
         let mut found = Found::default();
         let mut total = 0;
-        for s in shown.iter().rev().filter(|s| !s.gone) {
-            let n = fold(&s.text).matches(&needle).count() as u32;
+        for s in self.shown.iter().rev().filter(|s| !s.gone) {
+            let n = fold(&s.text).matches(needle).count() as u32;
             if n == 0 {
                 continue;
             }
@@ -127,7 +130,26 @@ impl Hub {
             found.hits.push(FindHit { seq: s.seq, n });
         }
         found.hits.reverse();
-        Ok(found)
+        found
+    }
+}
+
+impl Hub {
+    pub fn find(&self, thread: ThreadId, query: &str) -> Result<Found> {
+        let needle = fold(query);
+        if needle.is_empty() {
+            return Ok(Found::default());
+        }
+        let last = self.db.thread(thread)?.map(|t| t.last_seq).unwrap_or(0);
+        let mut messages = Messages::default();
+        let mut after = 0;
+        while after < last {
+            for e in self.db.messages_between(thread, after, after + CHUNK)? {
+                messages.add(e);
+            }
+            after += CHUNK;
+        }
+        Ok(messages.found(&needle))
     }
 
     pub fn turns_down_to(&self, thread: ThreadId, before: i64, to: i64) -> Result<i64> {

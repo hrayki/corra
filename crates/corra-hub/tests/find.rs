@@ -430,3 +430,25 @@ async fn find_keeps_the_newest_matches_when_there_are_too_many() {
     assert_eq!(f.hits.iter().map(|h| h.n).sum::<u32>(), 1000);
     assert_eq!(seqs(&f), said[20..]);
 }
+
+#[tokio::test]
+async fn find_reads_a_long_log_in_chunks_without_losing_or_repeating_a_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let mut log = Log::new(&hub);
+    let turn = new_id().to_string();
+    let mut said = vec![log.ask(&turn, "watch the okapi")];
+    let notice = json!({ "kind": "notice", "level": "info", "text": "okapi notice" });
+    for edge in [2000, 2001, 4000, 4001] {
+        let mut at = hub.db.thread(log.thread).unwrap().unwrap().last_seq;
+        while at < edge - 1 {
+            at = log.add(notice.clone());
+        }
+        said.push(log.say(&turn, "the okapi moved"));
+    }
+    log.done(&turn);
+
+    let f = find(&hub, log.thread, "okapi").await;
+    assert_eq!(seqs(&f), said);
+    assert_eq!(said[1..], [2000, 2001, 4000, 4001]);
+}
