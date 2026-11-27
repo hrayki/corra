@@ -589,6 +589,8 @@ pub struct HubVersion {
     pub previous: Option<String>,
     #[serde(default)]
     pub trial: bool,
+    #[serde(default)]
+    pub previous_too_old: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub failed: Option<HubFailure>,

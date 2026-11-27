@@ -14,6 +14,7 @@ import { newPairingCode, signOut } from '../lib/auth'
 import { renderSVG } from 'uqr'
 import { choice, omarchy, setChoice, type ThemeChoice } from '../lib/theme'
 import { ago } from '../lib/format'
+import { runningLine, when } from '../lib/hubversion'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
@@ -1232,7 +1233,6 @@ function Backups() {
 }
 
 const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/([^.])$/, '$1.')
-const when = (ms: number) => (ago(ms) === 'now' ? 'just now' : `${ago(ms)} ago`)
 
 function VersionRow(props: { icon: JSX.Element; tone?: 'warn'; version: string; children: JSX.Element; action?: JSX.Element }) {
   return (
@@ -1300,7 +1300,7 @@ function Version() {
   const previous = () => {
     const i = info()
     if (!i?.managed || !i.previous || i.previous === i.update) return null
-    return { version: i.previous, older: i.previous < i.version }
+    return { version: i.previous, older: i.previous < i.version, tooOld: i.previous_too_old }
   }
   return (
     <Section title="Version" hint="Updates come from corra's releases on GitHub. A version that doesn't start is rolled back by itself.">
@@ -1320,21 +1320,7 @@ function Version() {
             when={going()}
             fallback={
               <Show when={info()} fallback="Checking…">
-                {(i) => (
-                  <Show
-                    when={i().managed}
-                    fallback="Running. This hub isn't run by corra's launcher, so it's updated by deploying it again."
-                  >
-                    <Show when={!(i().trial && i().previous)} fallback="Just updated. If it stops in its first minute, it's rolled back.">
-                      <Show
-                        when={!i().check_error}
-                        fallback={<span class="text-bad">Running. Couldn't check for a newer version: {i().check_error}</span>}
-                      >
-                        {i().update ? 'Running' : `Running · up to date${i().checked_at ? `, checked ${when(i().checked_at!)}` : ''}`}
-                      </Show>
-                    </Show>
-                  </Show>
-                )}
+                {(i) => <span classList={{ 'text-bad': !!runningLine(i()).bad }}>{runningLine(i()).text}</span>}
               </Show>
             }
           >
@@ -1383,14 +1369,14 @@ function Version() {
               icon={<History size={16} />}
               version={p().version}
               action={
-                <Show when={!going()}>
+                <Show when={!going() && !p().tooOld}>
                   <Btn small onClick={() => void switchTo(p().version, p().older)}>
                     {p().older ? 'Roll back' : 'Switch back'}
                   </Btn>
                 </Show>
               }
             >
-              Previous version
+              {p().tooOld ? "Previous version · can't go back past a database change" : 'Previous version'}
             </VersionRow>
           )}
         </Show>
