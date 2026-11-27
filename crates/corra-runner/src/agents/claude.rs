@@ -331,11 +331,13 @@ struct State {
     user_turn: bool,
     turn_began: bool,
     knows_users: bool,
+    knows_lifecycle: bool,
     background_said: Option<std::time::Instant>,
     background_tasks: HashMap<String, BackgroundTask>,
     wake_causes: Vec<String>,
     queued_turns: VecDeque<(String, Vec<InputPart>)>,
     ran: std::collections::HashSet<String>,
+    taken: std::collections::HashSet<String>,
     interrupting: bool,
     tasks: Vec<(String, Todo)>,
     context_window: Option<u64>,
@@ -373,11 +375,13 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
         user_turn: false,
         turn_began: false,
         knows_users: false,
+        knows_lifecycle: false,
         background_said: None,
         background_tasks: HashMap::new(),
         wake_causes: vec![],
         queued_turns: VecDeque::new(),
         ran: Default::default(),
+        taken: Default::default(),
         interrupting: false,
         tasks: Vec::new(),
         context_window: None,
@@ -521,7 +525,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                     }
                     SessionCmd::Interrupt => {
                         st.interrupting = true;
-                        proc.control(json!({ "subtype": "interrupt", "cancel_queued": false })).await?;
+                        proc.control(json!({ "subtype": "interrupt", "cancel_queued": true })).await?;
                         let ids: Vec<String> = st.permissions.keys().cloned().collect();
                         for id in ids {
                             resolve_permission(ctx, st, proc, &id, RequestResponse::Cancelled).await?;
@@ -659,6 +663,13 @@ fn start_turn(ctx: &SessionCtx, st: &mut State, turn: String, input: Vec<InputPa
 }
 
 fn finish_open_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Option<String>) {
+    if let Some(turn) = &st.turn
+        && st.user_turn
+        && st.knows_lifecycle
+        && !st.turn_began
+    {
+        unread(ctx, turn);
+    }
     if let Some(turn) = st.turn.take() {
         close_running_tools(ctx, st, &turn);
         let (error, resets_at) = match st.api_error.take() {
@@ -679,27 +690,10 @@ fn finish_open_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, erro
             },
         );
     }
-    while let Some((turn, input)) = st.queued_turns.pop_front() {
-        emit(
-            ctx,
-            Event::TurnStarted {
-                turn: turn.clone(),
-                input,
-                settings: st.settings.clone(),
-                cause: None,
-            },
-        );
-        emit(
-            ctx,
-            Event::TurnCompleted {
-                turn,
-                outcome: TurnOutcome::Interrupted,
-                usage: None,
-                error: None,
-                anchor: None,
-                resets_at: None,
-            },
-        );
+    while let Some((turn, _)) = st.queued_turns.pop_front() {
+        if !st.taken.contains(&turn) && !st.ran.contains(&turn) {
+            unread(ctx, &turn);
+        }
     }
 }
 
@@ -793,7 +787,10 @@ async fn on_message(ctx: &SessionCtx, st: &mut State, proc: &mut Proc, msg: Valu
         st.knows_users = true;
     }
     match ty {
-        "command_lifecycle" => on_lifecycle(ctx, st, &msg),
+        "command_lifecycle" => {
+            st.knows_lifecycle = true;
+            on_lifecycle(ctx, st, &msg)
+        }
         "system" => on_system(ctx, st, &msg),
         "stream_event" => on_stream(ctx, st, &msg),
         "assistant" => on_assistant(ctx, st, &msg),
@@ -1114,11 +1111,14 @@ fn drop_queued(ctx: &SessionCtx, st: &mut State, id: &str) {
         return;
     };
     st.queued_turns.remove(i);
+    unread(ctx, id);
+}
+
+fn unread(ctx: &SessionCtx, turn: &str) {
     emit(
         ctx,
-        Event::Notice {
-            level: NoticeLevel::Warning,
-            text: "Claude Code dropped a message sent during this turn without reading it. Send it again if you still need it.".into(),
+        Event::Unread {
+            item: format!("{turn}:input"),
         },
     );
 }
@@ -1126,8 +1126,13 @@ fn drop_queued(ctx: &SessionCtx, st: &mut State, id: &str) {
 fn on_lifecycle(ctx: &SessionCtx, st: &mut State, msg: &Value) {
     let ours = st.user_turn && st.turn.as_deref() == msg["command_uuid"].as_str();
     if !ours {
-        if msg["state"] == "cancelled" {
-            drop_queued(ctx, st, msg["command_uuid"].as_str().unwrap_or_default());
+        let id = msg["command_uuid"].as_str().unwrap_or_default();
+        match msg["state"].as_str().unwrap_or("") {
+            "cancelled" => drop_queued(ctx, st, id),
+            "started" => {
+                st.taken.insert(id.to_string());
+            }
+            _ => {}
         }
         return;
     }

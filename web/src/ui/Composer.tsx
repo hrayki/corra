@@ -1,11 +1,11 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, type JSX } from 'solid-js'
 import ArrowUp from 'lucide-solid/icons/arrow-up'
 import Square from 'lucide-solid/icons/square'
 import X from 'lucide-solid/icons/x'
 import Paperclip from 'lucide-solid/icons/paperclip'
 import FoldVertical from 'lucide-solid/icons/chevrons-down-up'
 import UnfoldVertical from 'lucide-solid/icons/chevrons-up-down'
-import { addPending, call, dropPending, state, type ThreadX } from '../lib/store'
+import { addPending, call, dropPending, state, stopThread, takeRestored, type ThreadX } from '../lib/store'
 import type { InputPart } from '../proto/InputPart'
 import type { AgentSettings } from '../proto/AgentSettings'
 import type { AgentKind } from '../proto/AgentKind'
@@ -446,6 +446,12 @@ export function Composer(props: { thread: ThreadX }) {
       setDraftFor(null)
     }
   })
+  createEffect(() => {
+    if (!state.restore[props.thread.id]?.length) return
+    const back = takeRestored(props.thread.id)
+    const now = untrack(input.text).trimEnd()
+    input.setText([...(now ? [now] : []), ...back].join('\n\n'))
+  })
   const [clock, setClock] = createSignal(Date.now())
   const ticker = setInterval(() => setClock(Date.now()), 30_000)
   onCleanup(() => clearInterval(ticker))
@@ -550,7 +556,7 @@ export function Composer(props: { thread: ThreadX }) {
                   aria-label="Stop"
                   title="Stop"
                   class="ml-1 flex size-8 shrink-0 items-center justify-center rounded-full border border-line text-ink hover:border-bad hover:text-bad"
-                  onClick={() => void call({ op: 'interrupt', thread: props.thread.id }).catch((e) => setError((e as Error).message))}
+                  onClick={() => void stopThread(props.thread.id).catch((e) => setError((e as Error).message))}
                 >
                   <Square size={12} fill="currentColor" />
                 </button>

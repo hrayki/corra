@@ -45,6 +45,7 @@ type State = {
   queues: Record<string, Queued[]>
   usage: { at: number; limits: unknown } | null
   pending: Record<string, { id: number; parts: InputPart[]; queued: boolean }[]>
+  restore: Record<string, string[]>
 }
 
 const [state, setState] = createStore<State>({
@@ -64,6 +65,7 @@ const [state, setState] = createStore<State>({
   queues: {},
   usage: null,
   pending: {},
+  restore: {},
 })
 export { state }
 
@@ -103,6 +105,57 @@ export function dropPending(thread: string, id: number) {
   setState('pending', thread, (l) => (l ?? []).filter((p) => p.id !== id))
 }
 
+const stoppedAt = new Map<string, number>()
+const STOP_RETURNS = 60_000
+
+export function restoreDraft(thread: string, texts: string[]) {
+  const t = texts.filter((x) => x.trim())
+  if (t.length) setState('restore', thread, (l) => [...(l ?? []), ...t])
+}
+
+export function takeRestored(thread: string): string[] {
+  const l = state.restore[thread] ?? []
+  if (l.length) setState('restore', thread, [])
+  return l
+}
+
+export async function stopThread(thread: string) {
+  stoppedAt.set(thread, Date.now())
+  const r = await call<{ unsent?: Queued[] }>({ op: 'interrupt', thread })
+  restoreDraft(
+    thread,
+    (r?.unsent ?? []).map((q) => textOf(q.input)),
+  )
+}
+
+const textOf = (parts: InputPart[]) =>
+  parts
+    .filter((p) => p.type === 'text')
+    .map((p) => (p.type === 'text' ? p.text : ''))
+    .join('\n')
+
+function returnUnread(thread: string, fresh: StoredEvent[]) {
+  const at = stoppedAt.get(thread)
+  if (!at) return
+  if (Date.now() - at > STOP_RETURNS) {
+    stoppedAt.delete(thread)
+    return
+  }
+  const v = state.views[thread]
+  if (!v) return
+  const texts: string[] = []
+  for (const e of fresh) {
+    if (e.kind === 'turn_completed') stoppedAt.delete(thread)
+    if (e.kind !== 'unread' || e.ts < at) continue
+    for (const t of v.turns) {
+      if (`${t.id}:input` === e.item) texts.push(textOf(t.input))
+      for (const x of t.entries)
+        if (x.type === 'item' && x.item.id === e.item && x.item.body.type === 'user_message') texts.push(textOf(x.item.body.content))
+    }
+  }
+  restoreDraft(thread, texts)
+}
+
 function addEvents(thread: string, events: StoredEvent[]) {
   const list = raw.get(thread) ?? []
   const last = list.length ? list[list.length - 1].seq : 0
@@ -131,6 +184,7 @@ function addEvents(thread: string, events: StoredEvent[]) {
       for (const e of fresh) apply(v, e)
     }),
   )
+  returnUnread(thread, fresh)
   persistEvents(thread)
 }
 

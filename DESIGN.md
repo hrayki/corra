@@ -150,9 +150,13 @@ The model, effort and mode pickers show each agent's own ids and names: Claude C
 ids with Claude Code's own titles. The new-thread page uses the last list it saw for each agent.
 
 A message sent while the agent is mid-turn goes one of two ways. Sent now, it reaches Claude Code at once, which reads
-it at its next step. Queued, the hub holds it and sends it when the turn completes, one queued message per turn, in
-order; a stopped or failed turn leaves the queue waiting. The hub keeps the queue, so it survives a restart and shows on
-every device.
+it at its next step. Queued, the hub holds it and sends it when the turn ends, one queued message per turn, in order.
+After a failed turn the queue is held, and shown as held, until another turn completes; a usage limit is the exception
+below. The hub keeps the queue, so it survives a restart and shows on every device.
+
+Stop works like Claude Code's own: nothing runs after it. What's still queued, and any message the agent hadn't read,
+goes back into the composer of the device that pressed Stop. A message the agent never read is marked Not read in the
+thread, with Send again.
 
 A background agent that keeps working after a turn ends doesn't open a new turn: its steps join the turn that started it
 and the thread stays idle. Each subagent shows as a row that opens what it was asked, its steps and its result.

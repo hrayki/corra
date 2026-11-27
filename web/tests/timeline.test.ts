@@ -153,3 +153,25 @@ test('a thread cached before session events carried models still opens', () => {
   assert.equal(v.model, 'opus')
   assert.deepEqual(ids(v.turns[0].entries), ['m'])
 })
+
+test('a message the agent never read is marked on its own bubble, whether it was sent mid-turn or began the turn', () => {
+  const v = emptyView()
+  for (const e of [
+    ev(1000, { kind: 'turn_started', turn: 't1', input: [{ type: 'text', text: 'go' }], settings: {} }),
+    said('t1', 't1:input', 1000, 'go'),
+    tool('t1', 'a', 2000),
+    said('t1', 't2:input', 3000, 'and this'),
+    ev(4000, { kind: 'unread', item: 't2:input' }),
+    ev(4000, { kind: 'turn_completed', turn: 't1', outcome: 'interrupted' }),
+    ev(5000, { kind: 'turn_started', turn: 't3', input: [{ type: 'text', text: 'again' }], settings: {} }),
+    said('t3', 't3:input', 5000, 'again'),
+    ev(5100, { kind: 'unread', item: 't3:input' }),
+    ev(5100, { kind: 'turn_completed', turn: 't3', outcome: 'interrupted' }),
+  ])
+    apply(v, e)
+  const [t1, t3] = v.turns
+  const mid = t1.entries.find((e) => e.type === 'item' && e.item.id === 't2:input')
+  assert.ok(mid && mid.type === 'item' && mid.item.unread)
+  assert.ok(!t1.unread)
+  assert.ok(t3.unread)
+})

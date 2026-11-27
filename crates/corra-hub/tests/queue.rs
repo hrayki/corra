@@ -109,22 +109,69 @@ async fn queued_messages_wait_for_the_turn_to_end_and_go_one_at_a_time() {
     assert!(hub.unqueue(thread, &second).is_some());
     assert!(hub.unqueue(thread, &second).is_none());
 
-    turn(&hub, thread, "a", Some(TurnOutcome::Interrupted));
-    assert_eq!(
-        waiting(&hub, thread),
-        ["first", "third"],
-        "sent after a stop"
-    );
-
-    turn(&hub, thread, "b", None);
-    turn(&hub, thread, "b", Some(TurnOutcome::Completed));
+    turn(&hub, thread, "a", Some(TurnOutcome::Completed));
     assert_eq!(waiting(&hub, thread), ["third"]);
     assert_eq!(tried_to_send(&hub, thread).await, 2);
 
-    turn(&hub, thread, "c", None);
-    turn(&hub, thread, "c", Some(TurnOutcome::Completed));
-    assert!(waiting(&hub, thread).is_empty());
+    turn(&hub, thread, "b", None);
+    turn(&hub, thread, "b", Some(TurnOutcome::Interrupted));
+    assert!(waiting(&hub, thread).is_empty(), "kept after a stop");
     assert_eq!(tried_to_send(&hub, thread).await, 3);
+}
+
+#[tokio::test]
+async fn a_failed_turn_holds_the_queue_until_a_turn_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread) = setup(dir.path());
+
+    turn(&hub, thread, "a", None);
+    hub.send(thread, text("first"), None, true).await.unwrap();
+    hub.send(thread, text("second"), None, true).await.unwrap();
+    turn(&hub, thread, "a", Some(TurnOutcome::Failed));
+    assert_eq!(waiting(&hub, thread), ["first", "second"]);
+    assert_eq!(tried_to_send(&hub, thread).await, 0, "sent after a failure");
+
+    turn(&hub, thread, "b", None);
+    turn(&hub, thread, "b", Some(TurnOutcome::Completed));
+    assert_eq!(waiting(&hub, thread), ["second"]);
+    assert_eq!(tried_to_send(&hub, thread).await, 1);
+}
+
+#[tokio::test]
+async fn a_stop_hands_the_queue_back_and_nothing_is_sent_after_it() {
+    use corra_hub::hub::RunnerConn;
+    use corra_proto::runner::HubMsg;
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, thread) = setup(dir.path());
+    let machine = new_id();
+    let mut t = hub.db.thread(thread).unwrap().unwrap();
+    t.machine = Some(machine);
+    hub.db.update_thread(&t).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    hub.runners.lock().unwrap().insert(
+        machine,
+        RunnerConn {
+            tx,
+            live: Default::default(),
+            prepared: Default::default(),
+            conn_id: 1,
+        },
+    );
+
+    turn(&hub, thread, "a", None);
+    hub.send(thread, text("first"), None, true).await.unwrap();
+    hub.send(thread, text("second"), None, true).await.unwrap();
+    let unsent = hub.interrupt(thread).unwrap();
+    assert_eq!(
+        unsent.iter().map(|q| q.input.clone()).collect::<Vec<_>>(),
+        [text("first"), text("second")]
+    );
+    assert!(matches!(rx.try_recv(), Ok(HubMsg::Interrupt { .. })));
+    assert!(waiting(&hub, thread).is_empty());
+
+    turn(&hub, thread, "a", Some(TurnOutcome::Interrupted));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rx.try_recv().is_err(), "something was sent after the stop");
 }
 
 #[tokio::test]
@@ -193,11 +240,11 @@ async fn a_message_sent_twice_goes_once_and_a_lost_turn_is_closed() {
         hub.db.thread(thread).unwrap().unwrap().status,
         ThreadStatus::Idle
     );
-    assert_eq!(
-        waiting(&hub, thread),
-        ["retry me"],
-        "a lost turn sent the queue"
+    assert!(
+        waiting(&hub, thread).is_empty(),
+        "a lost turn kept the queue"
     );
+    assert_eq!(tried_to_send(&hub, thread).await, 1);
 }
 
 fn limited(hub: &HubRef, thread: ThreadId, id: &str, resets_at: i64) {

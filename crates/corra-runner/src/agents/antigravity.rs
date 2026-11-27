@@ -513,7 +513,7 @@ struct State {
     tools: HashMap<String, Tool>,
     asks: HashMap<String, Ask>,
     pending: HashMap<u64, Value>,
-    held: VecDeque<Vec<InputPart>>,
+    held: VecDeque<(String, Vec<InputPart>)>,
     usage: Option<ContextUse>,
     wake_until: Option<tokio::time::Instant>,
     slash: Vec<String>,
@@ -648,6 +648,11 @@ async fn talk(
     }
     if let Some(input) = initial {
         prompt(acp, &mut st, &input).await?;
+    } else if st.turn.is_none()
+        && let Some((id, input)) = st.held.pop_front()
+    {
+        start_turn(ctx, &mut st, id, input.clone());
+        prompt(acp, &mut st, &input).await?;
     }
     loop {
         *current.lock().unwrap() = st.turn.clone().or_else(|| st.last_turn.clone());
@@ -657,6 +662,7 @@ async fn talk(
             msg = acp.read() => {
                 let Some(msg) = msg? else {
                     let code = match &mut acp.child { Some(c) => c.wait().await.ok().and_then(|s| s.code()), None => None };
+                    drop_held(ctx, &mut st);
                     finish_turn(ctx, &mut st, TurnOutcome::Failed, Some(format!("agy exited ({})", code.map(|c| c.to_string()).unwrap_or_else(|| "killed".into()))));
                     bail!("agy exited");
                 };
@@ -814,10 +820,11 @@ async fn sign_in(ctx: &mut SessionCtx, bin: &PathBuf, st: &mut State) -> Result<
                         response: RequestResponse::Cancelled,
                     },
                 );
+                drop_held(ctx, st);
                 finish_turn(ctx, st, TurnOutcome::Interrupted, None);
                 return Ok(false);
             }
-            SessionCmd::Send { input, .. } => st.held.push_back(input),
+            SessionCmd::Send { input, .. } => hold(ctx, st, input),
             SessionCmd::Settings(s) => st.settings.merge(&s),
             _ => {}
         }
@@ -1136,6 +1143,42 @@ fn finish_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Op
     st.wake_until = None;
 }
 
+fn show_message(ctx: &SessionCtx, turn: &str, id: &str, input: &[InputPart]) {
+    emit(
+        ctx,
+        Event::ItemCompleted {
+            turn: turn.to_string(),
+            item: Item {
+                id: format!("{id}:input"),
+                parent: None,
+                body: ItemBody::UserMessage {
+                    content: input.to_vec(),
+                },
+            },
+        },
+    );
+}
+
+fn hold(ctx: &SessionCtx, st: &mut State, input: Vec<InputPart>) {
+    let id = uuid::Uuid::now_v7().to_string();
+    if let Some(turn) = st.turn.clone() {
+        close_text(ctx, st);
+        show_message(ctx, &turn, &id, &input);
+    }
+    st.held.push_back((id, input));
+}
+
+fn drop_held(ctx: &SessionCtx, st: &mut State) {
+    for (id, _) in st.held.drain(..) {
+        emit(
+            ctx,
+            Event::Unread {
+                item: format!("{id}:input"),
+            },
+        );
+    }
+}
+
 fn idle(ctx: &SessionCtx, st: &State) {
     let status = if st.failed.is_some() {
         ThreadStatus::Error
@@ -1161,37 +1204,22 @@ async fn on_command(
                     start_turn(ctx, st, uuid::Uuid::now_v7().to_string(), input.clone());
                     prompt(acp, st, &input).await?;
                 }
+                Some(_) if !st.asks.is_empty() => hold(ctx, st, input),
                 Some(running) => {
                     close_text(ctx, st);
-                    emit(
-                        ctx,
-                        Event::ItemCompleted {
-                            turn: running,
-                            item: Item {
-                                id: format!("{}:input", uuid::Uuid::now_v7()),
-                                parent: None,
-                                body: ItemBody::UserMessage {
-                                    content: input.clone(),
-                                },
-                            },
-                        },
-                    );
-                    if st.asks.is_empty() {
-                        prompt(acp, st, &input).await?;
-                    } else {
-                        st.held.push_back(input);
-                    }
+                    show_message(ctx, &running, &uuid::Uuid::now_v7().to_string(), &input);
+                    prompt(acp, st, &input).await?;
                 }
             }
         }
         SessionCmd::Interrupt => {
             acp.notify("session/cancel", json!({ "sessionId": st.session }))
                 .await?;
+            drop_held(ctx, st);
             let open: Vec<String> = st.asks.keys().cloned().collect();
             for id in open {
                 answer(ctx, acp, st, &id, RequestResponse::Cancelled).await?;
             }
-            st.held.clear();
             if st.prompts.is_empty() && st.turn.is_some() {
                 finish_turn(ctx, st, TurnOutcome::Interrupted, None);
                 idle(ctx, st);
@@ -1202,6 +1230,7 @@ async fn on_command(
         }
         SessionCmd::Settings(s) => apply_settings(ctx, acp, st, s, false).await?,
         SessionCmd::Stop => {
+            drop_held(ctx, st);
             finish_turn(ctx, st, TurnOutcome::Interrupted, None);
             return Ok(false);
         }
@@ -1260,7 +1289,7 @@ async fn answer(
         if st.turn.is_some() {
             let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Running));
         }
-        while let Some(input) = st.held.pop_front() {
+        while let Some((_, input)) = st.held.pop_front() {
             prompt(acp, st, &input).await?;
         }
     }
@@ -1381,8 +1410,8 @@ async fn on_message(ctx: &SessionCtx, acp: &mut Acp, st: &mut State, msg: Value)
                     finish_turn(ctx, st, outcome, error);
                     idle(ctx, st);
                     st.failed = None;
-                    if let Some(next) = st.held.pop_front() {
-                        start_turn(ctx, st, uuid::Uuid::now_v7().to_string(), next.clone());
+                    if let Some((id, next)) = st.held.pop_front() {
+                        start_turn(ctx, st, id, next.clone());
                         prompt(acp, st, &next).await?;
                     }
                 }
@@ -2018,6 +2047,57 @@ mod tests {
         );
         agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
         drain(&mut rx, ended).await;
+    }
+
+    #[tokio::test]
+    async fn a_message_held_behind_an_approval_is_marked_unread_when_stopped() {
+        let (mut agy, mut rx, cmd) = start(AgentSettings::default());
+        open(&mut agy).await;
+        let p = agy.expect("session/prompt").await;
+        agy.send(json!({ "jsonrpc": "2.0", "id": 78, "method": "session/request_permission", "params": {
+            "sessionId": "s1",
+            "toolCall": { "toolCallId": "c1", "title": "ls", "kind": "execute", "rawInput": { "command": "ls" } },
+            "options": [{ "optionId": "a1", "name": "Allow", "kind": "allow_once" }, { "optionId": "r1", "name": "Deny", "kind": "reject_once" }]
+        } })).await;
+        drain(&mut rx, |o| {
+            matches!(o, AgentOut::Event(Event::Request { .. }))
+        })
+        .await;
+        cmd.send(SessionCmd::Send {
+            input: vec![InputPart::Text {
+                text: "and this".into(),
+            }],
+            settings: None,
+        })
+        .unwrap();
+        cmd.send(SessionCmd::Interrupt).unwrap();
+        agy.expect("session/cancel").await;
+        agy.answer(&p, json!({ "stopReason": "cancelled" })).await;
+        let out = drain(&mut rx, ended).await;
+        let shown: Vec<&str> = out
+            .iter()
+            .filter_map(|o| match o {
+                AgentOut::Event(Event::ItemCompleted {
+                    item:
+                        Item {
+                            id,
+                            body: ItemBody::UserMessage { .. },
+                            ..
+                        },
+                    ..
+                }) => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let unread: Vec<&str> = out
+            .iter()
+            .filter_map(|o| match o {
+                AgentOut::Event(Event::Unread { item }) => Some(item.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown.len(), 1, "{out:?}");
+        assert_eq!(unread, shown);
     }
 
     #[tokio::test]

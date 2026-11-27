@@ -458,11 +458,23 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                     .unwrap()
                     .insert(t.id, std::time::Instant::now());
             }
-            if let Err(e) = exec_call(hub, AppCall::Interrupt { thread: t.id }).await {
-                hub.quiet_stops.lock().unwrap().remove(&t.id);
-                return Err(e);
+            let unsent = match exec_call(hub, AppCall::Interrupt { thread: t.id }).await {
+                Ok(v) => v["unsent"].clone(),
+                Err(e) => {
+                    hub.quiet_stops.lock().unwrap().remove(&t.id);
+                    return Err(e);
+                }
+            };
+            let texts: Vec<String> = serde_json::from_value::<Vec<Queued>>(unsent)
+                .unwrap_or_default()
+                .iter()
+                .map(|q| crate::hub::input_text(&q.input))
+                .collect();
+            if texts.is_empty() {
+                Ok(json!({ "stopped": t.title }))
+            } else {
+                Ok(json!({ "stopped": t.title, "unsent": texts }))
             }
-            Ok(json!({ "stopped": t.title }))
         }
         "threads.move" => {
             let t = find_thread(hub, &text(&input, "thread")?)?;

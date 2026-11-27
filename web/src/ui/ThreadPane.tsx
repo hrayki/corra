@@ -325,7 +325,7 @@ export function ThreadPane(props: { id: string }) {
                   <Outgoing
                     parts={q.input}
                     queued
-                    note="Queued for when the agent is done"
+                    note={thread()!.status === 'error' ? 'Held: the last turn failed' : 'Queued for when the agent is done'}
                     actions={[
                       { label: 'Send now', run: () => run(call({ op: 'unqueue', thread: props.id, id: q.id, send: true })) },
                       { label: 'Edit', run: () => editQueued(q) },
