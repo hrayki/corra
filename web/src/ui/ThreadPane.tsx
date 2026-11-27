@@ -104,8 +104,8 @@ export function ThreadPane(props: { id: string }) {
     try {
       await loadEarlier(props.id)
     } finally {
-      setFetching(false)
       requestAnimationFrame(() => {
+        setFetching(false)
         if (!scroller) return
         if (!stick()) scroller.scrollTop = scroller.scrollHeight - below
         if (nearTop()) void more()
