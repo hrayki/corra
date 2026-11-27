@@ -19,6 +19,7 @@ import { clock, duration } from '../lib/format'
 import { openFile, setPanel } from '../lib/panel'
 import { Btn, Thumbs, inputClass } from './bits'
 import { ToolDetail, canonicalToolName, toolSummary } from './tools'
+import { approvalBody, approvalHeading } from '../lib/approval'
 import { AgentRow, ThreadRow } from './Agents'
 import { isAgentCall, startedThread } from '../lib/agents'
 import { holds } from '../lib/find'
@@ -729,33 +730,6 @@ function ToolRow(props: { thread?: string; item: ItemView; kids?: Map<string, It
   )
 }
 
-function approvalTitle(rawTool: string): string {
-  const tool = canonicalToolName(rawTool)
-  switch (tool) {
-    case 'Bash':
-      return 'Run this command?'
-    case 'Write':
-      return 'Write this file?'
-    case 'Edit':
-    case 'MultiEdit':
-    case 'NotebookEdit':
-      return 'Edit this file?'
-    case 'Delete':
-      return 'Delete this?'
-    case 'Move':
-      return 'Move this?'
-    case 'WebFetch':
-      return 'Fetch this page?'
-    case 'Read':
-      return 'Read this file?'
-    default: {
-      if (tool === 'acp:other') return 'Allow this?'
-      const m = tool.match(/^mcp__(.+?)__(.+)$/)
-      return m ? `Use ${m[2].replace(/_/g, ' ')} from ${m[1]}?` : `Use ${tool}?`
-    }
-  }
-}
-
 function resolvedLabel(r?: RequestResponse) {
   if (!r) return ''
   if (r.type === 'allow') return r.always ? 'Allowed for this session' : 'Allowed'
@@ -820,7 +794,10 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
           </span>{' '}
           <span class="font-mono text-[12px] text-faint">
             {req().type === 'tool_approval'
-              ? toolSummary((req() as { tool: string }).tool, (req() as unknown as { input: null }).input, undefined, props.cwd).detail
+              ? (() => {
+                  const s = toolSummary((req() as { tool: string }).tool, (req() as unknown as { input: null }).input, undefined, props.cwd)
+                  return s.detail || (s.verb !== 'Tool' ? s.verb : '')
+                })()
               : req().type === 'hub_action'
                 ? isSignIn()
                   ? ''
@@ -839,16 +816,21 @@ function RequestCard(props: { thread: string; r: RequestView; cwd?: string }) {
           <Match when={req().type === 'tool_approval' && req()}>
             {(r) => {
               const x = r() as Extract<RequestView['request'], { type: 'tool_approval' }>
+              const tool = canonicalToolName(x.tool)
               const s = toolSummary(x.tool, x.input, undefined, props.cwd)
+              const heading = approvalHeading(x.tool, x.input)
+              const body = approvalBody(x.input, s, heading)
               return (
                 <>
-                  <div class="text-[14px] font-medium">{approvalTitle(x.tool)}</div>
+                  <div class="text-[14px] font-medium">{heading}</div>
                   <Show
-                    when={x.tool === 'Edit' || x.tool === 'MultiEdit' || x.tool === 'Write'}
+                    when={tool === 'Edit' || tool === 'MultiEdit' || tool === 'Write'}
                     fallback={
-                      <div class="mt-2 max-h-40 overflow-auto rounded-lg bg-bg/70 px-3 py-2 font-mono text-[12px] break-all whitespace-pre-wrap">
-                        {s.full ?? s.detail}
-                      </div>
+                      <Show when={body}>
+                        <div class="mt-2 max-h-40 overflow-auto rounded-lg bg-bg/70 px-3 py-2 font-mono text-[12px] break-all whitespace-pre-wrap">
+                          {body}
+                        </div>
+                      </Show>
                     }
                   >
                     <div class="mt-1 mb-2 font-mono text-[12px] text-mute">{s.detail}</div>
