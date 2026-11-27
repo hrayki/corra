@@ -340,6 +340,7 @@ fn attach_runner(hub: &HubRef, m: MachineId) -> mpsc::UnboundedReceiver<HubMsg> 
             live: Default::default(),
             prepared: Default::default(),
             conn_id: 0,
+            takes: false,
         },
     );
     hub.db

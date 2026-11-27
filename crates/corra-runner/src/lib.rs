@@ -45,7 +45,9 @@ struct Session {
     spec: StartSpec,
     idle_since: Option<std::time::Instant>,
     parking: bool,
-    held: Vec<(Vec<InputPart>, Option<AgentSettings>)>,
+    stopping: bool,
+    held: Vec<(Vec<InputPart>, Option<AgentSettings>, Option<String>)>,
+    restart: Option<StartSpec>,
 }
 
 fn park_after() -> Duration {
@@ -95,6 +97,10 @@ struct Runner {
     parked: HashMap<ThreadId, StartSpec>,
     own_build: Option<String>,
     newer: Option<String>,
+    fetching: Option<tokio::task::JoinHandle<Result<std::path::PathBuf>>>,
+    fetched: Option<std::path::PathBuf>,
+    switch_at: Option<tokio::time::Instant>,
+    took: std::collections::VecDeque<String>,
     connected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     browser: browser::Browser,
     phone: phone::Phone,
@@ -127,6 +133,10 @@ pub async fn run(cli: Options) -> Result<()> {
             None
         },
         newer: None,
+        fetching: None,
+        fetched: None,
+        switch_at: None,
+        took: Default::default(),
         connected: cli.connected.clone(),
         browser: browser::Browser::start(bg_tx.clone(), cli.sync),
         phone: phone::Phone::new(bg_tx.clone(), tunnels.clone()),
@@ -332,6 +342,7 @@ async fn run_connection(
                 status: s.status,
             })
             .collect(),
+        takes: true,
     };
     sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
@@ -401,9 +412,24 @@ async fn run_connection(
                     }
                 }
                 runner.park_idle();
-                if runner.ready_to_update() {
-                    runner.update().await;
+                runner.update();
+            }
+            fetched = async { runner.fetching.as_mut().unwrap().await }, if runner.fetching.is_some() => {
+                runner.fetching = None;
+                match fetched {
+                    Ok(Ok(next)) => {
+                        runner.fetched = Some(next);
+                        runner.update();
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("couldn't update the runner: {e:#}");
+                        runner.newer = None;
+                    }
+                    Err(e) => tracing::warn!("the runner's update stopped: {e}"),
                 }
+            }
+            _ = async { tokio::time::sleep_until(runner.switch_at.unwrap()).await }, if runner.switch_at.is_some() => {
+                runner.switch();
             }
             Some(c) = hub_rx.recv() => {
                 let id = runner.next_call;
@@ -428,29 +454,56 @@ impl Runner {
         match msg {
             HubMsg::Welcome { .. } => {}
             HubMsg::Ack { thread, seq } => self.outbox.ack(thread, seq),
-            HubMsg::Start { spec, input } => {
-                self.parked.remove(&spec.thread);
+            HubMsg::Start {
+                spec,
+                input,
+                delivery,
+            } => {
+                if self.switch_at.is_some() || self.seen(&delivery, out) {
+                    return;
+                }
+                let thread = spec.thread;
+                self.parked.remove(&thread);
+                if let Some(s) = self.sessions.get_mut(&thread)
+                    && (s.parking || s.stopping)
+                {
+                    if let Some(input) = input {
+                        s.held.push((input, Some(spec.settings.clone()), delivery));
+                    }
+                    s.restart = Some(*spec);
+                    return;
+                }
                 self.start(*spec, input, out);
+                self.took(delivery, true, Some(out));
             }
             HubMsg::Send {
                 thread,
                 input,
                 settings,
-            } => match self.sessions.get_mut(&thread) {
-                Some(s) if s.parking => s.held.push((input, settings)),
-                Some(s) => {
-                    s.idle_since = None;
-                    let _ = s.cmds.send(SessionCmd::Send { input, settings });
+                delivery,
+            } => {
+                if self.switch_at.is_some() || self.seen(&delivery, out) {
+                    return;
                 }
-                None => {
-                    if let Some(mut spec) = self.parked.remove(&thread) {
-                        if let Some(settings) = settings {
-                            spec.settings = settings;
-                        }
-                        self.start(spec, Some(input), out);
+                match self.sessions.get_mut(&thread) {
+                    Some(s) if s.parking || s.stopping => s.held.push((input, settings, delivery)),
+                    Some(s) => {
+                        s.idle_since = None;
+                        let _ = s.cmds.send(SessionCmd::Send { input, settings });
+                        self.took(delivery, true, Some(out));
                     }
+                    None => match self.parked.remove(&thread) {
+                        Some(mut spec) => {
+                            if let Some(settings) = settings {
+                                spec.settings = settings;
+                            }
+                            self.start(spec, Some(input), out);
+                            self.took(delivery, true, Some(out));
+                        }
+                        None => self.took(delivery, false, Some(out)),
+                    },
                 }
-            },
+            }
             HubMsg::Interrupt { thread } => self.cmd(thread, SessionCmd::Interrupt),
             HubMsg::StopTask { thread, tool } => self.cmd(thread, SessionCmd::StopTask { tool }),
             HubMsg::SignIn {
@@ -466,7 +519,12 @@ impl Runner {
             HubMsg::Settings { thread, settings } => {
                 self.cmd(thread, SessionCmd::Settings(settings))
             }
-            HubMsg::Stop { thread } => self.cmd(thread, SessionCmd::Stop),
+            HubMsg::Stop { thread } => {
+                if let Some(s) = self.sessions.get_mut(&thread) {
+                    s.stopping = true;
+                }
+                self.cmd(thread, SessionCmd::Stop)
+            }
             HubMsg::TermInput { term, data } => self.terms.input(&term, &data),
             HubMsg::TermResize { term, cols, rows } => self.terms.resize(&term, cols, rows),
             HubMsg::TermClose { term } => self.terms.close(&term),
@@ -683,7 +741,9 @@ impl Runner {
                 spec: spec.clone(),
                 idle_since: None,
                 parking: false,
+                stopping: false,
                 held: vec![],
+                restart: None,
             },
         );
         let _ = out.send(RunnerMsg::ThreadStatus {
@@ -717,26 +777,71 @@ impl Runner {
             })
     }
 
-    async fn update(&mut self) {
+    fn update(&mut self) {
+        if self.switch_at.is_some() || !self.ready_to_update() {
+            return;
+        }
         let Some(want) = self.newer.clone() else {
             return;
         };
-        let next = match update::fetch(&self.hub_url, &self.token, &want).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("couldn't update the runner: {e:#}");
-                self.newer = None;
-                return;
+        if self.fetched.is_none() {
+            if self.fetching.is_none() {
+                let (hub, token) = (self.hub_url.clone(), self.token.clone());
+                self.fetching = Some(tokio::spawn(async move {
+                    update::fetch(&hub, &token, &want).await
+                }));
             }
-        };
+            return;
+        }
         for s in self.sessions.values_mut() {
             s.parking = true;
             let _ = s.cmds.send(SessionCmd::Stop);
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        self.switch_at = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+    }
+
+    fn switch(&mut self) {
+        self.switch_at = None;
+        let Some(next) = self.fetched.take() else {
+            return;
+        };
         let e = update::switch(next);
         tracing::warn!("couldn't restart into the newer runner: {e:#}");
         self.newer = None;
+    }
+
+    fn seen(&mut self, delivery: &Option<String>, out: &mpsc::UnboundedSender<RunnerMsg>) -> bool {
+        let Some(d) = delivery else {
+            return false;
+        };
+        if !self.took.contains(d) {
+            return false;
+        }
+        let _ = out.send(RunnerMsg::Took {
+            delivery: d.clone(),
+            taken: true,
+        });
+        true
+    }
+
+    fn took(
+        &mut self,
+        delivery: Option<String>,
+        taken: bool,
+        out: Option<&mpsc::UnboundedSender<RunnerMsg>>,
+    ) {
+        let Some(d) = delivery else {
+            return;
+        };
+        if taken {
+            if self.took.len() >= 500 {
+                self.took.pop_front();
+            }
+            self.took.push_back(d.clone());
+        }
+        if let Some(out) = out {
+            let _ = out.send(RunnerMsg::Took { delivery: d, taken });
+        }
     }
 
     fn set_connected(&self, on: bool) {
@@ -836,22 +941,30 @@ impl Runner {
                 }
                 self.sync_thread(thread);
                 let ended = self.sessions.remove(&thread);
-                if let Some(s) = ended.filter(|s| s.parking && error.is_none()) {
-                    let mut spec = s.spec;
-                    spec.resume_session = s.session_id;
-                    spec.next_seq = s.next_seq;
-                    spec.fork_of = None;
-                    spec.resume_at = None;
-                    spec.moved_from = None;
+                if let Some(s) = ended.filter(|s| {
+                    s.restart.is_some() || !s.held.is_empty() || (s.parking && error.is_none())
+                }) && self.switch_at.is_none()
+                {
+                    let mut spec = s.restart.unwrap_or_else(|| {
+                        let mut spec = s.spec;
+                        spec.resume_session = s.session_id;
+                        spec.next_seq = s.next_seq;
+                        spec.fork_of = None;
+                        spec.resume_at = None;
+                        spec.moved_from = None;
+                        spec
+                    });
                     let mut held = s.held.into_iter();
-                    if let Some((input, settings)) = held.next() {
+                    if let Some((input, settings, delivery)) = held.next() {
                         if let Some(settings) = settings {
                             spec.settings = settings;
                         }
                         let out = self.bg_tx.clone();
                         self.start(spec, Some(input), &out);
-                        for (input, settings) in held {
+                        self.took(delivery, true, tx);
+                        for (input, settings, delivery) in held {
                             self.cmd(thread, SessionCmd::Send { input, settings });
+                            self.took(delivery, true, tx);
                         }
                         return;
                     }

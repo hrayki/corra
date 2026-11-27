@@ -25,6 +25,16 @@ pub struct RunnerConn {
     pub live: HashSet<ThreadId>,
     pub prepared: HashSet<ProjectId>,
     pub conn_id: u64,
+    pub takes: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Delivery {
+    pub thread: ThreadId,
+    pub input: Vec<InputPart>,
+    #[serde(default)]
+    pub settings: Option<AgentSettings>,
+    pub at: i64,
 }
 
 type Pending = Mutex<HashMap<u64, (MachineId, oneshot::Sender<Result<Value, String>>)>>;
@@ -938,6 +948,86 @@ impl Hub {
 
     pub fn delivering(&self, thread: ThreadId) -> bool {
         self.delivering.lock().unwrap().contains_key(&thread)
+            || self.deliveries().iter().any(|(_, d)| d.thread == thread)
+    }
+
+    pub fn deliveries(&self) -> Vec<(String, Delivery)> {
+        self.db
+            .kv_keys("delivery:")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|k| {
+                let d = serde_json::from_str(&self.db.kv_get(&k).ok()??).ok()?;
+                Some((k.trim_start_matches("delivery:").to_string(), d))
+            })
+            .collect()
+    }
+
+    pub fn took(self: &Arc<Self>, machine: MachineId, delivery: String, taken: bool) {
+        let key = format!("delivery:{delivery}");
+        if taken {
+            let _ = self.db.kv_delete(&key);
+            return;
+        }
+        let Some(d) = self
+            .db
+            .kv_get(&key)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Delivery>(&s).ok())
+        else {
+            return;
+        };
+        if let Some(c) = self.runners.lock().unwrap().get_mut(&machine) {
+            c.live.remove(&d.thread);
+        }
+        self.redeliver(delivery, d);
+    }
+
+    pub fn redeliver_to(self: &Arc<Self>, machine: MachineId) {
+        for (id, d) in self.deliveries() {
+            if self.machine_of(d.thread) == Some(machine) {
+                self.redeliver(id, d);
+            }
+        }
+    }
+
+    pub fn redeliver_unconnected(self: &Arc<Self>) {
+        for (id, d) in self.deliveries() {
+            if !self
+                .machine_of(d.thread)
+                .is_some_and(|m| self.runner_connected(m))
+            {
+                self.redeliver(id, d);
+            }
+        }
+    }
+
+    fn machine_of(&self, thread: ThreadId) -> Option<MachineId> {
+        self.db
+            .thread(thread)
+            .ok()
+            .flatten()
+            .and_then(|t| t.machine)
+    }
+
+    fn redeliver(self: &Arc<Self>, id: String, d: Delivery) {
+        let hub = self.clone();
+        tokio::spawn(async move {
+            let thread = d.thread;
+            if let Err(e) = hub.deliver_tracked(id, d).await {
+                hub.hub_notice(thread, NoticeLevel::Error, format!("Couldn't send: {e:#}"));
+                let _ = hub.set_thread_status(thread, ThreadStatus::Error);
+            }
+        });
+    }
+
+    pub fn forget_deliveries_before(&self, at: i64) {
+        for (id, d) in self.deliveries() {
+            if d.at < at {
+                let _ = self.db.kv_delete(&format!("delivery:{id}"));
+            }
+        }
     }
 
     pub fn settle_strays(&self, now: i64) -> Result<()> {
@@ -1344,8 +1434,28 @@ impl Hub {
         input: Vec<InputPart>,
         settings: Option<AgentSettings>,
     ) -> Result<()> {
+        let id = new_id().to_string();
+        let d = Delivery {
+            thread,
+            input,
+            settings,
+            at: now_ms(),
+        };
+        if let Ok(s) = serde_json::to_string(&d) {
+            self.db.kv_set(&format!("delivery:{id}"), &s)?;
+        }
+        self.deliver_tracked(id, d).await
+    }
+
+    async fn deliver_tracked(self: &Arc<Self>, id: String, d: Delivery) -> Result<()> {
+        let thread = d.thread;
         *self.delivering.lock().unwrap().entry(thread).or_default() += 1;
-        let r = self.deliver_now(thread, input, settings).await;
+        let r = self
+            .deliver_now(thread, d.input, d.settings, Some(id.clone()))
+            .await;
+        if r.is_err() {
+            let _ = self.db.kv_delete(&format!("delivery:{id}"));
+        }
         let mut d = self.delivering.lock().unwrap();
         if let Some(n) = d.get_mut(&thread) {
             *n -= 1;
@@ -1361,6 +1471,7 @@ impl Hub {
         thread: ThreadId,
         input: Vec<InputPart>,
         settings: Option<AgentSettings>,
+        delivery: Option<String>,
     ) -> Result<()> {
         let mut t = self
             .db
@@ -1410,6 +1521,16 @@ impl Hub {
             }
             live = false;
         }
+        let takes = self
+            .runners
+            .lock()
+            .unwrap()
+            .get(&machine)
+            .is_some_and(|c| c.takes);
+        if !takes && let Some(d) = &delivery {
+            let _ = self.db.kv_delete(&format!("delivery:{d}"));
+        }
+        let delivery = delivery.filter(|_| takes);
         if live {
             self.send_runner(
                 machine,
@@ -1417,6 +1538,7 @@ impl Hub {
                     thread,
                     input,
                     settings,
+                    delivery,
                 },
             )?;
         } else {
@@ -1443,6 +1565,7 @@ impl Hub {
                 HubMsg::Start {
                     spec: Box::new(spec),
                     input: Some(input),
+                    delivery,
                 },
             )?;
             self.set_thread_kv(thread, "spec", &mark);

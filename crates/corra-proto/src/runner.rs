@@ -24,6 +24,8 @@ pub enum RunnerMsg {
         protocol: u32,
         info: MachineInfo,
         threads: Vec<RunningThread>,
+        #[serde(default)]
+        takes: bool,
     },
     Event {
         thread: ThreadId,
@@ -74,6 +76,10 @@ pub enum RunnerMsg {
         thread: ThreadId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    Took {
+        delivery: String,
+        taken: bool,
     },
     Reply {
         id: u64,
@@ -127,12 +133,16 @@ pub enum HubMsg {
         spec: Box<StartSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<Vec<InputPart>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<String>,
     },
     Send {
         thread: ThreadId,
         input: Vec<InputPart>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         settings: Option<AgentSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<String>,
     },
     Interrupt {
         thread: ThreadId,
