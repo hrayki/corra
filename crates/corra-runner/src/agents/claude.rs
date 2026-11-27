@@ -1,12 +1,11 @@
 use std::collections::{HashMap, VecDeque};
-use std::process::Stdio;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use corra_proto::*;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
+use super::child::{JsonlChild, with_output};
 use super::{AgentOut, SessionCmd, SessionCtx};
 
 pub async fn run(mut ctx: SessionCtx) {
@@ -25,81 +24,38 @@ fn finish(ctx: &SessionCtx, result: Result<()>) {
     let _ = ctx.out.send(AgentOut::Exited { error });
 }
 
-type Reader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-type Writer = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
-
 struct Proc {
-    child: Option<Child>,
-    stdin: Writer,
-    lines: tokio::io::Lines<BufReader<Reader>>,
+    io: JsonlChild,
     next_req: u64,
-    stderr: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
-    stderr_reader: Option<tokio::task::JoinHandle<()>>,
-    rec: Option<super::record::Recorder>,
 }
-
-const STDERR_LINES: usize = 15;
-const STDERR_LINE_CHARS: usize = 400;
 
 fn exit_text(status: std::process::ExitStatus, tail: &str) -> String {
     with_output(format!("claude exited ({status})"), tail)
 }
 
-fn with_output(what: String, tail: &str) -> String {
-    if tail.is_empty() || what.contains(tail) {
-        what
-    } else {
-        format!("{what}. The end of its output:\n\n```\n{tail}\n```")
-    }
-}
-
 impl Proc {
     #[cfg(test)]
-    fn piped(reader: Reader, writer: Writer) -> Proc {
+    fn piped(reader: super::child::Reader, writer: super::child::Writer) -> Proc {
         Proc {
-            child: None,
-            stdin: writer,
-            lines: BufReader::new(reader).lines(),
+            io: JsonlChild::piped(reader, writer),
             next_req: 0,
-            stderr: Default::default(),
-            stderr_reader: None,
-            rec: None,
         }
     }
 
     async fn wait(&mut self) -> Result<std::process::ExitStatus> {
-        match &mut self.child {
-            Some(c) => Ok(c.wait().await?),
-            None => {
-                use std::os::unix::process::ExitStatusExt;
-                Ok(std::process::ExitStatus::from_raw(0))
-            }
-        }
+        self.io.wait().await
     }
 
     async fn kill(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill().await;
-        }
+        self.io.kill().await
     }
 
     async fn write(&mut self, v: &Value) -> Result<()> {
-        if let Some(r) = &mut self.rec {
-            r.runner(v);
-        }
-        let mut line = serde_json::to_vec(v)?;
-        line.push(b'\n');
-        self.stdin.write_all(&line).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        self.io.write_json(v).await
     }
 
     async fn stderr_tail(&mut self) -> String {
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), reader).await;
-        }
-        let lines = self.stderr.lock().unwrap();
-        lines.iter().cloned().collect::<Vec<_>>().join("\n")
+        self.io.stderr_tail().await
     }
 
     async fn control(&mut self, request: Value) -> Result<String> {
@@ -166,7 +122,7 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         );
         allowed.push("mcp__corra__*");
     }
-    let shared_mcp = crate::files::home().join(".corra/kit/shared/mcp.json");
+    let shared_mcp = super::mcp::shared_mcp_path();
     if !servers.is_empty() || shared_mcp.exists() {
         cmd.arg("--mcp-config")
             .arg(json!({ "mcpServers": servers }).to_string());
@@ -176,10 +132,6 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         cmd.arg("--allowedTools").arg(allowed.join(","));
     }
     cmd.current_dir(&ctx.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .env_remove("CLAUDECODE")
         .env_remove("NODE_OPTIONS")
         .env_remove("CORRA_TOKEN")
@@ -192,34 +144,6 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         cmd.env(k, v);
     }
     crate::git::thread_header_env(&mut cmd, &ctx.hub_url, ctx.spec.thread);
-    #[cfg(target_os = "linux")]
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().context("starting claude")?;
-    let stdin: Writer = Box::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
-    let stdout: Reader = Box::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
-    let tail = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
-    let stderr_reader = child.stderr.take().map(|stderr| {
-        let tail = tail.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                tracing::debug!(target: "corra_runner::claude", "stderr: {l}");
-                if l.trim().is_empty() {
-                    continue;
-                }
-                let mut tail = tail.lock().unwrap();
-                if tail.len() == STDERR_LINES {
-                    tail.pop_front();
-                }
-                tail.push_back(l.chars().take(STDERR_LINE_CHARS).collect());
-            }
-        })
-    });
     let rec = super::record::Recorder::open(
         ctx.spec.thread,
         json!({
@@ -232,15 +156,8 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
             "tools": ctx.spec.tools,
         }),
     );
-    Ok(Proc {
-        child: Some(child),
-        stdin,
-        lines: BufReader::new(stdout).lines(),
-        next_req: 0,
-        stderr: tail,
-        stderr_reader,
-        rec,
-    })
+    let io = JsonlChild::spawn(cmd, "claude", "claude", rec)?;
+    Ok(Proc { io, next_req: 0 })
 }
 
 pub fn find_bin() -> String {
@@ -410,7 +327,11 @@ async fn drive(ctx: &mut SessionCtx) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(super) async fn replay(mut ctx: SessionCtx, reader: Reader, writer: Writer) {
+pub(super) async fn replay(
+    mut ctx: SessionCtx,
+    reader: super::child::Reader,
+    writer: super::child::Writer,
+) {
     let (mut st, _) = new_state(&ctx);
     let mut proc = Proc::piped(reader, writer);
     let result = talk(&mut ctx, &mut st, &mut proc).await;
@@ -446,7 +367,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
     st.deferred = Some(deferred_tx);
 
     if let Some(input) = ctx.initial.take() {
-        if let Some(r) = &mut proc.rec {
+        if let Some(r) = &mut proc.io.rec {
             r.app(
                 &SessionCmd::Send {
                     input: input.clone(),
@@ -463,10 +384,10 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
     loop {
         tokio::select! {
             biased;
-            line = proc.lines.next_line() => {
+            line = proc.io.next_line() => {
                 let Some(line) = line? else {
                     let status = proc.wait().await?;
-                    if let Some(r) = &mut proc.rec {
+                    if let Some(r) = &mut proc.io.rec {
                         r.exit(status.code());
                     }
                     let why = exit_text(status, &proc.stderr_tail().await);
@@ -475,7 +396,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                     return Err(anyhow!(why));
                 };
                 if line.trim().is_empty() { continue; }
-                if let Some(r) = &mut proc.rec {
+                if let Some(r) = &mut proc.io.rec {
                     r.claude(&line);
                 }
                 let msg: Value = match serde_json::from_str(&line) {
@@ -509,7 +430,7 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
             }
             cmd = ctx.cmds.recv() => {
                 let Some(cmd) = cmd else { proc.kill().await; return Ok(()); };
-                if let Some(r) = &mut proc.rec {
+                if let Some(r) = &mut proc.io.rec {
                     r.app(&cmd, false);
                 }
                 match cmd {
@@ -1901,28 +1822,7 @@ async fn on_mcp(
                 }
             };
             tokio::spawn(async move {
-                let result = match rx.await {
-                    Ok(Ok(v)) => match (v["image"]["data"].as_str(), v["image"]["mime"].as_str()) {
-                        (Some(data), Some(mime)) => json!({ "content": [
-                            { "type": "text", "text": v["text"].as_str().unwrap_or_default() },
-                            { "type": "image", "data": data, "mimeType": mime }
-                        ] }),
-                        _ => {
-                            let text = match &v {
-                                Value::String(s) => s.clone(),
-                                other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                            };
-                            json!({ "content": [{ "type": "text", "text": text }] })
-                        }
-                    },
-                    Ok(Err(e)) => {
-                        json!({ "content": [{ "type": "text", "text": e }], "isError": true })
-                    }
-                    Err(_) => {
-                        json!({ "content": [{ "type": "text", "text": "the call was dropped" }], "isError": true })
-                    }
-                };
-                respond(result);
+                respond(super::mcp::tool_result(rx.await));
             });
         }
         _ => {

@@ -160,6 +160,50 @@ pub fn tool_result(
     }
 }
 
+pub fn shared_mcp_path() -> PathBuf {
+    crate::files::home().join(".corra/kit/shared/mcp.json")
+}
+
+pub fn acp_shared_servers(path: &std::path::Path) -> Vec<Value> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return vec![];
+    };
+    let Some(map) = v["mcpServers"].as_object() else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for (name, cfg) in map {
+        if name == "corra" {
+            continue;
+        }
+        let Some(command) = cfg["command"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let args: Vec<Value> = cfg["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(|s| json!(s)))
+            .collect();
+        let env: Vec<Value> = cfg["env"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| Some(json!({ "name": k, "value": v.as_str()? })))
+            .collect();
+        out.push(json!({
+            "name": name,
+            "command": command,
+            "args": args,
+            "env": env,
+        }));
+    }
+    out
+}
+
 pub async fn bridge(path: &str) -> Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (mut read, mut write) = stream.into_split();
@@ -170,4 +214,41 @@ pub async fn bridge(path: &str) -> Result<()> {
         r = tokio::io::copy(&mut read, &mut stdout) => { r?; }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acp_shared_servers_converts_claude_format_and_skips_corra() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "corra": { "command": "corra-runner", "args": ["mcp"] },
+                    "docs": {
+                        "command": "npx",
+                        "args": ["-y", "docs-mcp"],
+                        "env": { "API_KEY": "secret" }
+                    },
+                    "empty": { "args": [] }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let servers = acp_shared_servers(&path);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["name"], "docs");
+        assert_eq!(servers[0]["command"], "npx");
+        assert_eq!(servers[0]["args"], json!(["-y", "docs-mcp"]));
+        assert_eq!(
+            servers[0]["env"],
+            json!([{ "name": "API_KEY", "value": "secret" }])
+        );
+        assert!(acp_shared_servers(&dir.path().join("missing.json")).is_empty());
+    }
 }

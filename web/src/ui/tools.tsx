@@ -18,15 +18,35 @@ function partialField(json: string | undefined, key: string): string | undefined
   }
 }
 
-export function toolSummary(name: string, input: JsonValue | null | undefined, live?: string, cwd?: string): Summary {
+const LEGACY_ACP: Record<string, string> = {
+  'acp:read': 'Read',
+  'acp:edit': 'Edit',
+  'acp:delete': 'Delete',
+  'acp:move': 'Move',
+  'acp:search': 'Grep',
+  'acp:execute': 'Bash',
+  'acp:think': 'Think',
+  'acp:fetch': 'WebFetch',
+  'acp:switch_mode': 'SwitchMode',
+}
+
+export function canonicalToolName(name: string): string {
+  return LEGACY_ACP[name] ?? name
+}
+
+export function toolSummary(rawName: string, input: JsonValue | null | undefined, live?: string, cwd?: string): Summary {
+  const name = canonicalToolName(rawName)
   const i = (input && typeof input === 'object' && !Array.isArray(input) ? input : {}) as Record<string, any>
   const f = (k: string) => i[k] ?? partialField(live, k)
-  const path = (k: string) => shortPath(f(k), cwd)
+  const path = (k: string) => shortPath(f(k) ?? f('path') ?? f('title'), cwd)
   switch (name) {
-    case 'Bash':
-      return f('description')
-        ? { verb: 'Ran', detail: String(f('description')), full: f('command'), plain: true }
-        : { verb: 'Ran', detail: String(f('command') ?? '').split('\n')[0], full: f('command') }
+    case 'Bash': {
+      const cmd = f('command') ?? f('CommandLine')
+      const desc = f('description') ?? (f('title') && f('title') !== cmd ? f('title') : undefined)
+      return desc
+        ? { verb: 'Ran', detail: String(desc), full: cmd ?? desc, plain: true }
+        : { verb: 'Ran', detail: String(cmd ?? f('title') ?? '').split('\n')[0], full: cmd }
+    }
     case 'Read':
       return { verb: 'Read', detail: path('file_path') }
     case 'Write':
@@ -34,16 +54,27 @@ export function toolSummary(name: string, input: JsonValue | null | undefined, l
     case 'Edit':
     case 'MultiEdit':
       return { verb: 'Edited', detail: path('file_path') }
+    case 'Delete':
+      return { verb: 'Deleted', detail: path('file_path'), plain: true }
+    case 'Move':
+      return { verb: 'Moved', detail: path('file_path'), plain: true }
     case 'NotebookEdit':
       return { verb: 'Edited', detail: path('notebook_path') }
     case 'Grep':
-      return { verb: 'Searched', detail: `${f('pattern') ?? ''}${i.path ? `  in ${shortPath(i.path, cwd)}` : ''}` }
+      return {
+        verb: 'Searched',
+        detail: `${f('pattern') ?? f('title') ?? ''}${i.path ? `  in ${shortPath(i.path, cwd)}` : ''}`,
+      }
     case 'Glob':
       return { verb: 'Listed', detail: String(f('pattern') ?? '') }
     case 'WebFetch':
-      return { verb: 'Fetched', detail: String(f('url') ?? '') }
+      return { verb: 'Fetched', detail: String(f('url') ?? f('title') ?? '') }
     case 'WebSearch':
       return { verb: 'Searched the web', detail: String(f('query') ?? '') }
+    case 'Think':
+      return { verb: 'Thought', detail: String(f('title') ?? ''), plain: true }
+    case 'SwitchMode':
+      return { verb: 'Switched mode', detail: String(f('title') ?? ''), plain: true }
     case 'Agent':
     case 'Task':
       return { verb: 'Agent', detail: String(f('description') ?? '') }
@@ -71,24 +102,6 @@ export function toolSummary(name: string, input: JsonValue | null | undefined, l
       return { verb: 'Proposed a plan', detail: '' }
     case '':
       return { verb: 'Working', detail: '' }
-    case 'acp:read':
-      return { verb: 'Read', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:edit':
-      return { verb: 'Edited', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:delete':
-      return { verb: 'Deleted', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:move':
-      return { verb: 'Moved', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:search':
-      return { verb: 'Searched', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:execute':
-      return { verb: 'Ran', detail: String(f('title') ?? ''), full: f('command') ?? f('CommandLine'), plain: true }
-    case 'acp:think':
-      return { verb: 'Thought', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:fetch':
-      return { verb: 'Fetched', detail: String(f('title') ?? ''), plain: true }
-    case 'acp:switch_mode':
-      return { verb: 'Switched mode', detail: String(f('title') ?? ''), plain: true }
     case 'acp:other':
       return { verb: String(f('title') ?? 'Tool'), detail: '', plain: true }
     default: {
@@ -101,37 +114,43 @@ export function toolSummary(name: string, input: JsonValue | null | undefined, l
           detail: arg ? arg.split('\n')[0].slice(0, 120) : '',
         }
       }
-      return { verb: name, detail: '' }
+      return { verb: name, detail: String(f('title') && f('title') !== name ? f('title') : '') }
     }
   }
 }
 
 export function ToolDetail(props: { name: string; input: JsonValue | null | undefined; output?: ToolOutput | null }) {
+  const name = () => canonicalToolName(props.name)
   const i = () => (props.input && typeof props.input === 'object' ? props.input : {}) as Record<string, any>
   const out = () => props.output?.text ?? ''
-  const isEdit = () => props.name === 'Edit' || props.name === 'MultiEdit'
+  const hasDiff = () =>
+    (name() === 'Edit' && (i().old_string !== undefined || i().new_string !== undefined)) ||
+    (name() === 'MultiEdit' && Array.isArray(i().edits))
+  const hasWrite = () => name() === 'Write' && i().content !== undefined
+  const hasBash = () => name() === 'Bash' && Boolean(i().command ?? i().CommandLine)
   const shown = () => {
-    if (!props.name.startsWith('acp:')) return props.input && Object.keys(i()).length > 0 ? props.input : undefined
-    const { title: _t, path: _p, ...rest } = i()
+    const obj = i()
+    if (!props.input || Object.keys(obj).length === 0) return undefined
+    const { title: _t, path: _p, ...rest } = obj
     return Object.keys(rest).length > 0 ? rest : undefined
   }
   return (
     <div class="space-y-2">
-      <Show when={isEdit()}>
-        <For each={props.name === 'MultiEdit' ? ((i().edits as any[]) ?? []) : [i()]}>
+      <Show when={hasDiff()}>
+        <For each={name() === 'MultiEdit' ? ((i().edits as any[]) ?? []) : [i()]}>
           {(e) => <MiniDiff before={String(e.old_string ?? '')} after={String(e.new_string ?? '')} />}
         </For>
       </Show>
-      <Show when={props.name === 'Write'}>
+      <Show when={hasWrite()}>
         <CodeBlock code={String(i().content ?? '')} path={String(i().file_path ?? '')} />
       </Show>
-      <Show when={props.name === 'Bash'}>
-        <Pre text={`$ ${i().command ?? ''}`} />
+      <Show when={hasBash()}>
+        <Pre text={`$ ${i().command ?? i().CommandLine ?? ''}`} />
       </Show>
-      <Show when={!isEdit() && props.name !== 'Write' && props.name !== 'Bash' && shown()}>
+      <Show when={!hasDiff() && !hasWrite() && !hasBash() && shown()}>
         <Pre text={JSON.stringify(shown(), null, 2)} />
       </Show>
-      <Show when={out() && (!(isEdit() || props.name === 'Write') || props.output?.is_error)}>
+      <Show when={out() && (!(hasDiff() || hasWrite()) || props.output?.is_error)}>
         <Pre text={out()} error={props.output?.is_error} />
       </Show>
       <For each={props.output?.images ?? []}>

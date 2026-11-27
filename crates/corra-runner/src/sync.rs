@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,6 +25,16 @@ pub type SyncRef = Arc<Syncer>;
 
 fn is_append_only(rel: &str) -> bool {
     rel.ends_with(".jsonl")
+}
+
+fn is_sqlite_shm(rel: &str) -> bool {
+    rel.ends_with(".db-shm")
+}
+
+fn sqlite_sidecar_parent(rel: &str) -> Option<&str> {
+    rel.strip_suffix("-wal")
+        .or_else(|| rel.strip_suffix("-journal"))
+        .filter(|base| base.ends_with(".db"))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -82,14 +92,29 @@ impl Syncer {
         let lock = self.lock(thread);
         let _g = lock.lock().await;
         let mut remote: Option<HashMap<String, u64>> = None;
-        for file in files {
-            let Ok(rel) = file.strip_prefix(base) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().to_string();
+        let mut items: Vec<(String, PathBuf)> = files
+            .into_iter()
+            .filter_map(|file| {
+                let rel = file.strip_prefix(base).ok()?.to_string_lossy().to_string();
+                (!is_sqlite_shm(&rel)).then_some((rel, file))
+            })
+            .collect();
+        items.sort_by_key(|(rel, _)| {
+            if sqlite_sidecar_parent(rel).is_some() {
+                0
+            } else {
+                1
+            }
+        });
+        let present: HashSet<String> = items.iter().map(|(rel, _)| rel.clone()).collect();
+        let mut dbs: Vec<String> = vec![];
+        for (rel, file) in items {
             let Ok(meta) = tokio::fs::metadata(&file).await else {
                 continue;
             };
+            if rel.ends_with(".db") {
+                dbs.push(rel.clone());
+            }
             let key = (thread, rel.clone());
             if is_append_only(&rel) {
                 let size = meta.len();
@@ -160,6 +185,44 @@ impl Syncer {
                 self.set_sent(key, SentState::Full(hash));
             }
         }
+        let empty_hash = sha256(b"");
+        for db in dbs {
+            for suffix in ["-wal", "-journal"] {
+                let side = format!("{db}{suffix}");
+                if present.contains(&side) {
+                    continue;
+                }
+                let key = (thread, side.clone());
+                let needs_clear = match self.get_sent(&key) {
+                    Some(SentState::Full(h)) => h != empty_hash,
+                    Some(SentState::Append(n)) => n > 0,
+                    None => {
+                        if remote.is_none() {
+                            remote = Some(self.remote_sizes(thread).await?);
+                        }
+                        remote.as_ref().unwrap().get(&side).copied().unwrap_or(0) > 0
+                    }
+                };
+                if needs_clear {
+                    let r = self
+                        .http
+                        .put(format!("{}/runner/file/{thread}", self.base))
+                        .query(&[
+                            ("path", side.as_str()),
+                            ("offset", "0"),
+                            ("replace", "true"),
+                        ])
+                        .bearer_auth(&self.token)
+                        .body(Vec::<u8>::new())
+                        .send()
+                        .await?;
+                    if !r.status().is_success() {
+                        bail!("hub answered {} for {side}", r.status());
+                    }
+                    self.set_sent(key, SentState::Full(empty_hash));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -172,19 +235,50 @@ impl Syncer {
         let lock = self.lock(thread);
         let _g = lock.lock().await;
         let remote = self.remote_sizes(thread).await?;
+        let mut restored_dbs = HashSet::new();
+        for rel in remote.keys() {
+            if rel.starts_with("work/") || !rel.ends_with(".db") {
+                continue;
+            }
+            let path = base.join(rel);
+            if force_mutable || !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                restored_dbs.insert(rel.clone());
+            }
+        }
+        let mut ordered: Vec<(String, u64)> = remote.into_iter().collect();
+        ordered.sort_by_key(|(rel, _)| {
+            if sqlite_sidecar_parent(rel).is_some() {
+                1
+            } else {
+                0
+            }
+        });
         let mut n = 0;
-        for (rel, size) in remote {
-            if rel.starts_with("work/") {
+        for (rel, size) in ordered {
+            if rel.starts_with("work/") || is_sqlite_shm(&rel) {
                 continue;
             }
             let path = base.join(&rel);
             let append_only = is_append_only(&rel);
-            if append_only {
+            if let Some(parent_db) = sqlite_sidecar_parent(&rel) {
+                if !restored_dbs.contains(parent_db) {
+                    continue;
+                }
+                if size == 0 {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    self.set_sent((thread, rel), SentState::Full(sha256(b"")));
+                    continue;
+                }
+            } else if append_only {
                 let local = tokio::fs::metadata(&path)
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
                 if local >= size {
+                    continue;
+                }
+            } else if rel.ends_with(".db") {
+                if !restored_dbs.contains(&rel) {
                     continue;
                 }
             } else if !force_mutable && tokio::fs::try_exists(&path).await.unwrap_or(false) {
@@ -203,6 +297,11 @@ impl Syncer {
             let bytes = r.bytes().await?;
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
+            }
+            if rel.ends_with(".db") {
+                for suffix in ["-shm", "-wal", "-journal"] {
+                    let _ = tokio::fs::remove_file(base.join(format!("{rel}{suffix}"))).await;
+                }
             }
             tokio::fs::write(&path, &bytes).await?;
             let state = if append_only {

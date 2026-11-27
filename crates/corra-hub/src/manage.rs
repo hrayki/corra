@@ -70,10 +70,11 @@ pub fn defs(hub: &HubRef) -> Vec<ToolDef> {
         ),
         tool(
             "threads.start",
-            "Start a new thread with its own agent working on a prompt. Returns the new thread's id. You follow the new thread, as threads.follow describes, unless follow is false.",
+            "Start a new thread with its own agent working on a prompt. Returns the new thread's id. You follow the new thread, as threads.follow describes, unless follow is false (defaults to false when your own thread can't receive automated messages).",
             json!({
                 "project": { "type": "string", "description": "The project's name." },
                 "prompt": { "type": "string", "description": "The task for the new agent." },
+                "agent": { "type": "string", "enum": ["claude", "antigravity"], "description": "Which agent runs the new thread. Defaults to this thread's agent." },
                 "on": { "type": "string", "description": "A machine's name. Leave out for the project's usual machine." },
                 "model": { "type": "string", "description": "Optional model id." },
                 "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Optional effort." },
@@ -304,6 +305,7 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                     json!({
                         "id": t.id,
                         "title": t.title,
+                        "agent": t.agent,
                         "project": projects.iter().find(|p| p.id == t.project).map(|p| p.name.clone()),
                         "machine": t.machine.and_then(|m| machines.iter().find(|x| x.id == m)).map(|m| m.name.clone()),
                         "status": t.status,
@@ -329,6 +331,7 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             Ok(json!({
                 "id": t.id,
                 "title": t.title,
+                "agent": t.agent,
                 "status": t.status,
                 "model": t.settings.model,
                 "effort": t.settings.effort,
@@ -337,9 +340,15 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             }))
         }
         "threads.start" => {
-            if hub.hands_off(caller.agent) {
+            let target_agent = match input["agent"].as_str() {
+                None => caller.agent,
+                Some("claude") => AgentKind::Claude,
+                Some("antigravity") => AgentKind::Antigravity,
+                Some(other) => bail!("unknown agent {other}; choose claude or antigravity"),
+            };
+            if hub.hands_off(target_agent) {
                 bail!(
-                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+                    "Antigravity threads signed in with Google take messages only from the user. Pass agent: \"claude\", ask the user to send it, or add a Gemini API key in Settings."
                 );
             }
             let p = find_project(hub, &text(&input, "project")?)?;
@@ -347,19 +356,33 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 Some(n) => Some(find_machine(hub, n)?.id),
                 None => None,
             };
+            let base = if target_agent == caller.agent {
+                caller.settings.clone()
+            } else {
+                AgentSettings {
+                    model: None,
+                    effort: caller.settings.effort.clone(),
+                    permission_mode: caller.settings.permission_mode.clone(),
+                }
+            };
             let settings = AgentSettings {
-                model: input["model"].as_str().map(String::from),
-                effort: input["effort"]
-                    .as_str()
-                    .map(String::from)
-                    .or_else(|| caller.settings.effort.clone()),
-                ..caller.settings.clone()
+                model: input["model"].as_str().map(String::from).or(base.model),
+                effort: input["effort"].as_str().map(String::from).or(base.effort),
+                ..base
+            };
+            let caller_hands_off = hub.hands_off(caller.agent);
+            let follow = match input["follow"].as_bool() {
+                Some(true) if caller_hands_off => bail!(
+                    "Antigravity threads signed in with Google can't receive automated follower messages. Omit follow or set follow: false, and check progress with threads.read."
+                ),
+                Some(v) => v,
+                None => !caller_hands_off,
             };
             let v = exec_call(
                 hub,
                 AppCall::CreateThread {
                     project: p.id,
-                    agent: caller.agent,
+                    agent: target_agent,
                     machine,
                     settings,
                     input: vec![InputPart::Text {
@@ -371,13 +394,14 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             if let Some(id) = v["id"].as_str().and_then(|s| s.parse().ok()) {
                 hub.mark_started_by(id, caller.id);
             }
-            let follow = input["follow"].as_bool().unwrap_or(true);
             if let Some(id) = v["id"].as_str().filter(|_| follow) {
                 let _ = hub
                     .db
                     .kv_set(&format!("thread:{id}:follower"), &caller.id.to_string());
             }
-            Ok(json!({ "thread": v["id"], "title": v["title"], "following": follow }))
+            Ok(
+                json!({ "thread": v["id"], "title": v["title"], "agent": target_agent, "following": follow }),
+            )
         }
         "threads.follow" => {
             let t = find_thread(hub, &text(&input, "thread")?)?;
@@ -385,6 +409,11 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 bail!("that's this thread");
             }
             if input["follow"].as_bool().unwrap_or(true) {
+                if hub.hands_off(caller.agent) {
+                    bail!(
+                        "Antigravity threads signed in with Google can't receive automated follower messages. Use threads.read to check progress instead."
+                    );
+                }
                 let mut up = Some(caller.id);
                 for _ in 0..64 {
                     up = up.and_then(|id| hub.follower(id));

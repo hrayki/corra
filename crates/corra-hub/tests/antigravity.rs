@@ -80,3 +80,84 @@ async fn agents_cant_prompt_an_antigravity_thread_signed_in_with_google() {
     );
     assert!(!hub.hands_off(AgentKind::Claude));
 }
+
+#[tokio::test]
+async fn antigravity_thread_can_spawn_a_claude_thread_without_inheriting_its_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let mut agy = thread(&hub, AgentKind::Antigravity);
+    agy.settings = AgentSettings {
+        model: Some("gemini-4-neon".into()),
+        effort: Some("high".into()),
+        permission_mode: Some("bypassPermissions".into()),
+    };
+    hub.db.update_thread(&agy).unwrap();
+    let claude = thread(&hub, AgentKind::Claude);
+
+    let bad_follow = corra_hub::manage::run(
+        &hub,
+        &agy,
+        "threads.start",
+        json!({ "project": "p-claude", "agent": "claude", "prompt": "work", "follow": true }),
+    )
+    .await;
+    assert!(
+        bad_follow.unwrap_err().to_string().contains("threads.read"),
+        "hands-off Antigravity caller should not be allowed to follow"
+    );
+
+    let res = corra_hub::manage::run(
+        &hub,
+        &agy,
+        "threads.start",
+        json!({ "project": "p-claude", "agent": "claude", "model": "opus", "prompt": "do the work" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res["agent"], "claude");
+    assert_eq!(res["following"], false);
+    let spawned_id: ThreadId = res["thread"].as_str().unwrap().parse().unwrap();
+    let spawned = hub.db.thread(spawned_id).unwrap().unwrap();
+    assert_eq!(spawned.agent, AgentKind::Claude);
+    assert_eq!(spawned.started_by, Some(agy.id));
+    assert_eq!(spawned.settings.model.as_deref(), Some("opus"));
+    assert_eq!(spawned.settings.effort.as_deref(), Some("high"));
+    assert_eq!(
+        spawned.settings.permission_mode.as_deref(),
+        Some("bypassPermissions")
+    );
+    assert_eq!(hub.follower(spawned_id), None);
+
+    let res2 = corra_hub::manage::run(
+        &hub,
+        &agy,
+        "threads.start",
+        json!({ "project": "p-claude", "agent": "claude", "prompt": "default model" }),
+    )
+    .await
+    .unwrap();
+    let spawned2_id: ThreadId = res2["thread"].as_str().unwrap().parse().unwrap();
+    let spawned2 = hub.db.thread(spawned2_id).unwrap().unwrap();
+    assert_eq!(spawned2.settings.model, None);
+
+    let claude_to_agy = corra_hub::manage::run(
+        &hub,
+        &claude,
+        "threads.start",
+        json!({ "project": "p-antigravity", "agent": "antigravity", "prompt": "hi" }),
+    )
+    .await;
+    assert!(claude_to_agy.is_err());
+
+    hub.secrets.set("gemini.api_key", "test-key").unwrap();
+    let ok = corra_hub::manage::run(
+        &hub,
+        &claude,
+        "threads.start",
+        json!({ "project": "p-antigravity", "agent": "antigravity", "prompt": "hi" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok["agent"], "antigravity");
+    assert_eq!(ok["following"], true);
+}

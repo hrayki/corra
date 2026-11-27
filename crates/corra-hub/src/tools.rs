@@ -31,6 +31,7 @@ fn all_defs() -> Vec<ToolDef> {
             "Start a new thread in this project with its own agent, which works on the prompt independently. Returns the new thread's id.",
             json!({
                 "prompt": { "type": "string", "description": "The task for the new agent." },
+                "agent": { "type": "string", "enum": ["claude", "antigravity"], "description": "Which agent runs the new thread. Defaults to this thread's agent." },
                 "model": { "type": "string", "description": "Optional model id." }
             }),
             &["prompt"],
@@ -257,22 +258,36 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
             Ok(json!(list))
         }
         "threads.start" => {
-            if hub.hands_off(t.agent) {
+            let target_agent = match input["agent"].as_str() {
+                None => t.agent,
+                Some("claude") => AgentKind::Claude,
+                Some("antigravity") => AgentKind::Antigravity,
+                Some(other) => bail!("unknown agent {other}; choose claude or antigravity"),
+            };
+            if hub.hands_off(target_agent) {
                 bail!(
-                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+                    "Antigravity threads signed in with Google take messages only from the user. Pass agent: \"claude\", ask the user to send it, or add a Gemini API key in Settings."
                 );
             }
             let prompt = input["prompt"]
                 .as_str()
                 .ok_or_else(|| anyhow!("prompt is required"))?;
-            let mut settings = t.settings.clone();
+            let mut settings = if target_agent == t.agent {
+                t.settings.clone()
+            } else {
+                AgentSettings {
+                    model: None,
+                    effort: t.settings.effort.clone(),
+                    permission_mode: t.settings.permission_mode.clone(),
+                }
+            };
             if let Some(m) = input["model"].as_str() {
                 settings.model = Some(m.to_string());
             }
             let n = hub
                 .create_thread(
                     p.id,
-                    t.agent,
+                    target_agent,
                     t.machine,
                     settings,
                     vec![InputPart::Text {
@@ -281,7 +296,7 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
                 )
                 .await?;
             hub.mark_started_by(n.id, t.id);
-            Ok(json!({ "thread": n.id, "title": n.title }))
+            Ok(json!({ "thread": n.id, "title": n.title, "agent": target_agent }))
         }
         a if a.starts_with("github.") => crate::github::run(hub, p, a, &input).await,
         _ => bail!("unknown tool {action}"),

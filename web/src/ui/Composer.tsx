@@ -82,12 +82,10 @@ const remembered = (agent: AgentKind, what: 'models' | 'modes'): Choice[] | unde
   }
 }
 
-const choiceKey = (agent: AgentKind, what: 'models' | 'modes' | 'default') =>
-  agent === 'antigravity' ? `corra_agy_${what}` : `corra_${agent}_${what}`
+const choiceKey = (agent: AgentKind, what: 'models' | 'modes' | 'default') => `corra_${agent}_${what}`
 
 export function rememberChoices(agent: AgentKind, v?: { model?: string; models?: Choice[]; modes?: Choice[] }) {
   if (v?.models?.length) localStorage.setItem(choiceKey(agent, 'models'), JSON.stringify(v.models))
-  if (agent !== 'antigravity') return
   if (v?.modes?.length) localStorage.setItem(choiceKey(agent, 'modes'), JSON.stringify(v.modes))
   if (v?.model) localStorage.setItem(choiceKey(agent, 'default'), v.model)
 }
@@ -111,7 +109,7 @@ export function SettingsPickers(props: {
       models: models(),
       modes: props.modes?.length ? props.modes : remembered(agent(), 'modes'),
       efforts: props.efforts,
-      model: agent() === 'antigravity' ? (props.model ?? localStorage.getItem(choiceKey(agent(), 'default')) ?? undefined) : props.model,
+      model: props.model ?? localStorage.getItem(choiceKey(agent(), 'default')) ?? undefined,
       mode: props.mode,
     }),
   )
