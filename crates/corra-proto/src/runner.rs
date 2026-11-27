@@ -15,6 +15,8 @@ pub enum RunnerMsg {
         threads: Vec<RunningThread>,
         #[serde(default)]
         takes: bool,
+        #[serde(default)]
+        prompt: bool,
     },
     Event {
         thread: ThreadId,
@@ -86,10 +88,20 @@ pub enum HubMsg {
         acks: Vec<(ThreadId, i64)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git_token: Option<String>,
     },
     Ack {
         thread: ThreadId,
         seq: i64,
+    },
+    Prompt {
+        spec: Box<StartSpec>,
+        input: Vec<InputPart>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<AgentSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<String>,
     },
     Start {
         spec: Box<StartSpec>,
@@ -214,5 +226,8 @@ pub enum RunnerRequest {
         session: String,
         #[serde(default)]
         cwd: Option<String>,
+    },
+    Stop {
+        thread: ThreadId,
     },
 }

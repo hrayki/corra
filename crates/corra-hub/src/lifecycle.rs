@@ -17,6 +17,7 @@ fn idle_ms() -> i64 {
 }
 const LOST_AFTER_MS: i64 = 90 * 1000;
 const WATCHED_IDLE_MS: i64 = 60 * 60 * 1000;
+const COMPACT_IDLE_MS: i64 = 2 * 60 * 1000;
 
 pub fn spawn(hub: Arc<Hub>) {
     if let Ok(machines) = hub.db.machines() {
@@ -26,11 +27,18 @@ pub fn spawn(hub: Arc<Hub>) {
             }
         }
     }
+    let mut shutdown = hub.subscribe_shutdown();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         let mut rounds: u64 = 0;
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tick.tick() => {}
+            }
+            if *shutdown.borrow() {
+                break;
+            }
             if let Err(e) = sweep(&hub).await {
                 tracing::warn!("machine sweep failed: {e:#}");
             }
@@ -108,8 +116,11 @@ pub async fn sweep(hub: &Arc<Hub>) -> Result<()> {
             .get(&m.id)
             .copied()
             .unwrap_or(m.created_at);
+        let compact_only = hub.compact_woke.lock().unwrap().contains(&m.id);
         let limit = if watched || waiting {
             WATCHED_IDLE_MS
+        } else if compact_only {
+            COMPACT_IDLE_MS
         } else {
             idle_ms()
         };
@@ -185,10 +196,16 @@ async fn stop_sessions(hub: &Arc<Hub>, machine: MachineId) {
     let Ok(threads) = hub.db.threads_on_machine(machine) else {
         return;
     };
-    for t in &threads {
-        hub.stop_live(t);
+    if threads.is_empty() {
+        return;
     }
-    if !threads.is_empty() {
+    if hub.runner_supports_prompt(machine) {
+        futures_util::future::join_all(threads.iter().map(|t| hub.stop_session(machine, t.id)))
+            .await;
+    } else {
+        for t in &threads {
+            hub.stop_live(t);
+        }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
@@ -233,6 +250,7 @@ async fn rest(hub: &Arc<Hub>, m: &Machine, notice: Option<&str>) {
             hub.publish_machine(m.id);
             settle_threads(hub, m.id, notice);
             hub.activity.lock().unwrap().remove(&m.id);
+            hub.compact_woke.lock().unwrap().remove(&m.id);
             if let Some(old) = old.filter(|o| *o != new)
                 && let Err(e) = provider.forget(hub, &old).await
             {
@@ -266,6 +284,7 @@ async fn lost(hub: &Arc<Hub>, m: &Machine) {
             ),
         );
         hub.activity.lock().unwrap().remove(&m.id);
+        hub.compact_woke.lock().unwrap().remove(&m.id);
         return;
     }
     retire(
@@ -298,6 +317,7 @@ async fn retire(hub: &Arc<Hub>, machine: MachineId, notice: Option<&str>) {
     let _ = hub.db.kv_delete(&crate::providers::starting_key(machine));
     settle_threads(hub, machine, notice);
     hub.activity.lock().unwrap().remove(&machine);
+    hub.compact_woke.lock().unwrap().remove(&machine);
 }
 
 pub async fn reset_project(hub: &Arc<Hub>, project: ProjectId) -> Result<()> {
@@ -438,7 +458,7 @@ async fn move_off(hub: &Arc<Hub>, p: &Project, m: &Machine) -> Result<()> {
     }
     for t in threads {
         if hub.runner_connected(m.id) {
-            hub.stop_live(&t);
+            hub.stop_session(m.id, t.id).await;
             hub.runner_request_timeout(
                 m.id,
                 corra_proto::runner::RunnerRequest::SaveWork {

@@ -39,16 +39,18 @@ async fn a_message_for_a_thread_the_runner_doesnt_have_is_handed_back_not_droppe
     }));
     let (sock, _) = listener.accept().await.unwrap();
     let mut ws = tokio_tungstenite::accept_async(sock).await.unwrap();
-    let RunnerMsg::Hello { takes, .. } = next(&mut ws).await else {
+    let RunnerMsg::Hello { takes, prompt, .. } = next(&mut ws).await else {
         panic!("no hello");
     };
     assert!(takes);
+    assert!(prompt);
     send(
         &mut ws,
         &HubMsg::Welcome {
             machine: new_id(),
             acks: vec![],
             runner: None,
+            git_token: None,
         },
     )
     .await;
@@ -70,5 +72,20 @@ async fn a_message_for_a_thread_the_runner_doesnt_have_is_handed_back_not_droppe
         };
         assert_eq!(took, ("d1".to_string(), false));
     }
+    send(
+        &mut ws,
+        &HubMsg::Request {
+            id: 42,
+            body: corra_proto::runner::RunnerRequest::Stop { thread: new_id() },
+        },
+    )
+    .await;
+    let reply_id = loop {
+        if let RunnerMsg::Reply { id, err, .. } = next(&mut ws).await {
+            assert!(err.is_none(), "stop request returned error: {err:?}");
+            break id;
+        }
+    };
+    assert_eq!(reply_id, 42);
     runner.abort();
 }

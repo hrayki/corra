@@ -245,12 +245,34 @@ async fn serve(
     let holder = storage
         .as_ref()
         .map(|st| corra_hub::storage::hold(st.clone()));
+    let hub = built.state.hub.clone();
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let (grace_tx, grace_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = grace_rx.await;
+    })
+    .into_future();
+    let mut server = std::pin::pin!(server);
     tokio::select! {
-        r = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).into_future() => r?,
-        _ = term.recv() => tracing::info!("stopping"),
-        _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
+        r = &mut server => r?,
+        _ = term.recv() => {
+            tracing::info!("stopping");
+            hub.begin_shutdown();
+            let _ = grace_tx.send(());
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("stopping");
+            hub.begin_shutdown();
+            let _ = grace_tx.send(());
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        }
     }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     if let (Some(st), Some(h)) = (&storage, &holder) {
         corra_hub::storage::hand_over(st, h, &data).await;
     }

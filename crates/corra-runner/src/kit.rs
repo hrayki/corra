@@ -14,25 +14,30 @@ fn state_file() -> PathBuf {
     home().join(".corra/kit.applied")
 }
 
+pub struct HubAuth<'a> {
+    pub url: &'a str,
+    pub token: &'a str,
+    pub git_token: &'a str,
+}
+
 pub async fn prepare(
     root: &Path,
     repos: &[corra_proto::Repo],
-    hub_url: &str,
-    token: &str,
+    hub: HubAuth<'_>,
     setup: Option<&str>,
     kit: Option<&str>,
     env: &[(String, String)],
 ) -> Result<Value> {
     tokio::fs::create_dir_all(root).await?;
     let mut log = String::new();
-    let problems = crate::git::ensure_repos(root, hub_url, token, repos).await;
+    let problems = crate::git::ensure_repos(root, hub.url, hub.git_token, repos).await;
     for p in &problems {
         log.push_str(p);
         log.push('\n');
     }
     let mut ok = problems.is_empty();
     if let Some(version) = kit
-        && let Err(e) = apply(root, hub_url, token, version, setup, env, &mut log).await
+        && let Err(e) = apply(root, hub.url, hub.token, version, setup, env, &mut log).await
     {
         ok = false;
         log.push_str(&format!("{e:#}\n"));

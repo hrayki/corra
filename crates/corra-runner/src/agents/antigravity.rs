@@ -133,6 +133,7 @@ fn env_for(cmd: &mut Command, ctx: &SessionCtx) {
     for (k, v) in &ctx.spec.agent_env {
         cmd.env(k, v);
     }
+    crate::git::thread_header_env(cmd, &ctx.hub_url, ctx.spec.thread);
 }
 
 fn has_key(ctx: &SessionCtx) -> bool {
@@ -1819,7 +1820,7 @@ mod tests {
         let mut ctx = SessionCtx {
             baseline: Default::default(),
             hub_url: String::new(),
-            hub_token: String::new(),
+            git_token: String::new(),
             hub: hub_tx,
             sync: None,
             spec: StartSpec {

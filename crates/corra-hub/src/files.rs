@@ -160,11 +160,19 @@ pub async fn runner_binary(State(s): State<AppState>, headers: HeaderMap) -> Res
     if machine_of(&s, &headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match runner_path() {
-        Some(p) => match tokio::fs::read(&p).await {
-            Ok(b) => ([("content-type", "application/octet-stream")], b).into_response(),
-            Err(_) => (StatusCode::NOT_FOUND, "the hub has no runner binary").into_response(),
-        },
-        None => StatusCode::NOT_FOUND.into_response(),
+    let Some(p) = runner_path() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(file) = tokio::fs::File::open(&p).await else {
+        return (StatusCode::NOT_FOUND, "the hub has no runner binary").into_response();
+    };
+    let len = file.metadata().await.ok().map(|m| m.len());
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut builder = Response::builder().header("content-type", "application/octet-stream");
+    if let Some(len) = len {
+        builder = builder.header("content-length", len);
     }
+    builder
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

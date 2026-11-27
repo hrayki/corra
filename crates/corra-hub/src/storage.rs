@@ -95,6 +95,7 @@ pub async fn take(st: &dyn LeaseStore, holder: &str, t: Timing) -> Result<()> {
             {
                 return Ok(());
             }
+            tokio::time::sleep(t.poll).await;
             continue;
         }
         if !said {
@@ -262,9 +263,16 @@ impl LeaseStore for Storage {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow!("the storage bucket gave the lease no ETag"))?
             .to_string();
-        Ok(serde_json::from_slice(&r.bytes().await?)
-            .ok()
-            .map(|l| (l, tag)))
+        let bytes = r.bytes().await?;
+        let lease = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("the storage lease file is unreadable ({e}); replacing it");
+            Lease {
+                holder: String::new(),
+                at: 0,
+                released: true,
+            }
+        });
+        Ok(Some((lease, tag)))
     }
 
     async fn put(&self, lease: &Lease, cond: Cond) -> Result<Put> {

@@ -151,6 +151,30 @@ async fn a_hub_cant_release_a_lease_it_lost() {
 }
 
 #[tokio::test]
+async fn take_backs_off_on_repeated_conflicts_instead_of_spinning() {
+    use std::sync::atomic::AtomicUsize;
+    struct AlwaysConflict(AtomicUsize);
+    #[async_trait::async_trait]
+    impl LeaseStore for AlwaysConflict {
+        async fn get(&self) -> Result<Option<(Lease, String)>> {
+            Ok(None)
+        }
+        async fn put(&self, _lease: &Lease, _cond: Cond) -> Result<Put> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Put::Conflict)
+        }
+    }
+    let store = Arc::new(AlwaysConflict(AtomicUsize::new(0)));
+    let _ =
+        tokio::time::timeout(Duration::from_millis(75), take(store.as_ref(), "one", FAST)).await;
+    let tries = store.0.load(Ordering::SeqCst);
+    assert!(
+        tries <= 12,
+        "take() spun in a tight loop on Put::Conflict ({tries} tries in 75ms)"
+    );
+}
+
+#[tokio::test]
 #[ignore = "needs a real bucket in CORRA_STORAGE_*"]
 async fn a_real_bucket_keeps_the_same_rules() {
     let st = corra_hub::storage::from_env()

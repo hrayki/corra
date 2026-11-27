@@ -10,6 +10,7 @@ use crate::db::Db;
 
 pub struct Secrets {
     cipher: XChaCha20Poly1305,
+    key: [u8; 32],
     db: Db,
 }
 
@@ -43,15 +44,24 @@ impl Secrets {
                 }
             }
         };
-        if key.len() != 32 {
-            bail!("the master key must be 32 bytes");
-        }
+        let key_arr: [u8; 32] = key
+            .try_into()
+            .map_err(|_| anyhow!("the master key must be 32 bytes"))?;
         let s = Secrets {
-            cipher: XChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!("bad key"))?,
+            cipher: XChaCha20Poly1305::new_from_slice(&key_arr).map_err(|_| anyhow!("bad key"))?,
+            key: key_arr,
             db,
         };
         s.check_key()?;
         Ok(s)
+    }
+
+    pub fn derive_hex(&self, label: &str, data: &[u8]) -> String {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&self.key), data);
+        let mut out = [0u8; 32];
+        hk.expand(label.as_bytes(), &mut out)
+            .expect("32-byte HKDF expand");
+        out.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     fn check_key(&self) -> Result<()> {

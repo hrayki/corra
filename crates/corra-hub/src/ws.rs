@@ -70,9 +70,20 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         }
     });
 
-    let first = tokio::time::timeout(Duration::from_secs(15), stream.next())
-        .await
-        .map_err(|_| anyhow!("no hello"))?;
+    let mut shutdown = hub.subscribe_shutdown();
+    if *shutdown.borrow() {
+        writer.abort();
+        return Ok(());
+    }
+    let first = tokio::select! {
+        _ = shutdown.changed() => {
+            writer.abort();
+            return Ok(());
+        }
+        r = tokio::time::timeout(Duration::from_secs(15), stream.next()) => {
+            r.map_err(|_| anyhow!("no hello"))?
+        }
+    };
     let Some(Ok(Message::Text(text))) = first else {
         return Err(anyhow!("expected hello"));
     };
@@ -81,6 +92,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         info,
         threads,
         takes,
+        prompt,
     } = serde_json::from_str(&text)?
     else {
         return Err(anyhow!("expected hello"));
@@ -132,6 +144,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
             prepared: HashSet::new(),
             conn_id,
             takes,
+            prompt,
         },
     );
     drop(old);
@@ -139,6 +152,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         machine,
         acks,
         runner: crate::files::runner_build(),
+        git_token: hub.git_token(machine),
     });
     if takes {
         hub.redeliver_to(machine);
@@ -149,10 +163,16 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
 
     let result: Result<()> = async {
         loop {
-            let msg = match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
-                Ok(Some(m)) => m,
-                Ok(None) => break,
-                Err(_) => return Err(anyhow!("the runner went silent")),
+            if *shutdown.borrow() {
+                break;
+            }
+            let msg = tokio::select! {
+                _ = shutdown.changed() => break,
+                next = tokio::time::timeout(Duration::from_secs(60), stream.next()) => match next {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break,
+                    Err(_) => return Err(anyhow!("the runner went silent")),
+                },
             };
             let text = match msg? {
                 Message::Text(t) => t,
@@ -427,13 +447,27 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
         }
     });
 
+    let mut shutdown = hub.subscribe_shutdown();
     let result: Result<()> = async {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         send_json(&tx, &hub.snapshot()?);
         if let Some(usage) = hub.usage() {
             send_json(&tx, &usage);
         }
 
-        while let Some(msg) = stream.next().await {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let msg = tokio::select! {
+                _ = shutdown.changed() => break,
+                next = stream.next() => match next {
+                    Some(m) => m,
+                    None => break,
+                },
+            };
             let text = match msg? {
                 Message::Text(t) => t,
                 Message::Close(_) => break,
@@ -950,6 +984,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
         }
         AppCall::TermOpen { thread, cols, rows } => {
             let (t, m) = hub.machine_for_thread(thread).await?;
+            hub.compact_woke.lock().unwrap().remove(&m);
             let term = format!("t{}", new_id().simple());
             hub.terms.lock().unwrap().insert(term.clone(), (thread, m));
             if let Err(e) = hub

@@ -54,9 +54,7 @@ impl Auth {
             .as_deref()
             .and_then(|h| headers.get(h))
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
+            .and_then(|v| v.rsplit(',').map(str::trim).find(|p| !p.is_empty()));
         if let Some(ip) = named {
             return ip.to_string();
         }
@@ -128,6 +126,9 @@ pub fn load_access_key(hub: &HubRef, auth: &Auth, data: &std::path::Path) -> Res
     let hash = hash_token(&key);
     if hub.db.kv_get("access_key")?.as_deref() != Some(hash.as_str()) {
         for k in hub.db.kv_keys("session:")? {
+            let _ = hub.db.kv_delete(&k);
+        }
+        for k in hub.db.kv_keys("push:")? {
             let _ = hub.db.kv_delete(&k);
         }
         hub.db.kv_set("access_key", &hash)?;
@@ -326,13 +327,12 @@ fn browser_name(ua: &str) -> String {
 
 pub async fn logout(State(s): State<AppState>, jar: CookieJar) -> Response {
     if let Some(c) = jar.get(COOKIE) {
-        let _ = s
-            .hub
-            .db
-            .kv_delete(&format!("session:{}", hash_token(c.value())));
+        let id = hash_token(c.value());
+        let _ = s.hub.db.kv_delete(&format!("session:{id}"));
+        let _ = crate::notify::unsubscribe(&s.hub, &id);
     }
     (
-        jar.remove(Cookie::from(COOKIE)),
+        jar.remove(Cookie::build((COOKIE, "")).path("/").build()),
         Json(json!({ "ok": true })),
     )
         .into_response()

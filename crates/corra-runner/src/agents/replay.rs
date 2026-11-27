@@ -138,7 +138,7 @@ async fn replay_entries(name: &str, entries: Vec<Value>, linger: Duration) -> Ve
     let ctx = SessionCtx {
         baseline: Default::default(),
         hub_url: String::new(),
-        hub_token: String::new(),
+        git_token: String::new(),
         hub: hub_tx,
         sync: None,
         spec,
@@ -827,7 +827,7 @@ async fn record_with(
     let ctx = SessionCtx {
         baseline: Default::default(),
         hub_url: String::new(),
-        hub_token: String::new(),
+        git_token: String::new(),
         hub: hub_tx,
         sync: None,
         spec: StartSpec {

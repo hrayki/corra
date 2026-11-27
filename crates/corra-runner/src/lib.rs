@@ -9,7 +9,7 @@ pub mod sync;
 pub mod term;
 mod update;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use anyhow::{Result, anyhow};
 use corra_proto::runner::{HubMsg, RunnerMsg, RunningThread};
 use corra_proto::*;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 use crate::agents::{AgentOut, HubCall, SessionCmd, SessionCtx};
@@ -28,6 +28,19 @@ pub struct Options {
     pub sync: bool,
     pub update: bool,
     pub connected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+#[derive(Clone)]
+struct OutTx(mpsc::UnboundedSender<term::OutItem>);
+
+impl OutTx {
+    fn send(&self, msg: RunnerMsg) {
+        let _ = self.0.send((msg, None));
+    }
+
+    fn send_item(&self, item: term::OutItem) {
+        let _ = self.0.send(item);
+    }
 }
 
 struct Session {
@@ -52,6 +65,21 @@ fn park_after() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30);
     Duration::from_secs(minutes * 60)
+}
+
+fn spec_mark(tools: &[ToolDef], env: &[(String, String)]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(&(tools, env)).unwrap_or_default());
+    h.finalize().into()
+}
+
+fn spec_changed(cur: &StartSpec, next: &StartSpec) -> bool {
+    cur.agent != next.agent
+        || files::expand(&cur.cwd) != files::expand(&next.cwd)
+        || next.resume_at.is_some()
+        || next.moved_from.is_some()
+        || spec_mark(&cur.tools, &cur.agent_env) != spec_mark(&next.tools, &next.agent_env)
 }
 
 #[derive(Default)]
@@ -81,22 +109,26 @@ impl Outbox {
 struct Runner {
     sessions: HashMap<ThreadId, Session>,
     outbox: Outbox,
+    ended_while_offline: HashMap<ThreadId, Option<String>>,
+    stop_waiters: HashMap<ThreadId, Vec<oneshot::Sender<()>>>,
     agent_tx: mpsc::UnboundedSender<(ThreadId, AgentOut)>,
     hub_tx: mpsc::UnboundedSender<HubCall>,
-    calls: HashMap<u64, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>,
+    calls: HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>,
     next_call: u64,
     sync: Option<sync::SyncRef>,
     hub_url: String,
     token: String,
+    git_token: Option<String>,
+    cached_agents: Option<Vec<AgentAvailability>>,
     terms: term::Terms,
-    bg_tx: mpsc::UnboundedSender<RunnerMsg>,
+    bg_tx: mpsc::UnboundedSender<term::OutItem>,
     parked: HashMap<ThreadId, StartSpec>,
     own_build: Option<String>,
     newer: Option<String>,
     fetching: Option<tokio::task::JoinHandle<Result<std::path::PathBuf>>>,
     fetched: Option<std::path::PathBuf>,
     switch_at: Option<tokio::time::Instant>,
-    took: std::collections::VecDeque<String>,
+    took: VecDeque<String>,
     connected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -106,10 +138,12 @@ pub async fn run(cli: Options) -> Result<()> {
 
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
     let (hub_tx, mut hub_rx) = mpsc::unbounded_channel::<HubCall>();
-    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<RunnerMsg>();
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<term::OutItem>();
     let mut runner = Runner {
         sessions: HashMap::new(),
         outbox: Outbox::default(),
+        ended_while_offline: HashMap::new(),
+        stop_waiters: HashMap::new(),
         agent_tx,
         hub_tx,
         calls: HashMap::new(),
@@ -117,6 +151,8 @@ pub async fn run(cli: Options) -> Result<()> {
         sync: cli.sync.then(|| sync::Syncer::new(&cli.hub, &token)),
         hub_url: cli.hub.clone(),
         token: token.clone(),
+        git_token: None,
+        cached_agents: None,
         terms: term::Terms::default(),
         parked: HashMap::new(),
         own_build: if cli.update {
@@ -203,6 +239,10 @@ async fn connect(url: &str, token: &str) -> Result<Ws> {
 }
 
 pub fn machine_info() -> MachineInfo {
+    machine_info_with_cache(None)
+}
+
+fn machine_info_with_cache(cached: Option<Vec<AgentAvailability>>) -> MachineInfo {
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -219,18 +259,7 @@ pub fn machine_info() -> MachineInfo {
         .map(|n| n.get() as u32)
         .unwrap_or(1);
     let memory_mb = memory_limit_mb();
-    let mut agents = vec![];
-    if let Some(v) = command_version(&agents::claude::find_bin()) {
-        agents.push(AgentAvailability {
-            kind: AgentKind::Claude,
-            version: Some(v),
-        });
-    }
-    agents.push(AgentAvailability {
-        kind: AgentKind::Antigravity,
-        version: agents::antigravity::installed()
-            .and_then(|p| command_version(&p.to_string_lossy())),
-    });
+    let agents = detect_agents(cached.as_deref());
     MachineInfo {
         hostname,
         os,
@@ -242,6 +271,36 @@ pub fn machine_info() -> MachineInfo {
         disk_used_mb: disk_used_mb(),
         kvm: kvm(),
     }
+}
+
+fn detect_agents(cached: Option<&[AgentAvailability]>) -> Vec<AgentAvailability> {
+    let cached_version = |kind: AgentKind| -> Option<String> {
+        cached
+            .into_iter()
+            .flatten()
+            .find(|a| a.kind == kind)
+            .and_then(|a| a.version.clone())
+    };
+    let mut agents = vec![];
+    let claude_v =
+        cached_version(AgentKind::Claude).or_else(|| command_version(&agents::claude::find_bin()));
+    if let Some(v) = claude_v {
+        agents.push(AgentAvailability {
+            kind: AgentKind::Claude,
+            version: Some(v),
+        });
+    }
+    let agy_v = match agents::antigravity::installed() {
+        Some(p) => {
+            cached_version(AgentKind::Antigravity).or_else(|| command_version(&p.to_string_lossy()))
+        }
+        None => None,
+    };
+    agents.push(AgentAvailability {
+        kind: AgentKind::Antigravity,
+        version: agy_v,
+    });
+    agents
 }
 
 fn kvm() -> bool {
@@ -314,30 +373,30 @@ async fn run_connection(
     agent_rx: &mut mpsc::UnboundedReceiver<(ThreadId, AgentOut)>,
     hub_rx: &mut mpsc::UnboundedReceiver<HubCall>,
     sync_tick: &mut tokio::time::Interval,
-    bg_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
+    bg_rx: &mut mpsc::UnboundedReceiver<term::OutItem>,
 ) -> Result<()> {
     let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<RunnerMsg>();
+    let (raw_tx, mut out_rx) = mpsc::unbounded_channel::<term::OutItem>();
+    let out_tx = OutTx(raw_tx);
+
+    let cached = runner.cached_agents.clone();
+    let info = tokio::task::spawn_blocking(move || machine_info_with_cache(cached))
+        .await
+        .map_err(|e| anyhow!("machine info failed: {e}"))?;
+    runner.cached_agents = Some(info.agents.clone());
 
     let hello = RunnerMsg::Hello {
         protocol: PROTOCOL_VERSION,
-        info: machine_info(),
-        threads: runner
-            .sessions
-            .iter()
-            .map(|(id, s)| RunningThread {
-                thread: *id,
-                last_seq: s.next_seq - 1,
-                status: s.status,
-            })
-            .collect(),
+        info,
+        threads: runner.hello_threads(),
         takes: true,
+        prompt: true,
     };
     sink.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
 
     let writer = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
+        while let Some((msg, _permit)) = out_rx.recv().await {
             let Ok(text) = serde_json::to_string(&msg) else {
                 continue;
             };
@@ -362,18 +421,27 @@ async fn run_connection(
                     Ok(m) => m,
                     Err(e) => { tracing::warn!("bad hub message: {e}"); continue; }
                 };
-                if let HubMsg::Welcome { acks, runner: build, .. } = &msg {
+                if let HubMsg::Welcome { acks, runner: build, git_token, .. } = &msg {
+                    runner.git_token = git_token.clone();
                     runner.newer = build
                         .clone()
                         .filter(|b| runner.own_build.as_ref().is_some_and(|own| own != b));
                     for (t, s) in acks { runner.outbox.ack(*t, *s); }
                     for (thread, q) in &runner.outbox.pending {
                         for (seq, ts, event) in q {
-                            let _ = out_tx.send(RunnerMsg::Event { thread: *thread, seq: *seq, ts: *ts, event: event.clone() });
+                            out_tx.send(RunnerMsg::Event { thread: *thread, seq: *seq, ts: *ts, event: event.clone() });
                         }
                     }
                     for (id, s) in &runner.sessions {
-                        let _ = out_tx.send(RunnerMsg::ThreadStatus { thread: *id, status: s.status });
+                        out_tx.send(RunnerMsg::ThreadStatus { thread: *id, status: s.status });
+                    }
+                    let ended: Vec<(ThreadId, Option<String>)> = runner
+                        .ended_while_offline
+                        .drain()
+                        .filter(|(id, _)| !runner.sessions.contains_key(id))
+                        .collect();
+                    for (thread, error) in ended {
+                        out_tx.send(RunnerMsg::ThreadEnded { thread, error });
                     }
                     welcomed = true;
                     runner.set_connected(true);
@@ -384,8 +452,8 @@ async fn run_connection(
             Some((thread, out)) = agent_rx.recv() => {
                 runner.on_agent(thread, out, welcomed.then_some(&out_tx));
             }
-            Some(m) = bg_rx.recv() => {
-                if welcomed { let _ = out_tx.send(m); }
+            Some(item) = bg_rx.recv() => {
+                if welcomed { out_tx.send_item(item); }
             }
             _ = sync_tick.tick() => {
                 let busy: Vec<ThreadId> = runner
@@ -397,7 +465,7 @@ async fn run_connection(
                 for t in busy { runner.sync_thread(t); }
                 if welcomed {
                     for (id, s) in &runner.sessions {
-                        let _ = out_tx.send(RunnerMsg::ThreadStatus { thread: *id, status: s.status });
+                        out_tx.send(RunnerMsg::ThreadStatus { thread: *id, status: s.status });
                     }
                 }
                 runner.park_idle();
@@ -424,7 +492,7 @@ async fn run_connection(
                 let id = runner.next_call;
                 runner.next_call += 1;
                 runner.calls.insert(id, c.reply);
-                let _ = out_tx.send(RunnerMsg::Call { id, thread: c.thread, turn: c.turn, action: c.action, input: c.input });
+                out_tx.send(RunnerMsg::Call { id, thread: c.thread, turn: c.turn, action: c.action, input: c.input });
             }
         }
         if writer.is_finished() {
@@ -439,20 +507,116 @@ async fn run_connection(
 }
 
 impl Runner {
-    fn on_hub(&mut self, msg: HubMsg, out: &mpsc::UnboundedSender<RunnerMsg>) {
+    fn git_token(&self) -> String {
+        self.git_token.clone().unwrap_or_else(|| self.token.clone())
+    }
+
+    fn hello_threads(&self) -> Vec<RunningThread> {
+        let mut seen: HashSet<ThreadId> = HashSet::new();
+        let mut threads: Vec<RunningThread> = self
+            .sessions
+            .iter()
+            .map(|(id, s)| {
+                seen.insert(*id);
+                RunningThread {
+                    thread: *id,
+                    last_seq: s.next_seq - 1,
+                    status: s.status,
+                }
+            })
+            .collect();
+        for thread in self
+            .outbox
+            .pending
+            .keys()
+            .chain(self.ended_while_offline.keys())
+        {
+            if !seen.insert(*thread) {
+                continue;
+            }
+            let last_seq = self
+                .outbox
+                .pending
+                .get(thread)
+                .and_then(|q| q.back().map(|(s, _, _)| *s))
+                .unwrap_or(0);
+            threads.push(RunningThread {
+                thread: *thread,
+                last_seq,
+                status: ThreadStatus::Idle,
+            });
+        }
+        threads
+    }
+
+    fn held_contains(&self, thread: ThreadId, delivery: &Option<String>) -> bool {
+        let Some(d) = delivery else {
+            return false;
+        };
+        self.sessions
+            .get(&thread)
+            .is_some_and(|s| s.held.iter().any(|(_, _, h)| h.as_deref() == Some(d)))
+    }
+
+    fn on_hub(&mut self, msg: HubMsg, out: &OutTx) {
         match msg {
             HubMsg::Welcome { .. } => {}
             HubMsg::Ack { thread, seq } => self.outbox.ack(thread, seq),
+            HubMsg::Prompt {
+                spec,
+                input,
+                settings,
+                delivery,
+            } => {
+                self.switch_at = None;
+                if self.seen(&delivery, out) {
+                    return;
+                }
+                let thread = spec.thread;
+                self.parked.remove(&thread);
+                if self.held_contains(thread, &delivery) {
+                    return;
+                }
+                match self.sessions.get_mut(&thread) {
+                    Some(s) if s.parking || s.stopping => {
+                        s.held.push((input, settings, delivery));
+                        s.restart = Some(*spec);
+                    }
+                    Some(s)
+                        if matches!(s.status, ThreadStatus::Idle | ThreadStatus::Error)
+                            && spec_changed(&s.spec, &spec) =>
+                    {
+                        s.stopping = true;
+                        s.parking = false;
+                        s.held.push((input, settings, delivery));
+                        s.restart = Some(*spec);
+                        let _ = s.cmds.send(SessionCmd::Stop);
+                    }
+                    Some(s) => {
+                        s.idle_since = None;
+                        let _ = s.cmds.send(SessionCmd::Send { input, settings });
+                        self.took(delivery, true, Some(out));
+                    }
+                    None => {
+                        self.start(*spec, Some(input), out);
+                        self.took(delivery, true, Some(out));
+                    }
+                }
+            }
             HubMsg::Start {
                 spec,
                 input,
                 delivery,
             } => {
-                if self.switch_at.is_some() || self.seen(&delivery, out) {
+                self.switch_at = None;
+                if self.seen(&delivery, out) {
                     return;
                 }
                 let thread = spec.thread;
                 self.parked.remove(&thread);
+                if self.held_contains(thread, &delivery) {
+                    return;
+                }
                 if let Some(s) = self.sessions.get_mut(&thread)
                     && (s.parking || s.stopping)
                 {
@@ -471,7 +635,8 @@ impl Runner {
                 settings,
                 delivery,
             } => {
-                if self.switch_at.is_some() || self.seen(&delivery, out) {
+                self.switch_at = None;
+                if self.seen(&delivery, out) || self.held_contains(thread, &delivery) {
                     return;
                 }
                 match self.sessions.get_mut(&thread) {
@@ -511,6 +676,7 @@ impl Runner {
             HubMsg::Stop { thread } => {
                 if let Some(s) = self.sessions.get_mut(&thread) {
                     s.stopping = true;
+                    s.parking = false;
                 }
                 self.cmd(thread, SessionCmd::Stop)
             }
@@ -534,7 +700,7 @@ impl Runner {
                     rows,
                     self.bg_tx.clone(),
                 );
-                let _ = out.send(match r {
+                out.send(match r {
                     Ok(()) => RunnerMsg::Reply {
                         id,
                         ok: Some(serde_json::json!({ "term": term })),
@@ -551,7 +717,7 @@ impl Runner {
                 id,
                 body: corra_proto::runner::RunnerRequest::TermAttach { term },
             } => {
-                let _ = out.send(match self.terms.scrollback(&term) {
+                out.send(match self.terms.scrollback(&term) {
                     Ok(d) => RunnerMsg::Reply {
                         id,
                         ok: Some(serde_json::json!({ "data": d })),
@@ -564,12 +730,44 @@ impl Runner {
                     },
                 });
             }
+            HubMsg::Request {
+                id,
+                body: corra_proto::runner::RunnerRequest::Stop { thread },
+            } => {
+                self.parked.remove(&thread);
+                if let Some(s) = self.sessions.get_mut(&thread) {
+                    s.stopping = true;
+                    s.parking = false;
+                    let _ = s.cmds.send(SessionCmd::Stop);
+                    let (tx, rx) = oneshot::channel();
+                    self.stop_waiters.entry(thread).or_default().push(tx);
+                    let out = out.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(Duration::from_secs(10), rx).await;
+                        out.send(RunnerMsg::Reply {
+                            id,
+                            ok: Some(serde_json::json!({})),
+                            err: None,
+                        });
+                    });
+                } else {
+                    out.send(RunnerMsg::Reply {
+                        id,
+                        ok: Some(serde_json::json!({})),
+                        err: None,
+                    });
+                }
+            }
             HubMsg::Request { id, body } => {
                 let out = out.clone();
-                let (hub_url, token, sync) =
-                    (self.hub_url.clone(), self.token.clone(), self.sync.clone());
+                let (hub_url, token, git_token, sync) = (
+                    self.hub_url.clone(),
+                    self.token.clone(),
+                    self.git_token(),
+                    self.sync.clone(),
+                );
                 tokio::spawn(async move {
-                    let msg = match files::handle(body, &hub_url, &token, sync).await {
+                    let msg = match files::handle(body, &hub_url, &token, &git_token, sync).await {
                         Ok(v) => RunnerMsg::Reply {
                             id,
                             ok: Some(v),
@@ -581,7 +779,7 @@ impl Runner {
                             err: Some(format!("{e:#}")),
                         },
                     };
-                    let _ = out.send(msg);
+                    out.send(msg);
                 });
             }
             HubMsg::CallResult { id, ok, err } => {
@@ -618,34 +816,24 @@ impl Runner {
         });
     }
 
-    fn sync_thread(&self, thread: ThreadId) {
-        let Some(s) = self.sessions.get(&thread) else {
-            return;
-        };
-        let Some(sid) = s.session_id.clone() else {
-            return;
-        };
+    fn sync_thread(&self, thread: ThreadId) -> Option<tokio::task::JoinHandle<()>> {
+        let s = self.sessions.get(&thread)?;
+        let sid = s.session_id.clone()?;
         let (base, files) = agents::session_files(s.agent, &s.cwd, &sid);
         if files.is_empty() {
-            return;
+            return None;
         }
-        let Some(sync) = self.sync.clone() else {
-            return;
-        };
-        tokio::spawn(async move {
+        let sync = self.sync.clone()?;
+        Some(tokio::spawn(async move {
             if let Err(e) = sync.upload(thread, &base, files).await {
                 tracing::warn!(%thread, "couldn't save session files to the hub: {e:#}");
             }
-        });
+        }))
     }
 
-    fn start(
-        &mut self,
-        spec: StartSpec,
-        input: Option<Vec<InputPart>>,
-        out: &mpsc::UnboundedSender<RunnerMsg>,
-    ) {
+    fn start(&mut self, spec: StartSpec, input: Option<Vec<InputPart>>, out: &OutTx) {
         let thread = spec.thread;
+        self.ended_while_offline.remove(&thread);
         if let Some(s) = self.sessions.get(&thread) {
             if let Some(input) = input {
                 let _ = s.cmds.send(SessionCmd::Send {
@@ -688,14 +876,14 @@ impl Runner {
                 restart: None,
             },
         );
-        let _ = out.send(RunnerMsg::ThreadStatus {
+        out.send(RunnerMsg::ThreadStatus {
             thread,
             status: ThreadStatus::Starting,
         });
         agents::spawn(SessionCtx {
             baseline: self.sessions[&thread].baseline.clone(),
             hub_url: self.hub_url.clone(),
-            hub_token: self.token.clone(),
+            git_token: self.git_token(),
             hub: self.hub_tx.clone(),
             sync: self.sync.clone(),
             spec,
@@ -750,26 +938,21 @@ impl Runner {
         self.newer = None;
     }
 
-    fn seen(&mut self, delivery: &Option<String>, out: &mpsc::UnboundedSender<RunnerMsg>) -> bool {
+    fn seen(&mut self, delivery: &Option<String>, out: &OutTx) -> bool {
         let Some(d) = delivery else {
             return false;
         };
         if !self.took.contains(d) {
             return false;
         }
-        let _ = out.send(RunnerMsg::Took {
+        out.send(RunnerMsg::Took {
             delivery: d.clone(),
             taken: true,
         });
         true
     }
 
-    fn took(
-        &mut self,
-        delivery: Option<String>,
-        taken: bool,
-        out: Option<&mpsc::UnboundedSender<RunnerMsg>>,
-    ) {
+    fn took(&mut self, delivery: Option<String>, taken: bool, out: Option<&OutTx>) {
         let Some(d) = delivery else {
             return;
         };
@@ -780,7 +963,7 @@ impl Runner {
             self.took.push_back(d.clone());
         }
         if let Some(out) = out {
-            let _ = out.send(RunnerMsg::Took { delivery: d, taken });
+            out.send(RunnerMsg::Took { delivery: d, taken });
         }
     }
 
@@ -807,18 +990,13 @@ impl Runner {
         }
     }
 
-    fn on_agent(
-        &mut self,
-        thread: ThreadId,
-        out: AgentOut,
-        tx: Option<&mpsc::UnboundedSender<RunnerMsg>>,
-    ) {
+    fn on_agent(&mut self, thread: ThreadId, out: AgentOut, tx: Option<&OutTx>) {
         match out {
             AgentOut::Event(event) if event.is_transient() => {
                 if let Some(tx) = tx
                     && let Ok(status) = serde_json::to_value(&event)
                 {
-                    let _ = tx.send(RunnerMsg::Status { thread, status });
+                    tx.send(RunnerMsg::Status { thread, status });
                 }
             }
             AgentOut::Event(event) => {
@@ -837,7 +1015,7 @@ impl Runner {
                 let ts = now_ms();
                 self.outbox.push(thread, seq, ts, event.clone());
                 if let Some(tx) = tx {
-                    let _ = tx.send(RunnerMsg::Event {
+                    tx.send(RunnerMsg::Event {
                         thread,
                         seq,
                         ts,
@@ -856,7 +1034,7 @@ impl Runner {
                 delta,
             } => {
                 if let Some(tx) = tx {
-                    let _ = tx.send(RunnerMsg::Delta {
+                    tx.send(RunnerMsg::Delta {
                         thread,
                         turn,
                         item,
@@ -872,34 +1050,58 @@ impl Runner {
                         .then(std::time::Instant::now);
                 }
                 if let Some(tx) = tx {
-                    let _ = tx.send(RunnerMsg::ThreadStatus { thread, status });
+                    tx.send(RunnerMsg::ThreadStatus { thread, status });
                 }
             }
             AgentOut::Exited { error } => {
                 if let Some(e) = &error {
                     tracing::warn!(%thread, "agent exited: {e}");
                 }
-                self.sync_thread(thread);
+                let sync_task = self.sync_thread(thread);
+                let waiters = self.stop_waiters.remove(&thread).unwrap_or_default();
+                if !waiters.is_empty() {
+                    if let Some(handle) = sync_task {
+                        tokio::spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(8), handle).await;
+                            for w in waiters {
+                                let _ = w.send(());
+                            }
+                        });
+                    } else {
+                        for w in waiters {
+                            let _ = w.send(());
+                        }
+                    }
+                }
                 let ended = self.sessions.remove(&thread);
                 if let Some(s) = ended.filter(|s| {
                     s.restart.is_some() || !s.held.is_empty() || (s.parking && error.is_none())
                 }) && self.switch_at.is_none()
                 {
-                    let mut spec = s.restart.unwrap_or_else(|| {
-                        let mut spec = s.spec;
-                        spec.resume_session = s.session_id;
-                        spec.next_seq = s.next_seq;
-                        spec.fork_of = None;
-                        spec.resume_at = None;
-                        spec.moved_from = None;
-                        spec
-                    });
+                    let mut spec = match s.restart {
+                        Some(mut next) => {
+                            if next.resume_session.is_none() {
+                                next.resume_session = s.session_id;
+                            }
+                            next.next_seq = next.next_seq.max(s.next_seq);
+                            next
+                        }
+                        None => {
+                            let mut spec = s.spec;
+                            spec.resume_session = s.session_id;
+                            spec.next_seq = s.next_seq;
+                            spec.fork_of = None;
+                            spec.resume_at = None;
+                            spec.moved_from = None;
+                            spec
+                        }
+                    };
                     let mut held = s.held.into_iter();
                     if let Some((input, settings, delivery)) = held.next() {
                         if let Some(settings) = settings {
                             spec.settings = settings;
                         }
-                        let out = self.bg_tx.clone();
+                        let out = OutTx(self.bg_tx.clone());
                         self.start(spec, Some(input), &out);
                         self.took(delivery, true, tx);
                         for (input, settings, delivery) in held {
@@ -911,7 +1113,9 @@ impl Runner {
                     self.parked.insert(thread, spec);
                 }
                 if let Some(tx) = tx {
-                    let _ = tx.send(RunnerMsg::ThreadEnded { thread, error });
+                    tx.send(RunnerMsg::ThreadEnded { thread, error });
+                } else {
+                    self.ended_while_offline.insert(thread, error);
                 }
             }
         }

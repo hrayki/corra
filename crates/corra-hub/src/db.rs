@@ -490,6 +490,22 @@ impl Db {
         })
     }
 
+    pub fn machine_auth(&self, id: MachineId) -> Result<Option<(MachineStatus, String)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT status, token_hash FROM machines WHERE id = ?1",
+                [id.to_string()],
+                |r| {
+                    Ok((
+                        MachineStatus::parse(&r.get::<_, String>(0)?),
+                        r.get::<_, String>(1)?,
+                    ))
+                },
+            )
+            .optional()
+        })
+    }
+
     pub fn set_machine_status(&self, id: MachineId, status: MachineStatus) -> Result<()> {
         self.with(|c| {
             c.execute(

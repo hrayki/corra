@@ -1,15 +1,20 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use corra_proto::runner::RunnerMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 const SCROLLBACK: usize = 256 * 1024;
+const MAX_INFLIGHT_CHUNKS: usize = 64;
+const DRAIN_AFTER_EXIT: Duration = Duration::from_millis(500);
+
+pub type OutItem = (RunnerMsg, Option<OwnedSemaphorePermit>);
 
 enum Cmd {
     Input(Vec<u8>),
@@ -22,9 +27,19 @@ struct Term {
     scrollback: Arc<Mutex<VecDeque<u8>>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Terms {
     map: Arc<Mutex<HashMap<String, Term>>>,
+    permits: Arc<Semaphore>,
+}
+
+impl Default for Terms {
+    fn default() -> Self {
+        Terms {
+            map: Default::default(),
+            permits: Arc::new(Semaphore::new(MAX_INFLIGHT_CHUNKS)),
+        }
+    }
 }
 
 impl Terms {
@@ -38,19 +53,31 @@ impl Terms {
         cwd: &Path,
         cols: u16,
         rows: u16,
-        out: mpsc::UnboundedSender<RunnerMsg>,
+        out: mpsc::UnboundedSender<OutItem>,
+    ) -> Result<()> {
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "bash".into());
+        self.open_command(id, &shell, &["-l"], cwd, (cols, rows), out)
+    }
+
+    pub fn open_command(
+        &self,
+        id: String,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        (cols, rows): (u16, u16),
+        out: mpsc::UnboundedSender<OutItem>,
     ) -> Result<()> {
         if self.map.lock().unwrap().contains_key(&id) {
             return Ok(());
         }
         let (pty, pts) = pty_process::open()?;
         pty.resize(pty_process::Size::new(rows.max(2), cols.max(2)))?;
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "bash".into());
-        let mut child = pty_process::Command::new(&shell)
-            .arg("-l")
+        let mut child = pty_process::Command::new(program)
+            .args(args)
             .current_dir(cwd)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
@@ -61,10 +88,18 @@ impl Terms {
         let (mut reader, mut writer) = pty.into_split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
         let scrollback: Arc<Mutex<VecDeque<u8>>> = Default::default();
-        let sb = scrollback.clone();
+        self.map.lock().unwrap().insert(
+            id.clone(),
+            Term {
+                cmds: tx,
+                scrollback: scrollback.clone(),
+            },
+        );
+        let sb = scrollback;
         let out2 = out.clone();
         let id2 = id.clone();
-        tokio::spawn(async move {
+        let permits = self.permits.clone();
+        let mut reader_task = tokio::spawn(async move {
             let mut buf = vec![0u8; 16 * 1024];
             loop {
                 match reader.read(&mut buf).await {
@@ -76,16 +111,26 @@ impl Terms {
                             let over = s.len().saturating_sub(SCROLLBACK);
                             s.drain(..over);
                         }
-                        let _ = out2.send(RunnerMsg::TermOutput {
-                            term: id2.clone(),
-                            data: STANDARD.encode(&buf[..n]),
-                        });
+                        let Ok(permit) = permits.clone().acquire_owned().await else {
+                            break;
+                        };
+                        if out2
+                            .send((
+                                RunnerMsg::TermOutput {
+                                    term: id2.clone(),
+                                    data: STANDARD.encode(&buf[..n]),
+                                },
+                                Some(permit),
+                            ))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
             }
         });
         let map = self.map.clone();
-        let id3 = id.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -100,16 +145,16 @@ impl Terms {
                     }
                 }
             }
-            map.lock().unwrap().remove(&id3);
-            let _ = out.send(RunnerMsg::TermExit { term: id3 });
+            drop(writer);
+            if tokio::time::timeout(DRAIN_AFTER_EXIT, &mut reader_task)
+                .await
+                .is_err()
+            {
+                reader_task.abort();
+            }
+            map.lock().unwrap().remove(&id);
+            let _ = out.send((RunnerMsg::TermExit { term: id }, None));
         });
-        self.map.lock().unwrap().insert(
-            id,
-            Term {
-                cmds: tx,
-                scrollback,
-            },
-        );
         Ok(())
     }
 

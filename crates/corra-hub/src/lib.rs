@@ -64,13 +64,16 @@ pub fn build(opts: Options) -> Result<Built> {
         auth,
         data: opts.data.clone(),
     };
+    let large = Router::new()
+        .route("/runner/file/{thread}", get(files::get).put(files::put))
+        .route("/git/{*path}", get(gitproxy::proxy).post(gitproxy::proxy))
+        .layer(axum::extract::DefaultBodyLimit::max(256 << 20));
     let router = Router::new()
         .route("/runner", get(ws::runner_ws))
         .route("/app", get(ws::app_ws))
         .route("/auth/state", get(auth::state))
         .route("/auth/logout", post(auth::logout))
         .route("/runner/files/{thread}", get(files::list))
-        .route("/runner/file/{thread}", get(files::get).put(files::put))
         .route(
             "/healthz",
             get(|| async {
@@ -87,15 +90,37 @@ pub fn build(opts: Options) -> Result<Built> {
         .route("/auth/key", post(auth::key_login))
         .route("/auth/pair/start", post(auth::pair_start))
         .route("/auth/pair/finish", post(auth::pair_finish))
-        .route("/git/{*path}", get(gitproxy::proxy).post(gitproxy::proxy))
         .route("/dist/runner", get(files::runner_binary))
-        .route("/runner/kit", get(kit::serve));
+        .route("/runner/kit", get(kit::serve))
+        .layer(axum::extract::DefaultBodyLimit::max(2 << 20))
+        .merge(large);
     Ok(Built {
-        router: router
-            .layer(axum::extract::DefaultBodyLimit::max(256 << 20))
-            .with_state(state.clone()),
+        router: router.with_state(state.clone()),
         state,
     })
+}
+
+#[derive(Clone, Copy)]
+struct Compressible;
+
+impl tower_http::compression::Predicate for Compressible {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        let ct = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if ct.starts_with("application/octet-stream")
+            || ct.starts_with("application/gzip")
+            || ct.starts_with("application/x-git-")
+        {
+            return false;
+        }
+        tower_http::compression::DefaultPredicate::new().should_compress(response)
+    }
 }
 
 pub fn finish(router: Router) -> Router {
@@ -116,5 +141,5 @@ pub fn finish(router: Router) -> Router {
             header::REFERRER_POLICY,
             HeaderValue::from_static("same-origin"),
         ))
-        .layer(tower_http::compression::CompressionLayer::new())
+        .layer(tower_http::compression::CompressionLayer::new().compress_when(Compressible))
 }

@@ -58,7 +58,7 @@ pub struct HubCall {
 pub struct SessionCtx {
     pub baseline: std::sync::Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
     pub hub_url: String,
-    pub hub_token: String,
+    pub git_token: String,
     pub hub: mpsc::UnboundedSender<HubCall>,
     pub sync: Option<crate::sync::SyncRef>,
     pub spec: StartSpec,
@@ -72,7 +72,7 @@ pub struct SessionCtx {
 pub fn spawn(ctx: SessionCtx) {
     tokio::spawn(async move {
         for p in
-            crate::git::ensure_repos(&ctx.cwd, &ctx.hub_url, &ctx.hub_token, &ctx.spec.repos).await
+            crate::git::ensure_repos(&ctx.cwd, &ctx.hub_url, &ctx.git_token, &ctx.spec.repos).await
         {
             let _ = ctx.out.send(AgentOut::Event(Event::Notice {
                 level: NoticeLevel::Warning,
@@ -142,8 +142,9 @@ async fn restore(ctx: &SessionCtx, sync: &crate::sync::Syncer) {
     if let Some(parent) = ctx.spec.fork_of.as_ref().and_then(|f| f.thread) {
         sources.push(parent);
     }
+    let force_mutable = ctx.spec.moved_from.is_some();
     for t in sources {
-        match sync.restore(t, &base).await {
+        match sync.restore(t, &base, force_mutable).await {
             Ok(n) if n > 0 => tracing::info!(%thread, "restored {n} session files from the hub"),
             Ok(_) => {}
             Err(e) => tracing::warn!(%thread, "couldn't restore session files: {e:#}"),
