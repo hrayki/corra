@@ -80,8 +80,9 @@ pub fn build(opts: Options) -> Result<Built> {
             get(|| async {
                 (
                     [
-                        ("access-control-allow-origin", "*"),
-                        ("x-corra-version", update::VERSION),
+                        ("access-control-allow-origin", "*".to_string()),
+                        ("x-corra-version", update::VERSION.to_string()),
+                        ("x-corra-schema", db::SCHEMA_VERSION.to_string()),
                     ],
                     "ok",
                 )

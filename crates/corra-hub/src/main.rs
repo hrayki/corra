@@ -73,6 +73,16 @@ enum MachineCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    match run().await {
+        Err(e) if corra_hub::db::is_newer_database(&e) => {
+            tracing::error!("{e:#}");
+            std::process::exit(corra_hub::db::NEWER_DATABASE);
+        }
+        r => r,
+    }
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
