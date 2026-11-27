@@ -195,7 +195,11 @@ and the thread stays idle. Each subagent shows as a row that opens what it was a
 Background agents and commands still running are listed at the end of the thread, each with a Stop. A message sent
 mid-turn is placed in the thread where it was sent. The hub remembers Claude Code's latest usage report and sends it to
 every app. Drafts and read marks are kept per device, in the browser. A thread opens on its last four turns; earlier
-ones load as you scroll up.
+ones load as you scroll up. Find (Ctrl+F) searches every message in the thread, mine and the agent's, including those
+folded into its work, but not tool calls, their output or thoughts. The hub reads the whole log for it, a chunk at a
+time and with no index, and returns the newest thousand matches. Going to a match loads the earlier turns down to it and
+opens whatever folds or shortens it. Matches are marked with the CSS Custom Highlight API, so the messages' HTML isn't
+touched.
 
 A command or agent that finishes in the background can wake Claude Code, which answers in a turn of its own that says
 what woke it.
