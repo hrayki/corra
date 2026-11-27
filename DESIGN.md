@@ -9,9 +9,8 @@ The README says what corra is. This is how it fits together.
   out the agents' tools, serves the app, and relays everything between the apps and the machines. It never runs agent
   code. With a storage bucket set, it runs under Litestream: an empty disk is restored from the bucket and every change
   streams back to it, so the hub needs no volume. A new hub waits until the running one has copied its last changes and
-  handed over a lease in the bucket, so two never write at once. Session files live in the database too. Its schema is a
-  single base schema at version 13; a database older than that is refused rather than migrated, and so is one a newer
-  hub has changed.
+  handed over a lease in the bucket, so two never write at once. Session files live in the database too. Its schema
+  starts at version 13 and migrates to 14; a database older than 13 is refused, and so is one a newer hub has changed.
 - **Launcher** (`crates/corra-launcher`): the hub image's entry point. It runs the hub version it's been told to, from
   corra's releases, and goes back to the version before when a new one doesn't come up.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
@@ -36,21 +35,24 @@ the manager's tools read those descriptions, so nothing outside a provider's own
   can't write through a link, so before a Modal machine sleeps its helper turns that file back into a plain one.
 - **A machine paired by hand**: any Linux computer running the runner. The hub never starts or stops it.
 
-The first thread makes the machine: the runner downloads itself from the hub, clones the repos through it and applies
-the setup kit. After 15 idle minutes, or an hour while an app shows the thread or a question waits, the hub puts it to
-sleep. The next message wakes it as it was: dependencies, caches, files outside git; running programs aren't kept. A
-machine that dies comes back with the next message: from its last sleep on Modal, or fresh if it never slept. Resetting
-from the project's page deletes the machine and its disk, and the next thread starts fresh. Every ten minutes the hub
-deletes any machine on its providers that it doesn't know.
+The first thread (or Wake on the project's page) makes the machine: the runner downloads itself from the hub, clones the
+repos through it and applies the setup kit, streaming each boot and setup stage live to open apps. After 15 idle
+minutes, or an hour while an app shows the thread or a question waits, the hub puts it to sleep, and the project's page
+can also wake or sleep it on demand. The next message wakes it as it was: dependencies, caches, files outside git;
+running programs aren't kept. A machine that dies comes back with the next message: from its last sleep on Modal, or
+fresh if it never slept. Resetting from the project's page deletes the machine and its disk, and deleting the project
+removes the project, its machine and its threads. Every ten minutes the hub deletes any machine on its providers that it
+doesn't know.
 
 ## The setup kit
 
 The hub downloads the setup repo from GitHub, keeps its `corra/` folder and serves it to machines at `/runner/kit`.
 The runner copies `shared/AGENTS.md` to `~/.claude/CLAUDE.md`, links the skills, merges the settings, then runs
 `shared/setup` and the project's setup with its env vars, `CORRA_PROJECT` and `CORRA_PROJECT_DIR`. At a wake it runs
-them again only if the kit or the project's setup changed. If a setup fails, the next message shows the end of its log.
-Each machine gets `shared/` and only the setups of the projects it serves, so one project's `AGENTS.md` stays off other
-projects' machines.
+them again only if the kit or the project's setup changed, or immediately when Re-run setup is pressed on the project's
+page. The hub saves the last setup result and output so the project's page can show the setup log, and if setup fails,
+threads and the project page surface the failure. Each machine gets `shared/` and only the setups of the projects it
+serves, so one project's `AGENTS.md` stays off other projects' machines.
 
 The project's folder gets an `AGENTS.md` of corra's: the list of its repos if there's more than one, then the setup's
 own `AGENTS.md`.
@@ -145,8 +147,6 @@ an older schema, and Settings doesn't offer one. Outside a trial, a hub that exi
 doubling up to a minute, so a bad version never takes the container down with it. The launcher is the container's PID 1:
 it reaps orphaned processes, passes SIGTERM on once (Litestream gives up its last copy on a second one), and kills
 what's left of the hub's process group.
-
-The desktop app's built-in hub doesn't use the launcher; it updates with the app.
 
 ## Threads
 
