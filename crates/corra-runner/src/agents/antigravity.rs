@@ -1724,6 +1724,12 @@ fn tool_input(kind: &str, call: &Value) -> Value {
         }
         _ => {}
     }
+    if input["description"].is_null() {
+        let body = output_text(call);
+        if !body.is_empty() && Some(body.as_str()) != title {
+            input["description"] = json!(body);
+        }
+    }
     input
 }
 
@@ -2099,9 +2105,13 @@ async fn on_permission(
         }
     }
     close_text(ctx, st);
-    let kind = call["kind"].as_str().unwrap_or("");
     let turn = current(ctx, st);
     st.wake_until = None;
+    let tracked = st.tools.get(&tool_call);
+    let call_kind = call["kind"].as_str().filter(|s| !s.is_empty());
+    let eff_kind = call_kind
+        .or_else(|| tracked.map(|t| t.kind.as_str()).filter(|s| !s.is_empty()))
+        .unwrap_or("");
     let id = format!("acp-{}", uuid::Uuid::now_v7());
     let request = if question {
         AgentRequest::Question {
@@ -2124,9 +2134,40 @@ async fn on_permission(
             }],
         }
     } else {
+        let has_call_title = call["title"].as_str().is_some_and(|t| !t.is_empty());
+        let tool = if call_kind.is_some() || has_call_title {
+            tool_name(eff_kind, call)
+        } else if let Some(prev) = tracked
+            && !prev.name.is_empty()
+        {
+            prev.name.clone()
+        } else {
+            tool_name(eff_kind, call)
+        };
+        let mut input = tracked
+            .map(|t| t.input.clone())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| json!({}));
+        if let Value::Object(more) = tool_input(eff_kind, call)
+            && let Value::Object(base) = &mut input
+        {
+            for (k, v) in more {
+                if !v.is_null() {
+                    base.insert(k, v);
+                }
+            }
+        }
+        if input["description"].is_null()
+            && let Some(d) = call["description"]
+                .as_str()
+                .or_else(|| p["description"].as_str())
+                .filter(|s| !s.is_empty())
+        {
+            input["description"] = json!(d);
+        }
         AgentRequest::ToolApproval {
-            tool: tool_name(kind, call),
-            input: tool_input(kind, call),
+            tool,
+            input,
             reason: p["options"][0]["_meta"]["agy.security.warning"]["message"]
                 .as_str()
                 .map(String::from),
@@ -3070,5 +3111,65 @@ mod tests {
             session,
             Some((Some("gemini-4-neon".to_string()), Some("auto".to_string())))
         );
+    }
+
+    #[tokio::test]
+    async fn permission_inherits_tracked_tool_call_details_when_sparse() {
+        let (mut agy, mut rx, cmd) = start(AgentSettings::default());
+        open(&mut agy).await;
+        let p = agy.expect("session/prompt").await;
+        agy.send(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "c42",
+                    "kind": "execute",
+                    "title": "Run tests",
+                    "rawInput": { "command": "cargo test" },
+                    "status": "pending"
+                }
+            }
+        }))
+        .await;
+        agy.send(json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s1",
+                "toolCall": { "toolCallId": "c42" },
+                "options": [
+                    { "optionId": "a1", "name": "Allow", "kind": "allow_once" },
+                    { "optionId": "r1", "name": "Deny", "kind": "reject_once" }
+                ]
+            }
+        }))
+        .await;
+        let out = drain(&mut rx, |o| {
+            matches!(o, AgentOut::Event(Event::Request { .. }))
+        })
+        .await;
+        let Some(AgentOut::Event(Event::Request {
+            id,
+            request: AgentRequest::ToolApproval { tool, input, .. },
+            ..
+        })) = out.last()
+        else {
+            panic!("expected ToolApproval")
+        };
+        assert_eq!(tool, "Bash");
+        assert_eq!(input["command"], "cargo test");
+        assert_eq!(input["description"], "Run tests");
+        cmd.send(SessionCmd::Respond {
+            request: id.clone(),
+            response: RequestResponse::Allow { always: false },
+        })
+        .unwrap();
+        let _ = agy.next().await;
+        agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
+        drain(&mut rx, ended).await;
     }
 }
