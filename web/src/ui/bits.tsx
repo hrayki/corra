@@ -71,6 +71,7 @@ export function Btn(props: BtnProps) {
 export function IconBtn(props: {
   label: string
   active?: boolean
+  disabled?: boolean
   onClick?: (e: MouseEvent) => void
   class?: string
   children: JSX.Element
@@ -80,8 +81,9 @@ export function IconBtn(props: {
       type="button"
       aria-label={props.label}
       title={props.label}
+      disabled={props.disabled}
       onClick={props.onClick}
-      class={`inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-mute transition-colors duration-100 hover:bg-ink/5 hover:text-ink ${props.class ?? ''}`}
+      class={`inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-mute transition-colors duration-100 hover:bg-ink/5 hover:text-ink disabled:pointer-events-none disabled:opacity-40 ${props.class ?? ''}`}
       classList={{ 'bg-ink/5 text-ink': props.active }}
     >
       {props.children}

@@ -21,6 +21,8 @@ import { Btn, Thumbs, inputClass } from './bits'
 import { ToolDetail, toolSummary } from './tools'
 import { AgentRow, ThreadRow } from './Agents'
 import { isAgentCall, startedThread } from '../lib/agents'
+import { holds } from '../lib/find'
+import { findTarget } from './Find'
 
 export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean; cwd?: string }) {
   const top = createMemo(() => props.turn.entries.filter((e) => !(e.type === 'item' && e.item.parent)))
@@ -79,10 +81,15 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
     return out
   })
   const render = (e: Entry) => <EntryView thread={props.thread} entry={e} kids={children()} cwd={props.cwd} />
+  const sought = () => {
+    const t = findTarget()
+    return !!t && t.thread === props.thread && (t.item === `${props.turn.id}:input` || holds(props.turn.entries, t.item))
+  }
   return (
     <section
+      data-turn={props.turn.id}
       class="group/turn pb-7"
-      style={{ 'content-visibility': props.last ? 'visible' : 'auto', 'contain-intrinsic-size': 'auto 220px' }}
+      style={{ 'content-visibility': props.last || sought() ? 'visible' : 'auto', 'contain-intrinsic-size': 'auto 220px' }}
     >
       <Show
         when={props.turn.input.length > 0}
@@ -120,7 +127,7 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
                 <>
                   <Show when={p.lead}>{(l) => render(l())}</Show>
                   <Show when={p.work.length > 0}>
-                    <Fold label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
+                    <Fold thread={props.thread} label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
                   </Show>
                   <For each={p.rest}>{render}</For>
                 </>
@@ -202,9 +209,13 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
 
 const agentsIn = (es: Entry[]) => es.filter((e) => e.type === 'item' && (isAgentCall(e.item) || !!startedThread(e.item)))
 
-function Fold(props: { label: string; steps: number; entries: Entry[]; render: (e: Entry) => JSX.Element }) {
+function Fold(props: { thread: string; label: string; steps: number; entries: Entry[]; render: (e: Entry) => JSX.Element }) {
   const [open, setOpen] = createSignal(false)
   const agents = createMemo(() => agentsIn(props.entries))
+  createEffect(() => {
+    const t = findTarget()
+    if (t && t.thread === props.thread && holds(props.entries, t.item)) setOpen(true)
+  })
   return (
     <div>
       <button
@@ -344,12 +355,12 @@ function NotRead(props: { thread: string; input: InputPart[] }) {
   )
 }
 
-function HubNote(props: { text: string }) {
+function HubNote(props: { text: string; find?: string }) {
   return (
     <div class="flex gap-2.5 rounded-xl bg-ink/[0.03] px-3.5 py-2.5 text-[13px] text-mute">
       <Bell size={14} class="mt-[3px] shrink-0 text-faint" />
       <div class="min-w-0 flex-1 [&_.md]:text-[13px]">
-        <Markdown text={props.text} />
+        <Markdown text={props.text} find={props.find} />
       </div>
     </div>
   )
@@ -376,7 +387,7 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
       when={note() === null}
       fallback={
         <div class="mb-4">
-          <HubNote text={note()!} />
+          <HubNote text={note()!} find={`${props.turn.id}:input`} />
         </div>
       }
     >
@@ -385,6 +396,9 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
         <Show when={texts().length}>
           <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] leading-relaxed whitespace-pre-wrap">
             <div
+              ref={(el) => el.addEventListener('unclamp', () => setWhole(true))}
+              data-find={`${props.turn.id}:input`}
+              data-clamp={long() && !whole() ? '' : undefined}
               classList={{
                 'max-h-[15.5rem] overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]': long() && !whole(),
               }}
@@ -491,11 +505,12 @@ export function EntryView(props: { thread: string; entry: Entry; kids?: Map<stri
 
 function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
   const b = () => props.item.body
+  const found = () => (props.item.done && !props.item.parent ? props.item.id : undefined)
   return (
     <Switch>
       <Match when={b().type === 'agent_message'}>
         <div>
-          <Markdown text={props.item.live ?? (b() as { text: string }).text} />
+          <Markdown text={props.item.live ?? (b() as { text: string }).text} find={found()} />
           <Show when={props.item.done && ((b() as { text: string }).text?.length ?? 0) > 200}>
             <div class={`${actionRow} mt-1 -ml-2`}>
               <CopyButton text={() => (b() as { text: string }).text} label="Copy reply" />
@@ -520,7 +535,7 @@ function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, 
       </Match>
       <Match when={b().type === 'user_message'}>
         <div class="flex flex-col items-end gap-1">
-          <div class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] whitespace-pre-wrap">
+          <div data-find={found()} class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] whitespace-pre-wrap">
             <For each={(b() as { content: InputPart[] }).content}>{(p) => (p.type === 'text' ? <span>{p.text}</span> : null)}</For>
           </div>
           <Show when={props.item.unread && props.thread}>
@@ -547,7 +562,7 @@ function copyButton(text: () => string) {
 
 const isLimit = (text?: string) => !!text && /limit/i.test(text) && /reset/i.test(text)
 
-export function Markdown(props: { text: string; base?: string }) {
+export function Markdown(props: { text: string; base?: string; find?: string }) {
   let el!: HTMLDivElement
   const html = createMemo(() => renderMarkdown(props.text))
   createEffect(
@@ -569,7 +584,16 @@ export function Markdown(props: { text: string; base?: string }) {
       })
     }),
   )
-  return <div ref={el} class="md text-[14px] leading-[1.65]" innerHTML={html()} onClick={clickFile} onKeyDown={clickFile} />
+  return (
+    <div
+      ref={el}
+      data-find={props.find}
+      class="md text-[14px] leading-[1.65]"
+      innerHTML={html()}
+      onClick={clickFile}
+      onKeyDown={clickFile}
+    />
+  )
 }
 
 function markFiles(root: HTMLElement, base?: string) {

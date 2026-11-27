@@ -6,6 +6,7 @@ import SquareTerminal from 'lucide-solid/icons/square-terminal'
 import Ellipsis from 'lucide-solid/icons/ellipsis'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
+import Search from 'lucide-solid/icons/search'
 import { call, closeThread, loadEarlier, openThread, state } from '../lib/store'
 import { panel, setPanel } from '../lib/panel'
 import { tokens } from '../lib/format'
@@ -22,6 +23,7 @@ import { threadActions } from './actions'
 import { refreshChanges, totals as changeTotals } from '../lib/changes'
 import { limitedNow } from '../lib/seen'
 import { paired } from '../lib/catalog'
+import { FindBar, createFind } from './Find'
 
 function repeatsError(turns: TurnView[], i: number) {
   const t = turns[i]
@@ -185,7 +187,10 @@ export function ThreadPane(props: { id: string }) {
       ),
     )
   }
-  const menu = createMemo<MenuItem[]>(() => (thread() ? threadActions(thread()!, setError) : []))
+  const find = createFind({ thread: props.id, scroller: () => scroller, unstick: () => setStick(false) })
+  const menu = createMemo<MenuItem[]>(() =>
+    thread() ? [{ label: 'Find', onSelect: find.show }, 'sep', ...threadActions(thread()!, setError)] : [],
+  )
 
   const background = () => {
     const at = state.live[props.id]?.background ?? 0
@@ -232,6 +237,9 @@ export function ThreadPane(props: { id: string }) {
               </div>
             </div>
             <UsageRing />
+            <IconBtn label="Find in thread (Ctrl+F)" class="max-md:hidden" active={find.open()} onClick={find.toggle}>
+              <Search size={16} />
+            </IconBtn>
             <button
               class="flex h-8 items-center gap-1.5 rounded-lg px-2 text-[12.5px] text-mute hover:bg-ink/5 hover:text-ink"
               classList={{ 'bg-ink/5 text-ink': panel()?.kind === 'diff' }}
@@ -268,6 +276,9 @@ export function ThreadPane(props: { id: string }) {
               <Ellipsis size={16} />
             </Menu>
           </header>
+          <Show when={find.open()}>
+            <FindBar find={find} />
+          </Show>
           <Show when={error()}>
             <button class="border-b border-line bg-bad/5 px-5 py-1.5 text-left text-[12.5px] text-bad" onClick={() => setError('')}>
               {error()}

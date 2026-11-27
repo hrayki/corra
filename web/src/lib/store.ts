@@ -13,6 +13,7 @@ import type { Thread } from '../proto/Thread'
 import type { HubToApp } from '../proto/HubToApp'
 import type { StoredEvent } from '../proto/StoredEvent'
 import type { AppCall } from '../proto/AppCall'
+import type { Found } from '../proto/Found'
 
 export type Src = 'hub'
 export type ProjectX = Project & { src: Src }
@@ -247,27 +248,35 @@ function subscribe(src: Src, id: string) {
     })
 }
 
-const fetching = new Set<string>()
+const fetching = new Map<string, Promise<void>>()
 
-export async function loadEarlier(id: string) {
+export function loadEarlier(id: string, toSeq?: number): Promise<void> {
+  const busy = fetching.get(id)
+  if (busy) return toSeq === undefined ? busy : busy.then(() => loadEarlier(id, toSeq))
   const from = state.earlier[id]
   const src = state.threads[id]?.src
-  if (from == null || !src || fetching.has(id)) return
-  fetching.add(id)
-  try {
+  if (from == null || !src) return Promise.resolve()
+  const load = (async () => {
     const r = await callOn<{ events: StoredEvent[]; from_seq: number; earlier: boolean }>(src, {
       op: 'earlier',
       thread: id,
       before_seq: from,
+      to_seq: toSeq,
     })
     if (state.earlier[id] !== from) return
     const have = raw.get(id) ?? []
     const seen = new Set(have.map((e) => e.seq))
     const merged = [...r.events.filter((e) => !seen.has(e.seq)), ...have].sort((a, b) => a.seq - b.seq)
     showHistory(id, merged, r.earlier ? r.from_seq : null)
-  } finally {
-    fetching.delete(id)
-  }
+  })().finally(() => fetching.delete(id))
+  fetching.set(id, load)
+  return load
+}
+
+export const loadingEarlier = (id: string) => fetching.get(id)
+
+export function findIn(id: string, query: string) {
+  return callOn<Found>(state.threads[id]?.src ?? 'hub', { op: 'find', thread: id, query })
 }
 
 function putThread(src: Src, t: Thread) {
