@@ -817,10 +817,19 @@ pub fn exec_call<'a>(
 
 async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
     Ok(match call {
-        AppCall::Earlier { thread, before_seq } => {
-            let h = hub.history_before(thread, before_seq, EARLIER_TURNS)?;
+        AppCall::Earlier {
+            thread,
+            before_seq,
+            to_seq,
+        } => {
+            let turns = match to_seq {
+                Some(to) => EARLIER_TURNS.max(hub.turns_down_to(thread, before_seq, to)?),
+                None => EARLIER_TURNS,
+            };
+            let h = hub.history_before(thread, before_seq, turns)?;
             json!({ "events": h.events, "from_seq": h.from_seq, "earlier": h.earlier })
         }
+        AppCall::Find { thread, query } => serde_json::to_value(hub.find(thread, &query)?)?,
         AppCall::Subscribe { .. }
         | AppCall::Unsubscribe { .. }
         | AppCall::BrowserOpen { .. }

@@ -2,6 +2,7 @@ pub mod auth;
 pub mod backup;
 pub mod db;
 pub mod files;
+pub mod find;
 pub mod follow;
 pub mod github;
 pub mod gitproxy;
