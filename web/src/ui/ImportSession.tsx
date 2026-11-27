@@ -19,11 +19,10 @@ function size(n: number) {
 }
 
 export function ImportSession(props: { machine?: string }) {
-  const machine = () =>
-    props.machine ?? state.thisMachine ?? Object.values(state.machines).find((m) => paired(m.provider) && m.status === 'connected')?.id
+  const machine = () => props.machine ?? Object.values(state.machines).find((m) => paired(m.provider) && m.status === 'connected')?.id
   const [sessions] = createResource(machine, (m) => claudeSessions(m))
   const home = () => (machine() ? (state.machines[machine()!]?.info?.home ?? '') : '')
-  const where = () => (machine() === state.thisMachine ? 'this computer' : (state.machines[machine() ?? '']?.name ?? 'the machine'))
+  const where = () => state.machines[machine() ?? '']?.name ?? 'the machine'
   const [q, setQ] = createSignal('')
   const [into, setInto] = createSignal<string | null>(null)
   const [busy, setBusy] = createSignal<string | null>(null)

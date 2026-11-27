@@ -2,7 +2,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-j
 import ChevronDown from 'lucide-solid/icons/chevron-down'
 import Lock from 'lucide-solid/icons/lock'
 import Search from 'lucide-solid/icons/search'
-import { callOn } from '../lib/store'
+import { call } from '../lib/store'
 import { ago } from '../lib/format'
 
 export type RepoRow = { full_name: string; private: boolean; description: string | null; pushed_at: string }
@@ -10,7 +10,7 @@ export type RepoRow = { full_name: string; private: boolean; description: string
 let cached: Promise<RepoRow[]> | null = null
 
 export function listRepos(): Promise<RepoRow[]> {
-  cached ??= callOn<RepoRow[]>('hub', { op: 'list_repos' })
+  cached ??= call<RepoRow[]>({ op: 'list_repos' })
     .then((l) => (Array.isArray(l) ? l : []))
     .catch((e) => {
       cached = null

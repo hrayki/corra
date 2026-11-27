@@ -166,21 +166,6 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         );
         allowed.push("mcp__corra__*");
     }
-    if let Some(cdp) = ctx.browser_cdp.as_ref().filter(|_| ctx.spec.browser) {
-        let server = if which("playwright-mcp") {
-            Some(json!({ "command": "playwright-mcp", "args": ["--cdp-endpoint", cdp] }))
-        } else if which("npx") {
-            Some(
-                json!({ "command": "npx", "args": ["-y", "@playwright/mcp@latest", "--cdp-endpoint", cdp] }),
-            )
-        } else {
-            None
-        };
-        if let Some(server) = server {
-            servers.insert("browser".into(), server);
-            allowed.push("mcp__browser__*");
-        }
-    }
     let shared_mcp = crate::files::home().join(".corra/kit/shared/mcp.json");
     if !servers.is_empty() || shared_mcp.exists() {
         cmd.arg("--mcp-config")
@@ -255,13 +240,6 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         stderr_reader,
         rec,
     })
-}
-
-fn which(name: &str) -> bool {
-    std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|d| !d.is_empty() && std::path::Path::new(d).join(name).is_file())
 }
 
 pub fn find_bin() -> String {

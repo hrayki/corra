@@ -130,9 +130,6 @@ pub fn load_access_key(hub: &HubRef, auth: &Auth, data: &std::path::Path) -> Res
         for k in hub.db.kv_keys("session:")? {
             let _ = hub.db.kv_delete(&k);
         }
-        for m in hub.db.registered_machines()? {
-            hub.db.set_machine_token(m, &hash_token(&new_token("cm")))?;
-        }
         hub.db.kv_set("access_key", &hash)?;
         tracing::info!("the access key is new, so every earlier sign-in was signed out");
     }

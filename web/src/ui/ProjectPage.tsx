@@ -2,7 +2,8 @@ import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
 import ArrowLeft from 'lucide-solid/icons/arrow-left'
 import ChevronDown from 'lucide-solid/icons/chevron-down'
 import X from 'lucide-solid/icons/x'
-import { callOn, state, type ProjectX } from '../lib/store'
+import { call, state } from '../lib/store'
+import type { Project } from '../proto/Project'
 import { ago } from '../lib/format'
 import { kindOf, makers, paired, providerOf, sizeLabel, sizesFor } from '../lib/catalog'
 import { RepoPicker } from './RepoPicker'
@@ -18,9 +19,9 @@ const MAIN = [
 const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
 export function ProjectPage(props: { id: string }) {
-  const p = () => state.projects[props.id] as ProjectX | undefined
-  const [setups] = createResource(() => callOn<SetupRow[]>('hub', { op: 'list_setups' }).catch(() => []))
-  const [envNames] = createResource(() => callOn<string[]>('hub', { op: 'list_env' }).catch(() => []))
+  const p = () => state.projects[props.id] as Project | undefined
+  const [setups] = createResource(() => call<SetupRow[]>({ op: 'list_setups' }).catch(() => []))
+  const [envNames] = createResource(() => call<string[]>({ op: 'list_env' }).catch(() => []))
   const [error, setError] = createSignal('')
   const [busy, setBusy] = createSignal(false)
   const run = async (f: () => Promise<unknown>) => {
@@ -34,7 +35,7 @@ export function ProjectPage(props: { id: string }) {
       setBusy(false)
     }
   }
-  const update = (fields: Record<string, unknown>) => run(() => callOn('hub', { op: 'update_project', project: props.id, ...fields }))
+  const update = (fields: Record<string, unknown>) => run(() => call({ op: 'update_project', project: props.id, ...fields }))
   const machine = createMemo(
     () =>
       Object.values(state.machines)
@@ -60,16 +61,13 @@ export function ProjectPage(props: { id: string }) {
   const places = createMemo(() => {
     const out = makers().map((x) => ({ key: x.name, label: x.label }))
     for (const m of Object.values(state.machines))
-      if (m.src === 'hub' && paired(m.provider) && m.status !== 'destroyed') out.push({ key: `machine:${m.id}`, label: m.name })
+      if (paired(m.provider) && m.status !== 'destroyed') out.push({ key: `machine:${m.id}`, label: m.name })
     return out
   })
   const makes = () => !!providerOf(p()?.provider)?.creates_machines
   const placeKey = () => (makes() ? p()?.provider : `machine:${p()?.default_machine}`)
   const kinds = () => providerOf(p()?.provider)?.kinds ?? []
   const kind = () => kindOf(p()?.provider, p()?.kind)
-  const has = (t: string) => !!p()?.tools.includes(t)
-  const setTool = (t: string, on: boolean) =>
-    update({ tools: on ? [...new Set([...(p()?.tools ?? []), t])] : (p()?.tools ?? []).filter((x) => x !== t) })
 
   return (
     <div class="min-h-0 flex-1 overflow-y-auto">
@@ -96,7 +94,7 @@ export function ProjectPage(props: { id: string }) {
                 <RepoPicker
                   placeholder="Add a repo"
                   exclude={p()!.repos.map((r) => r.github ?? '')}
-                  onPick={(r) => void run(() => callOn('hub', { op: 'add_repo', project: props.id, github: r }))}
+                  onPick={(r) => void run(() => call({ op: 'add_repo', project: props.id, github: r }))}
                 />
               </div>
             </div>
@@ -162,7 +160,7 @@ export function ProjectPage(props: { id: string }) {
                     onClick={() =>
                       confirm(
                         'Reset the machine? Its disk is erased: anything not pushed is lost. The next thread starts on a fresh machine with the setup run again.',
-                      ) && void run(() => callOn('hub', { op: 'reset_machine', project: props.id }))
+                      ) && void run(() => call({ op: 'reset_machine', project: props.id }))
                     }
                   >
                     Reset machine
@@ -252,28 +250,6 @@ export function ProjectPage(props: { id: string }) {
               <p class="mt-1 text-[12.5px] text-faint">{MAIN.find((m) => m.value === p()!.allow_main)?.hint}</p>
             </div>
 
-            <span class="text-[13px] text-mute">Tools</span>
-            <div class="flex flex-wrap gap-4 text-[13px]">
-              <label class="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  class="accent-[var(--accent)]"
-                  checked={has('browser')}
-                  onChange={(e) => void setTool('browser', e.currentTarget.checked)}
-                />
-                Browser
-              </label>
-              <label class="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  class="accent-[var(--accent)]"
-                  checked={has('phone')}
-                  onChange={(e) => void setTool('phone', e.currentTarget.checked)}
-                />
-                Android test phone
-              </label>
-            </div>
-
             <span class="text-[13px] text-mute">Manager</span>
             <div>
               <label class="flex items-center gap-1.5 text-[13px]">
@@ -296,8 +272,8 @@ export function ProjectPage(props: { id: string }) {
                 Make this project a manager
               </label>
               <p class="mt-1 text-[12.5px] text-faint">
-                Its agents get your keys as the usual variables (GitHub, Modal, DigitalOcean, Agent37, Railway, Cloudflare), reach and push
-                any repo with nothing held back, and manage every project, thread, machine and credential.
+                Its agents get your keys as the usual variables (GitHub, Modal, Railway, Cloudflare), reach and push any repo with nothing
+                held back, and manage every project, thread, machine and credential.
               </p>
             </div>
           </div>

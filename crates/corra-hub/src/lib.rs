@@ -1,5 +1,4 @@
 pub mod auth;
-pub mod backup;
 pub mod db;
 pub mod files;
 pub mod find;
@@ -9,11 +8,9 @@ pub mod gitproxy;
 pub mod hub;
 pub mod import;
 pub mod kit;
-pub mod leftovers;
 pub mod lifecycle;
 pub mod manage;
 pub mod notify;
-pub mod phone;
 pub mod providers;
 pub mod schedule;
 pub mod secrets;
@@ -61,7 +58,6 @@ pub fn build(opts: Options) -> Result<Built> {
         tracing::warn!("couldn't close the requests left from before the restart: {e:#}");
     }
     lifecycle::spawn(hub.clone());
-    backup::spawn(hub.clone(), opts.data.clone());
     update::spawn(hub.clone());
     let state = AppState {
         hub,
@@ -75,7 +71,6 @@ pub fn build(opts: Options) -> Result<Built> {
         .route("/auth/logout", post(auth::logout))
         .route("/runner/files/{thread}", get(files::list))
         .route("/runner/file/{thread}", get(files::get).put(files::put))
-        .route("/runner/import", post(files::import))
         .route(
             "/healthz",
             get(|| async {
@@ -92,16 +87,9 @@ pub fn build(opts: Options) -> Result<Built> {
         .route("/auth/key", post(auth::key_login))
         .route("/auth/pair/start", post(auth::pair_start))
         .route("/auth/pair/finish", post(auth::pair_finish))
-        .route("/api/machine", post(manage::register_machine))
         .route("/git/{*path}", get(gitproxy::proxy).post(gitproxy::proxy))
         .route("/dist/runner", get(files::runner_binary))
-        .route("/runner/kit", get(kit::serve))
-        .route(
-            "/blob/{id}",
-            get(phone::blob_get)
-                .put(phone::blob_put)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        );
+        .route("/runner/kit", get(kit::serve));
     Ok(Built {
         router: router
             .layer(axum::extract::DefaultBodyLimit::max(256 << 20))

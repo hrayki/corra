@@ -116,8 +116,7 @@ pub enum AppCall {
         thread: ThreadId,
         turn: String,
     },
-    BackupNow,
-    BackupStatus,
+    DbStats,
     HubVersion {
         #[serde(default)]
         check: bool,
@@ -154,9 +153,6 @@ pub enum AppCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         client_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        compact: Option<bool>,
     },
     DeleteThread {
         thread: ThreadId,
@@ -212,14 +208,6 @@ pub enum AppCall {
     ListSecrets,
     ListProviders,
     ListTools,
-    PhoneHost,
-    SetPhoneHost {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        host: Option<crate::PhoneHost>,
-    },
-    Leftovers,
-    RetryLeftovers,
     Presence {
         focused: bool,
     },
@@ -315,30 +303,6 @@ pub enum AppCall {
     TermClose {
         thread: ThreadId,
         term: String,
-    },
-    BrowserOpen {
-        thread: ThreadId,
-        width: u32,
-        height: u32,
-    },
-    BrowserInput {
-        thread: ThreadId,
-        method: String,
-        #[ts(type = "Record<string, unknown>")]
-        params: Value,
-    },
-    BrowserClose {
-        thread: ThreadId,
-    },
-    PhoneUp,
-    PhoneDown,
-    PhoneOpen,
-    PhoneInput {
-        input: crate::PhoneInput,
-    },
-    PhoneClose,
-    Phone {
-        action: crate::PhoneOp,
     },
     ReadFile {
         thread: ThreadId,
@@ -443,24 +407,5 @@ pub enum HubToApp {
     TermExit {
         thread: ThreadId,
         term: String,
-    },
-    BrowserFrame {
-        machine: MachineId,
-        data: String,
-        width: u32,
-        height: u32,
-        url: String,
-        title: String,
-    },
-    PhoneVideo {
-        machine: MachineId,
-        width: u32,
-        height: u32,
-    },
-    PhoneFrame {
-        machine: MachineId,
-        data: String,
-        config: bool,
-        key: bool,
     },
 }

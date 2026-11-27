@@ -134,10 +134,8 @@ async fn replay_entries(name: &str, entries: Vec<Value>, linger: Duration) -> Ve
         moved_from: None,
         resume_at: None,
         fork_of: None,
-        browser: false,
     };
     let ctx = SessionCtx {
-        browser_cdp: None,
         baseline: Default::default(),
         hub_url: String::new(),
         hub_token: String::new(),
@@ -827,7 +825,6 @@ async fn record_with(
         }
     });
     let ctx = SessionCtx {
-        browser_cdp: None,
         baseline: Default::default(),
         hub_url: String::new(),
         hub_token: String::new(),
@@ -847,7 +844,6 @@ async fn record_with(
             moved_from: None,
             resume_at: None,
             fork_of: None,
-            browser: false,
         },
         cwd: cwd.clone(),
         extra_dirs: vec![],

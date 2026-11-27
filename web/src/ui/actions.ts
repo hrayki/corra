@@ -1,9 +1,10 @@
-import { call, callOn, state, type ThreadX } from '../lib/store'
+import { call, state } from '../lib/store'
+import type { Thread } from '../proto/Thread'
 import { markSeen } from '../lib/seen'
 import type { MenuItem } from './bits'
 import { paired, providerLabel, providerOf } from '../lib/catalog'
 
-export function threadActions(t: ThreadX, onError: (message: string) => void): MenuItem[] {
+export function threadActions(t: Thread, onError: (message: string) => void): MenuItem[] {
   const run = (p: Promise<unknown>) => void p.catch((e) => onError((e as Error).message))
   const set = (body: Record<string, unknown>) => run(call({ op: 'update_thread', thread: t.id, ...body } as never))
   const items: MenuItem[] = [
@@ -26,12 +27,12 @@ export function threadActions(t: ThreadX, onError: (message: string) => void): M
       onSelect: () => run(call<{ id: string }>({ op: 'fork_thread', thread: t.id }).then((n) => (location.hash = `#/t/${n.id}`))),
     },
   ]
-  if (state.conn.hub === 'open') {
+  if (state.conn === 'open') {
     const project = state.projects[t.project]
     const machine = t.machine ? state.machines[t.machine] : undefined
     const targets: MenuItem[] = []
     const idle = t.status === 'idle' || t.status === 'error'
-    const move = (to?: string) => run(callOn('hub', { op: 'move_thread', thread: t.id, machine: to }))
+    const move = (to?: string) => run(call({ op: 'move_thread', thread: t.id, machine: to }))
     if (project && providerOf(project.provider)?.creates_machines && machine && paired(machine.provider)) {
       targets.push({
         label: `A new ${providerLabel(project.provider)} machine`,
@@ -39,10 +40,9 @@ export function threadActions(t: ThreadX, onError: (message: string) => void): M
         onSelect: () => move(undefined),
       })
     }
-    const ordered = Object.values(state.machines).sort((a, b) => Number(b.id === state.thisMachine) - Number(a.id === state.thisMachine))
-    for (const m of ordered) {
+    for (const m of Object.values(state.machines)) {
       if (m.status !== 'connected' || m.id === t.machine || !paired(m.provider)) continue
-      targets.push({ label: m.id === state.thisMachine ? 'This computer' : m.name, disabled: !idle, onSelect: () => move(m.id) })
+      targets.push({ label: m.name, disabled: !idle, onSelect: () => move(m.id) })
     }
     if (targets.length) items.push('sep', { heading: idle ? 'Move to' : 'Move to (when the agent is idle)' }, ...targets)
   }

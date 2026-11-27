@@ -88,10 +88,10 @@ pub fn pick<'a>(threads: &'a [Thread], key: &str) -> Result<&'a Thread, String> 
     }
 }
 
-pub fn spec_mark(tools: &[ToolDef], env: &[(String, String)], browser: bool) -> String {
+pub fn spec_mark(tools: &[ToolDef], env: &[(String, String)]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&(tools, env, browser)).unwrap_or_default());
+    h.update(serde_json::to_vec(&(tools, env)).unwrap_or_default());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 

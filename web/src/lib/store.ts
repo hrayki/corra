@@ -5,7 +5,6 @@ import { createStore, produce, reconcile } from 'solid-js/store'
 import { Conn, type ConnState } from './conn'
 import { cache } from './cache'
 import { checkBuild } from './version'
-import { setOmarchyTheme } from './theme'
 import { apply, applyDelta, buildView, emptyView, type ThreadView } from './timeline'
 import type { Project } from '../proto/Project'
 import type { Machine } from '../proto/Machine'
@@ -15,31 +14,21 @@ import type { StoredEvent } from '../proto/StoredEvent'
 import type { AppCall } from '../proto/AppCall'
 import type { Found } from '../proto/Found'
 
-export type Src = 'hub'
-export type ProjectX = Project & { src: Src }
-export type MachineX = Machine & { src: Src }
-export type ThreadX = Thread & { src: Src }
-
 export type LiveStatus = {
   context?: { used_tokens: number; window_tokens?: number }
   background?: number
   agents?: string[]
   continue_at?: number
-  cache?: { tokens: number; until: number; compact: boolean }
   rate_limit?: { rate_limit_info?: { unifiedWindows?: Record<string, { utilization: number; resetsAt: number; status: string }> } }
 }
 
 type State = {
   boot: 'loading' | 'signin' | 'ready' | 'unreachable'
-  desktop: boolean
-  thisMachine: string | null
-  offline: string | null
-  connectUrl: string | null
-  conn: Record<Src, ConnState | 'none'>
-  loaded: Record<Src, boolean>
-  projects: Record<string, ProjectX>
-  machines: Record<string, MachineX>
-  threads: Record<string, ThreadX>
+  conn: ConnState | 'none'
+  loaded: boolean
+  projects: Record<string, Project>
+  machines: Record<string, Machine>
+  threads: Record<string, Thread>
   views: Record<string, ThreadView>
   earlier: Record<string, number | null>
   live: Record<string, LiveStatus>
@@ -51,12 +40,8 @@ type State = {
 
 const [state, setState] = createStore<State>({
   boot: 'loading',
-  desktop: false,
-  thisMachine: null,
-  offline: null,
-  connectUrl: null,
-  conn: { hub: 'none' },
-  loaded: { hub: false },
+  conn: 'none',
+  loaded: false,
   projects: {},
   machines: {},
   threads: {},
@@ -70,9 +55,9 @@ const [state, setState] = createStore<State>({
 })
 export { state }
 
-const conns: Partial<Record<Src, Conn>> = {}
+let conn: Conn | null = null
 const raw = new Map<string, StoredEvent[]>()
-const subscribed = new Map<string, Src | null>()
+const subscribed = new Set<string>()
 const catching = new Map<string, StoredEvent[]>()
 const TAIL = 4
 const saveTimers = new Map<string, number>()
@@ -89,9 +74,12 @@ function persistEvents(thread: string) {
   )
 }
 
-function persistSnapshot(src: Src) {
-  const of = <T extends { src: Src }>(r: Record<string, T>) => Object.values(r).filter((x) => x.src === src)
-  void cache.set(`snapshot:${src}`, { projects: of(state.projects), machines: of(state.machines), threads: of(state.threads) })
+function persistSnapshot() {
+  void cache.set('snapshot:hub', {
+    projects: Object.values(state.projects),
+    machines: Object.values(state.machines),
+    threads: Object.values(state.threads),
+  })
 }
 
 let pendingId = 0
@@ -230,11 +218,10 @@ function showHistory(thread: string, events: StoredEvent[], earlier: number | nu
   persistEvents(thread)
 }
 
-function subscribe(src: Src, id: string) {
-  const c = conns[src]
-  if (!c) return
+function subscribe(id: string) {
+  if (!conn) return
   if (!catching.has(id)) catching.set(id, [])
-  void c
+  void conn
     .call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0, tail: TAIL })
     .catch(() => {})
     .finally(() => {
@@ -254,10 +241,9 @@ export function loadEarlier(id: string, toSeq?: number): Promise<void> {
   const busy = fetching.get(id)
   if (busy) return toSeq === undefined ? busy : busy.then(() => loadEarlier(id, toSeq))
   const from = state.earlier[id]
-  const src = state.threads[id]?.src
-  if (from == null || !src) return Promise.resolve()
+  if (from == null) return Promise.resolve()
   const load = (async () => {
-    const r = await callOn<{ events: StoredEvent[]; from_seq: number; earlier: boolean }>(src, {
+    const r = await call<{ events: StoredEvent[]; from_seq: number; earlier: boolean }>({
       op: 'earlier',
       thread: id,
       before_seq: from,
@@ -276,10 +262,10 @@ export function loadEarlier(id: string, toSeq?: number): Promise<void> {
 export const loadingEarlier = (id: string) => fetching.get(id)
 
 export function findIn(id: string, query: string) {
-  return callOn<Found>(state.threads[id]?.src ?? 'hub', { op: 'find', thread: id, query })
+  return call<Found>({ op: 'find', thread: id, query })
 }
 
-function putThread(src: Src, t: Thread) {
+function putThread(t: Thread) {
   setState('threads', t.id, {
     machine: undefined,
     session_id: undefined,
@@ -287,64 +273,58 @@ function putThread(src: Src, t: Thread) {
     settled_at: undefined,
     hidden_at: undefined,
     ...t,
-    src,
   })
-  if (subscribed.has(t.id) && subscribed.get(t.id) !== src) resubscribe(t.id)
 }
 
-function applySnapshot(src: Src, m: Extract<HubToApp, { t: 'snapshot' }>) {
+function applySnapshot(m: Extract<HubToApp, { t: 'snapshot' }>) {
   batch(() => {
     setState(
       produce((s) => {
-        for (const k of Object.keys(s.projects)) if (s.projects[k].src === src) delete s.projects[k]
-        for (const k of Object.keys(s.machines)) if (s.machines[k].src === src) delete s.machines[k]
+        for (const k of Object.keys(s.projects)) delete s.projects[k]
+        for (const k of Object.keys(s.machines)) delete s.machines[k]
         const keep = new Set(m.threads.map((t) => t.id))
-        for (const k of Object.keys(s.threads)) if (s.threads[k].src === src && !keep.has(k)) delete s.threads[k]
-        for (const p of m.projects) s.projects[p.id] = { ...p, src }
-        for (const x of m.machines) s.machines[x.id] = { ...x, src }
-        s.loaded[src] = true
+        for (const k of Object.keys(s.threads)) if (!keep.has(k)) delete s.threads[k]
+        for (const p of m.projects) s.projects[p.id] = p
+        for (const x of m.machines) s.machines[x.id] = x
+        s.loaded = true
       }),
     )
-    for (const t of m.threads) putThread(src, t)
+    for (const t of m.threads) putThread(t)
   })
-  persistSnapshot(src)
+  persistSnapshot()
 }
 
-function onMessage(src: Src, m: HubToApp) {
+function onMessage(m: HubToApp) {
   switch (m.t) {
     case 'snapshot':
-      if (!state.offline) checkBuild(m.build)
-      applySnapshot(src, m)
+      checkBuild(m.build)
+      applySnapshot(m)
       break
     case 'project':
-      setState('projects', m.project.id, { ...m.project, src })
+      setState('projects', m.project.id, m.project)
       break
     case 'machine':
-      setState('machines', m.machine.id, { ...m.machine, src })
+      setState('machines', m.machine.id, m.machine)
       break
     case 'thread':
-      putThread(src, m.thread)
+      putThread(m.thread)
       break
     case 'thread_removed':
-      if (state.threads[m.thread]?.src === src) setState('threads', m.thread, undefined!)
+      setState('threads', m.thread, undefined!)
       break
     case 'reset':
-      if (state.threads[m.thread]?.src === src || !state.threads[m.thread]) {
-        resetThread(m.thread)
-        if (subscribed.has(m.thread)) subscribe(src, m.thread)
-      }
+      resetThread(m.thread)
+      if (subscribed.has(m.thread)) subscribe(m.thread)
       break
     case 'events':
-      if (state.threads[m.thread]?.src !== src) break
       if (catching.has(m.thread)) catching.get(m.thread)!.push(...m.events)
       else addEvents(m.thread, m.events)
       break
     case 'window':
-      if (state.threads[m.thread]?.src === src) showHistory(m.thread, [...m.events], m.earlier ? m.from_seq : null)
+      showHistory(m.thread, [...m.events], m.earlier ? m.from_seq : null)
       break
     case 'delta': {
       const d = m.delta
-      if (state.threads[d.thread]?.src !== src) break
       if (!state.views[d.thread]) setState('views', d.thread, emptyView())
       setState(
         'views',
@@ -354,16 +334,14 @@ function onMessage(src: Src, m: HubToApp) {
       break
     }
     case 'status':
-      if (state.threads[m.thread]?.src === src) setState('live', m.thread, m.status as LiveStatus)
+      setState('live', m.thread, m.status as LiveStatus)
       break
     case 'usage':
       setState('usage', { at: m.at, limits: m.limits })
       break
     case 'queue':
-      if (state.threads[m.thread]?.src === src) {
-        setState('queues', m.thread, m.items)
-        setState('pending', m.thread, (l) => (l ?? []).filter((p) => !p.queued))
-      }
+      setState('queues', m.thread, m.items)
+      setState('pending', m.thread, (l) => (l ?? []).filter((p) => !p.queued))
       break
     case 'not_sent': {
       const p = state.pending[m.thread]?.find((x) => x.client === m.client_id)
@@ -379,31 +357,8 @@ function onMessage(src: Src, m: HubToApp) {
     case 'term_exit':
       termListeners.get(m.term)?.exit()
       break
-    case 'browser_frame':
-      browserListeners.get(m.machine)?.(m)
-      break
-    case 'phone_video':
-    case 'phone_frame':
-      phoneListener?.(m)
-      break
     case 'reply':
       break
-  }
-}
-
-export type BrowserFrame = Extract<HubToApp, { t: 'browser_frame' }>
-const browserListeners = new Map<string, (f: BrowserFrame) => void>()
-export function listenBrowser(machine: string, l: (f: BrowserFrame) => void) {
-  browserListeners.set(machine, l)
-  return () => browserListeners.delete(machine)
-}
-
-export type PhoneMsg = Extract<HubToApp, { t: 'phone_video' | 'phone_frame' }>
-let phoneListener: ((m: PhoneMsg) => void) | undefined
-export function listenPhone(l: (m: PhoneMsg) => void) {
-  phoneListener = l
-  return () => {
-    if (phoneListener === l) phoneListener = undefined
   }
 }
 
@@ -420,20 +375,20 @@ export function b64bytes(s: string): Uint8Array {
   return out
 }
 
-function startConn(src: Src, url: () => string, onRefused?: () => void) {
-  conns[src]?.close()
+function startConn(url: () => string, onRefused?: () => void) {
+  conn?.close()
   const c = new Conn(
     url,
-    (m) => onMessage(src, m),
+    onMessage,
     () => {
-      for (const [t, s] of subscribed) if (s === src) subscribe(src, t)
+      for (const t of subscribed) subscribe(t)
     },
     onRefused,
   )
-  conns[src] = c
+  conn = c
   const track = () => {
-    if (conns[src] !== c) return
-    setState('conn', src, c.state())
+    if (conn !== c) return
+    setState('conn', c.state())
     setTimeout(track, 400)
   }
   track()
@@ -441,45 +396,17 @@ function startConn(src: Src, url: () => string, onRefused?: () => void) {
 
 const sameOrigin = () => `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
 
-const DESKTOP = 'corra:desktop'
-
-function desktopHandOff() {
-  const m = /^#desktop=(.*)$/.exec(location.hash)
-  if (m) {
-    try {
-      const d = JSON.parse(decodeURIComponent(m[1])) as { token?: string; machine?: string; connect?: string; offline?: string }
-      if (d.token) localStorage.setItem('corra_token', d.token)
-      sessionStorage.setItem(
-        DESKTOP,
-        JSON.stringify({ machine: d.machine ?? null, connect: d.connect ?? null, offline: d.offline ?? null }),
-      )
-    } catch {}
-    history.replaceState(null, '', `${location.pathname}${location.search}#/`)
-  }
-  try {
-    const d = JSON.parse(sessionStorage.getItem(DESKTOP) ?? 'null') as {
-      machine: string | null
-      connect: string | null
-      offline: string | null
-    } | null
-    if (d) setState({ desktop: true, thisMachine: d.machine, connectUrl: d.connect, offline: d.offline })
-  } catch {}
-}
-
-;(window as unknown as { corraTheme: typeof setOmarchyTheme }).corraTheme = setOmarchyTheme
-
-async function loadCached(src: Src) {
-  const s = await cache.get<{ projects: Project[]; machines: Machine[]; threads: Thread[] }>(`snapshot:${src}`)
-  if (!s || state.loaded[src]) return
+async function loadCached() {
+  const s = await cache.get<{ projects: Project[]; machines: Machine[]; threads: Thread[] }>('snapshot:hub')
+  if (!s || state.loaded) return
   batch(() => {
-    for (const p of s.projects) if (!state.projects[p.id]) setState('projects', p.id, { ...p, src })
-    for (const m of s.machines) if (!state.machines[m.id]) setState('machines', m.id, { ...m, src })
-    for (const t of s.threads) if (!state.threads[t.id]) setState('threads', t.id, { ...t, src })
+    for (const p of s.projects) if (!state.projects[p.id]) setState('projects', p.id, p)
+    for (const m of s.machines) if (!state.machines[m.id]) setState('machines', m.id, m)
+    for (const t of s.threads) if (!state.threads[t.id]) setState('threads', t.id, t)
   })
 }
 
 export async function boot() {
-  desktopHandOff()
   let auth: { signed_in: boolean }
   try {
     const token = localStorage.getItem('corra_token')
@@ -493,9 +420,8 @@ export async function boot() {
     setState('boot', 'signin')
     return
   }
-  void loadCached('hub')
+  void loadCached()
   startConn(
-    'hub',
     () => {
       const token = localStorage.getItem('corra_token')
       return `${sameOrigin()}/app${token ? `?token=${encodeURIComponent(token)}` : ''}`
@@ -512,24 +438,14 @@ export async function boot() {
   setState('boot', 'ready')
 }
 
-export function callOn<T = unknown>(src: Src, c: AppCall): Promise<T> {
-  const conn = conns[src]
+export function call<T = unknown>(c: AppCall): Promise<T> {
   if (!conn) return Promise.reject(new Error("The hub isn't connected"))
   return conn.call<T>(c)
 }
 
-export const call = <T = unknown>(c: AppCall) => callOn<T>('hub', c)
-
-function resubscribe(id: string) {
-  if (!subscribed.has(id)) return
-  const src = state.threads[id]?.src ?? null
-  subscribed.set(id, src)
-  if (src) subscribe(src, id)
-}
-
 export async function openThread(id: string) {
   if (subscribed.has(id)) return
-  subscribed.set(id, null)
+  subscribed.add(id)
   if (!raw.has(id)) {
     const cached = await cache.events(id)
     const from = (await cache.get<number | null>(`earlier:${id}`)) ?? null
@@ -548,17 +464,12 @@ export async function openThread(id: string) {
       }
     }
   }
-  resubscribe(id)
+  subscribe(id)
 }
 
 export function closeThread(id: string) {
-  const src = subscribed.get(id)
   if (!subscribed.delete(id)) return
-  if (src) void conns[src]?.call({ op: 'unsubscribe', thread: id }).catch(() => {})
-}
-
-export function threadSubscribedLate(id: string) {
-  if (subscribed.has(id) && !subscribed.get(id)) resubscribe(id)
+  void conn?.call({ op: 'unsubscribe', thread: id }).catch(() => {})
 }
 
 export const eventsOf = (id: string) => raw.get(id) ?? []

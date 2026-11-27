@@ -9,17 +9,6 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum RunnerMsg {
-    TunnelOpen {
-        id: String,
-        port: u16,
-    },
-    TunnelData {
-        id: String,
-        data: String,
-    },
-    TunnelClose {
-        id: String,
-    },
     Hello {
         protocol: u32,
         info: MachineInfo,
@@ -55,22 +44,6 @@ pub enum RunnerMsg {
     },
     TermExit {
         term: String,
-    },
-    BrowserFrame {
-        data: String,
-        width: u32,
-        height: u32,
-        url: String,
-        title: String,
-    },
-    PhoneVideo {
-        width: u32,
-        height: u32,
-    },
-    PhoneFrame {
-        data: String,
-        config: bool,
-        key: bool,
     },
     ThreadEnded {
         thread: ThreadId,
@@ -108,17 +81,6 @@ pub struct RunningThread {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum HubMsg {
-    TunnelOpen {
-        id: String,
-        port: u16,
-    },
-    TunnelData {
-        id: String,
-        data: String,
-    },
-    TunnelClose {
-        id: String,
-    },
     Welcome {
         machine: crate::MachineId,
         acks: Vec<(ThreadId, i64)>,
@@ -180,15 +142,6 @@ pub enum HubMsg {
     TermClose {
         term: String,
     },
-    BrowserInput {
-        method: String,
-        params: Value,
-    },
-    BrowserStop,
-    PhoneInput {
-        input: crate::PhoneInput,
-    },
-    PhoneStop,
     Request {
         id: u64,
         body: RunnerRequest,
@@ -245,17 +198,6 @@ pub enum RunnerRequest {
     },
     TermAttach {
         term: String,
-    },
-    BrowserOpen {
-        width: u32,
-        height: u32,
-    },
-    Phone {
-        action: crate::PhoneOp,
-    },
-    Upload {
-        path: String,
-        url: String,
     },
     Secret {
         name: String,

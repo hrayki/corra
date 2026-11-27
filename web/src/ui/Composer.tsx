@@ -1,16 +1,14 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, on, onMount, untrack, type JSX } from 'solid-js'
 import ArrowUp from 'lucide-solid/icons/arrow-up'
 import Square from 'lucide-solid/icons/square'
 import X from 'lucide-solid/icons/x'
 import Paperclip from 'lucide-solid/icons/paperclip'
-import FoldVertical from 'lucide-solid/icons/chevrons-down-up'
-import UnfoldVertical from 'lucide-solid/icons/chevrons-up-down'
-import { addPending, call, dropPending, settlePending, state, stopThread, takeRestored, type ThreadX } from '../lib/store'
+import { addPending, call, dropPending, settlePending, state, stopThread, takeRestored } from '../lib/store'
 import type { InputPart } from '../proto/InputPart'
 import type { AgentSettings } from '../proto/AgentSettings'
 import type { AgentKind } from '../proto/AgentKind'
 import type { Choice } from '../proto/Choice'
-import { tokens } from '../lib/format'
+import type { Thread } from '../proto/Thread'
 import { AGENT_NAMES, fitEffort, pickerState } from '../lib/choices'
 import { Menu, Picture } from './bits'
 import { draftFor, setDraftFor } from './Timeline'
@@ -320,58 +318,6 @@ export function InputBox(props: {
   )
 }
 
-const KEPT = 'corra:keep-history'
-const [kept, setKeptRaw] = createSignal<Set<string>>(
-  new Set(
-    (() => {
-      try {
-        return JSON.parse(localStorage.getItem(KEPT) ?? '[]') as string[]
-      } catch {
-        return []
-      }
-    })(),
-  ),
-)
-
-function setKept(key: string, on: boolean) {
-  const next = new Set(kept())
-  if (on) next.add(key)
-  else next.delete(key)
-  const list = [...next].slice(-50)
-  setKeptRaw(new Set(list))
-  try {
-    localStorage.setItem(KEPT, JSON.stringify(list))
-  } catch {}
-}
-
-function CompactChip(props: { tokens: number; keep: boolean; onToggle: () => void }) {
-  const n = () => tokens(props.tokens)
-  return (
-    <button
-      type="button"
-      aria-pressed={!props.keep}
-      aria-label={props.keep ? `Keep the full history, ${n()} tokens` : `Compact ${n()} tokens first`}
-      title={
-        props.keep
-          ? `Sends with the full history, which reads ${n()} tokens again at full price. Click to summarize first.`
-          : `The prompt cache expired, so this message would read ${n()} tokens again at full price. Sending summarizes the thread first. Click to keep the full history.`
-      }
-      onClick={props.onToggle}
-      class="mr-0.5 flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium tabular-nums transition-colors duration-100 max-md:h-9 @max-lg:gap-1 @max-lg:px-2"
-      classList={{
-        'border-accent/40 bg-accent/10 text-accent hover:bg-accent/15': !props.keep,
-        'border-line text-mute hover:border-faint hover:text-ink': props.keep,
-      }}
-    >
-      <Show when={props.keep} fallback={<FoldVertical size={13} />}>
-        <UnfoldVertical size={13} />
-      </Show>
-      <span class="@max-lg:hidden">{props.keep ? 'Keep' : 'Compact'}</span>
-      <span classList={{ 'text-accent/70': !props.keep }}>{n()}</span>
-    </button>
-  )
-}
-
 export function SendButton(props: { disabled?: boolean; onClick: () => void; label?: string }) {
   return (
     <button
@@ -435,7 +381,7 @@ export function UsageRing() {
   )
 }
 
-export function Composer(props: { thread: ThreadX }) {
+export function Composer(props: { thread: Thread }) {
   const input = useInput(() => props.thread.id)
   const [error, setError] = createSignal('')
   const busy = () => props.thread.status === 'running' || props.thread.status === 'waiting' || props.thread.status === 'starting'
@@ -452,26 +398,12 @@ export function Composer(props: { thread: ThreadX }) {
     const now = untrack(input.text).trimEnd()
     input.setText([...(now ? [now] : []), ...back].join('\n\n'))
   })
-  const [clock, setClock] = createSignal(Date.now())
-  const ticker = setInterval(() => setClock(Date.now()), 30_000)
-  onCleanup(() => clearInterval(ticker))
-  const keepKey = () => `${props.thread.id}:${state.live[props.thread.id]?.cache?.until ?? 0}`
-  const keep = () => kept().has(keepKey())
-  const setKeep = (on: boolean) => setKept(keepKey(), on)
-  const stale = () => {
-    const live = state.live[props.thread.id]
-    const c = live?.cache
-    const limited = (live?.continue_at ?? 0) > clock()
-    return c && c.compact && clock() > c.until && !busy() && !limited ? c.tokens : null
-  }
   const send = async (now = false) => {
     const parts = input.parts()
     if (!parts.length) return
     input.clear()
     setError('')
-    const compact = stale() !== null && !keep()
-    const queued = (busy() && !now) || compact
-    setKeep(false)
+    const queued = busy() && !now
     const client = crypto.randomUUID()
     const shown = addPending(props.thread.id, parts, queued, client)
     try {
@@ -479,9 +411,8 @@ export function Composer(props: { thread: ThreadX }) {
         op: 'send',
         thread: props.thread.id,
         input: parts,
-        queue: queued && !compact,
+        queue: queued,
         client_id: client,
-        ...(compact ? { compact: true } : {}),
       })
       settlePending(props.thread.id, shown, r?.queued ?? queued)
     } catch (e) {
@@ -549,7 +480,6 @@ export function Composer(props: { thread: ThreadX }) {
           right={
             <>
               {pickers.model}
-              <Show when={stale()}>{(n) => <CompactChip tokens={n()} keep={keep()} onToggle={() => setKeep(!keep())} />}</Show>
               <Show
                 when={busy() && !input.parts().length}
                 fallback={<SendButton disabled={!input.parts().length} onClick={() => void send()} label={busy() ? 'Queue' : 'Send'} />}
