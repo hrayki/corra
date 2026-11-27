@@ -30,6 +30,9 @@ pub const RELEASES: &str = "https://github.com/hrayki/corra/releases";
 const STOP_WAIT: Duration = Duration::from_secs(45);
 const TICK: Duration = Duration::from_millis(200);
 const TAIL: usize = 40;
+const FETCH_WITHIN: Duration = Duration::from_secs(600);
+const NEWER_DATABASE: i32 = 65;
+const TOO_OLD: &str = "its database was changed by a newer version, and the hub can't roll back past a database change";
 
 pub fn http_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -222,7 +225,13 @@ fn tee(from: impl Read + Send + 'static, mut to: impl Write + Send + 'static, ta
     });
 }
 
-fn probe(addr: SocketAddr) -> Option<Option<String>> {
+#[derive(Debug, PartialEq)]
+struct Health {
+    version: Option<String>,
+    schema: Option<i64>,
+}
+
+fn probe(addr: SocketAddr) -> Option<Health> {
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     s.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
@@ -239,19 +248,29 @@ fn probe(addr: SocketAddr) -> Option<Option<String>> {
     parse_health(&String::from_utf8_lossy(&got))
 }
 
-fn parse_health(text: &str) -> Option<Option<String>> {
+fn parse_health(text: &str) -> Option<Health> {
     let head = text.split("\r\n\r\n").next()?;
     let mut lines = head.split("\r\n");
     let status = lines.next()?.split_whitespace().nth(1)?;
     if status != "200" {
         return None;
     }
-    Some(lines.find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        k.trim()
-            .eq_ignore_ascii_case("x-corra-version")
-            .then(|| v.trim().to_string())
-    }))
+    let mut h = Health {
+        version: None,
+        schema: None,
+    };
+    for l in lines {
+        let Some((k, v)) = l.split_once(':') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k.eq_ignore_ascii_case("x-corra-version") {
+            h.version = Some(v.to_string());
+        } else if k.eq_ignore_ascii_case("x-corra-schema") {
+            h.schema = v.parse().ok();
+        }
+    }
+    Some(h)
 }
 
 fn backoff(n: u32) -> Duration {
@@ -261,6 +280,34 @@ fn backoff(n: u32) -> Duration {
 struct Child {
     pid: i32,
     tail: Tail,
+}
+
+fn lines(tail: &Tail) -> Vec<String> {
+    tail.lock().unwrap().iter().cloned().collect()
+}
+
+struct Fetch {
+    version: String,
+    since: Instant,
+    waiting: Vec<Sender<Value>>,
+    late: bool,
+}
+
+impl Fetch {
+    fn overdue(&mut self, now: Instant) -> bool {
+        if !self.late && now.duration_since(self.since) >= FETCH_WITHIN {
+            self.late = true;
+            let msg = json!({ "error": format!(
+                "{} took more than {} minutes to download, so the hub didn't switch",
+                self.version,
+                FETCH_WITHIN.as_secs() / 60
+            ) });
+            for w in self.waiting.drain(..) {
+                let _ = w.send(msg.clone());
+            }
+        }
+        self.late
+    }
 }
 
 enum Got {
@@ -274,6 +321,7 @@ enum Outcome {
     Stopped,
     Switched,
     Failed(String, Vec<String>),
+    Refused(Vec<String>),
     Exited(Duration),
 }
 
@@ -288,7 +336,7 @@ struct Launcher {
     st: State,
     term: bool,
     exits: VecDeque<(i32, i32)>,
-    fetching: Option<(String, Vec<Sender<Value>>)>,
+    fetching: Option<Fetch>,
 }
 
 impl Launcher {
@@ -357,13 +405,39 @@ impl Launcher {
         !self.term
     }
 
-    fn retry<T>(&mut self, what: &str, mut f: impl FnMut(&mut Self) -> Result<T>) -> Option<T> {
+    fn wait_for<T: Send + 'static>(&mut self, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        loop {
+            if let Ok(v) = rx.try_recv() {
+                return Some(v);
+            }
+            if self.term {
+                return None;
+            }
+            match self.next(TICK) {
+                Got::Term => return None,
+                Got::Event(e) => self.refuse(e, "the hub is starting; try again in a moment"),
+                Got::Exit(..) | Got::Nothing => {}
+            }
+        }
+    }
+
+    fn retry<T: Send + 'static>(
+        &mut self,
+        what: &str,
+        f: impl Fn() -> Result<T> + Send + Sync + 'static,
+    ) -> Option<T> {
+        let f = Arc::new(f);
         let mut n = 0;
         loop {
             if self.term {
                 return None;
             }
-            match f(self) {
+            let g = f.clone();
+            match self.wait_for(move || g())? {
                 Ok(v) => return Some(v),
                 Err(e) => {
                     let wait = backoff(n);
@@ -441,11 +515,15 @@ impl Launcher {
     }
 
     fn fetched(&mut self, version: String, r: std::result::Result<(), String>, live: bool) -> bool {
-        let Some((v, replies)) = self.fetching.take() else {
+        let Some(mut f) = self.fetching.take() else {
             return false;
         };
-        if v != version {
-            self.fetching = Some((v, replies));
+        if f.version != version {
+            self.fetching = Some(f);
+            return false;
+        }
+        if f.overdue(Instant::now()) {
+            log!("{version} came after the hub gave up on it, so it isn't switched to");
             return false;
         }
         let answer = match r {
@@ -460,10 +538,34 @@ impl Launcher {
             Ok(()) => json!({ "ok": true }),
             Err(e) => json!({ "error": e }),
         };
-        for r in replies {
-            let _ = r.send(msg.clone());
+        for w in f.waiting {
+            let _ = w.send(msg.clone());
         }
         ok
+    }
+
+    fn keep(&self) -> Vec<String> {
+        let mut keep = self.st.keep();
+        keep.extend(self.fetching.as_ref().map(|f| f.version.clone()));
+        keep
+    }
+
+    fn confirm(&mut self, version: &str) -> Result<()> {
+        let (st, _) = store::update(&*self.state, |s| s.confirm(version))?;
+        self.st = st;
+        log!("hub {version} stayed up, so it's kept");
+        fetch::prune(&self.cfg.local, self.bucket.as_deref(), &self.keep());
+        Ok(())
+    }
+
+    fn saw_schema(&mut self, version: &str, schema: i64) {
+        if self.st.schemas.get(version) == Some(&schema) {
+            return;
+        }
+        match store::update(&*self.state, |s| s.saw_schema(version, schema)) {
+            Ok((st, _)) => self.st = st,
+            Err(e) => log!("couldn't record {version}'s database schema: {e:#}"),
+        }
     }
 
     fn ask_switch(&mut self, version: String, running: &str, reply: Sender<Value>) {
@@ -475,18 +577,34 @@ impl Launcher {
             let _ = reply.send(json!({ "error": format!("the hub already runs {version}") }));
             return;
         }
+        if let Some((theirs, ours)) = self.st.crosses_schema(running, &version) {
+            let _ = reply.send(json!({ "error": format!(
+                "the hub can't roll back to {version}: {running} changed the database to schema {ours}, and {version} only knows schema {theirs}"
+            ) }));
+            return;
+        }
         match &mut self.fetching {
-            Some((v, replies)) if *v == version => {
-                replies.push(reply);
+            Some(f) if f.version == version => {
+                if f.late {
+                    f.late = false;
+                    f.since = Instant::now();
+                }
+                f.waiting.push(reply);
                 return;
             }
-            Some((v, _)) => {
-                let _ = reply.send(json!({ "error": format!("the hub is already getting {v}") }));
+            Some(f) => {
+                let _ = reply
+                    .send(json!({ "error": format!("the hub is already getting {}", f.version) }));
                 return;
             }
             None => {}
         }
-        self.fetching = Some((version.clone(), vec![reply]));
+        self.fetching = Some(Fetch {
+            version: version.clone(),
+            since: Instant::now(),
+            waiting: vec![reply],
+            late: false,
+        });
         let (local, bucket, releases, tx) = (
             self.cfg.local.clone(),
             self.bucket.clone(),
@@ -513,10 +631,6 @@ impl Launcher {
         let mut next_probe = Instant::now();
         let mut next_confirm = Instant::now();
         let mut switch_at: Option<Instant> = None;
-        let tail = |c: &Child| -> Vec<String> {
-            let t = c.tail.lock().unwrap();
-            t.iter().skip(t.len().saturating_sub(20)).cloned().collect()
-        };
         loop {
             match self.next(TICK) {
                 Got::Term => {
@@ -527,9 +641,15 @@ impl Launcher {
                     unsafe { libc::kill(-child.pid, libc::SIGKILL) };
                     let how = describe(status);
                     log!("hub {version} {how}");
+                    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == NEWER_DATABASE {
+                        return Outcome::Refused(lines(&child.tail));
+                    }
                     let up_for = run.up.map(|u| u.elapsed()).unwrap_or_default();
                     if !confirmed {
-                        return Outcome::Failed(run.exited(Instant::now(), &how), tail(&child));
+                        return Outcome::Failed(
+                            run.exited(Instant::now(), &how),
+                            lines(&child.tail),
+                        );
                     }
                     return Outcome::Exited(up_for);
                 }
@@ -553,6 +673,9 @@ impl Launcher {
                 }
             }
             let now = Instant::now();
+            if let Some(f) = self.fetching.as_mut() {
+                f.overdue(now);
+            }
             if switch_at.is_some_and(|at| now >= at) {
                 self.stop(&child);
                 return if self.term {
@@ -564,39 +687,31 @@ impl Launcher {
             if run.up.is_none() && now >= next_probe {
                 next_probe = now + Duration::from_secs(1);
                 match probe(self.cfg.probe) {
-                    Some(Some(v)) if v == version => {
+                    Some(h) if h.version.as_deref() == Some(version) => {
                         run.up = Some(now);
                         log!("hub {version} is up");
+                        if let Some(schema) = h.schema {
+                            self.saw_schema(version, schema);
+                        }
                     }
-                    Some(v) => run.answered_as = Some(v.unwrap_or_default()),
+                    Some(h) => run.answered_as = Some(h.version.unwrap_or_default()),
                     None => {}
                 }
             }
             if !confirmed && switch_at.is_none() {
                 match run.judge(now) {
                     Verdict::Wait => {}
-                    Verdict::Good if now >= next_confirm => {
-                        match store::update(&*self.state, |s| s.confirm(version)) {
-                            Ok((st, _)) => {
-                                self.st = st;
-                                confirmed = true;
-                                log!("hub {version} stayed up, so it's kept");
-                                fetch::prune(
-                                    &self.cfg.local,
-                                    self.bucket.as_deref(),
-                                    &self.st.keep(),
-                                );
-                            }
-                            Err(e) => {
-                                log!("couldn't record that {version} is good: {e:#}");
-                                next_confirm = now + Duration::from_secs(5);
-                            }
+                    Verdict::Good if now >= next_confirm => match self.confirm(version) {
+                        Ok(()) => confirmed = true,
+                        Err(e) => {
+                            log!("couldn't record that {version} is good: {e:#}");
+                            next_confirm = now + Duration::from_secs(5);
                         }
-                    }
+                    },
                     Verdict::Good => {}
                     Verdict::Bad(why) => {
                         log!("hub {version} is no good: {why}");
-                        let lines = tail(&child);
+                        let lines = lines(&child.tail);
                         self.stop(&child);
                         return Outcome::Failed(why, lines);
                     }
@@ -609,7 +724,8 @@ impl Launcher {
         let mut quick = 0u32;
         loop {
             let state = self.state.clone();
-            let Some(st) = self.retry("read the launcher's state", |_| Ok(store::load(&*state)?.0))
+            let s = state.clone();
+            let Some(st) = self.retry("read the launcher's state", move || Ok(store::load(&*s)?.0))
             else {
                 return 0;
             };
@@ -618,13 +734,15 @@ impl Launcher {
                 Some(v) => v,
                 None => {
                     let releases = self.releases.clone();
-                    let Some(newest) = self.retry("find the newest release", |_| releases.newest())
+                    let Some(newest) =
+                        self.retry("find the newest release", move || releases.newest())
                     else {
                         return 0;
                     };
                     log!("no version recorded yet, so it starts with the newest, {newest}");
-                    let Some((st, _)) = self.retry("record the version", |_| {
-                        store::update(&*state, |s| s.start_with(&newest))
+                    let s = state.clone();
+                    let Some((st, _)) = self.retry("record the version", move || {
+                        store::update(&*s, |st| st.start_with(&newest))
                     }) else {
                         return 0;
                     };
@@ -636,12 +754,17 @@ impl Launcher {
                 }
             };
             let trial = self.st.trial;
-            let got = fetch::ensure(
-                &version,
-                &self.cfg.local,
-                self.bucket.as_deref(),
-                &*self.releases,
+            let (v, local, bucket, releases) = (
+                version.clone(),
+                self.cfg.local.clone(),
+                self.bucket.clone(),
+                self.releases.clone(),
             );
+            let Some(got) =
+                self.wait_for(move || fetch::ensure(&v, &local, bucket.as_deref(), &*releases))
+            else {
+                return 0;
+            };
             let outcome = match got {
                 Ok((dir, from)) => {
                     log!(
@@ -659,12 +782,32 @@ impl Launcher {
             match outcome {
                 Outcome::Stopped => return 0,
                 Outcome::Switched => quick = 0,
+                Outcome::Refused(lines) => {
+                    log!("hub {version} won't open the database: {TOO_OLD}");
+                    let (s, v) = (state.clone(), version.clone());
+                    let r = self.retry("record that it was refused", move || {
+                        store::update(&*s, |st| {
+                            st.refused(&v, TOO_OLD.into(), lines.clone(), now_ms())
+                        })
+                    });
+                    match r {
+                        None => return 0,
+                        Some((st, true)) => {
+                            log!("going back to {}", st.current.as_deref().unwrap_or("?"));
+                        }
+                        Some(_) => {
+                            if !self.pause(backoff(quick)) {
+                                return 0;
+                            }
+                            quick += 1;
+                        }
+                    }
+                }
                 Outcome::Failed(why, lines) if trial => {
                     log!("{version} failed its first start: {why}");
-                    let r = self.retry("record the failure", |_| {
-                        store::update(&*state, |s| {
-                            s.fail(&version, why.clone(), lines.clone(), now_ms())
-                        })
+                    let (s, v) = (state.clone(), version.clone());
+                    let r = self.retry("record the failure", move || {
+                        store::update(&*s, |st| st.fail(&v, why.clone(), lines.clone(), now_ms()))
                     });
                     match r {
                         None => return 0,
@@ -759,12 +902,21 @@ mod tests {
 
     #[test]
     fn health_answers_are_read_for_the_version() {
-        let ok = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nX-Corra-Version: 2026.11.26-1432-6793d3e\r\n\r\nok";
+        let ok = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nX-Corra-Version: 2026.11.26-1432-6793d3e\r\nx-corra-schema: 13\r\n\r\nok";
         assert_eq!(
             parse_health(ok),
-            Some(Some("2026.11.26-1432-6793d3e".into()))
+            Some(Health {
+                version: Some("2026.11.26-1432-6793d3e".into()),
+                schema: Some(13)
+            })
         );
-        assert_eq!(parse_health("HTTP/1.1 200 OK\r\n\r\nok"), Some(None));
+        assert_eq!(
+            parse_health("HTTP/1.1 200 OK\r\n\r\nok"),
+            Some(Health {
+                version: None,
+                schema: None
+            })
+        );
         assert_eq!(
             parse_health("HTTP/1.1 503 Service Unavailable\r\n\r\n"),
             None
@@ -793,6 +945,167 @@ mod tests {
             Some("0000000000000000"),
             "{line}"
         );
+    }
+
+    fn launcher(
+        dir: &Path,
+        bucket: Option<Arc<dyn Blobs>>,
+        releases: Arc<dyn Releases>,
+    ) -> Launcher {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let local = dir.join("data/launcher");
+        Launcher {
+            cfg: Config {
+                data: dir.join("data"),
+                local: local.clone(),
+                releases: String::new(),
+                bucket: None,
+                probe: "127.0.0.1:1".parse().unwrap(),
+                socket: dir.join("sock"),
+                litestream: None,
+            },
+            sigs: unsafe { std::mem::zeroed() },
+            rx,
+            tx,
+            releases,
+            bucket,
+            state: Arc::new(Disk::new(&local)),
+            st: State::default(),
+            term: false,
+            exits: VecDeque::new(),
+            fetching: None,
+        }
+    }
+
+    fn set(l: &mut Launcher, f: impl Fn(&mut State)) {
+        l.st = store::update(&*l.state, f).unwrap().0;
+    }
+
+    fn fetched(l: &mut Launcher) -> bool {
+        match l.rx.recv_timeout(Duration::from_secs(20)).unwrap() {
+            Event::Fetched(v, r) => l.fetched(v, r, true),
+            Event::Ask(..) => panic!("expected a fetch"),
+        }
+    }
+
+    #[test]
+    fn a_version_downloading_while_another_is_kept_survives_the_prune() {
+        let t = tempfile::tempdir().unwrap();
+        let releases = Arc::new(fetch::testing::Fake::new(&t.path().join("rel")));
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (open, open_rx) = std::sync::mpsc::channel();
+        let gate = fetch::testing::Gate {
+            inner: Disk::new(&t.path().join("bucket")),
+            at: "releases/c/corra-runner".into(),
+            reached: Mutex::new(Some(reached_tx)),
+            open: Mutex::new(Some(open_rx)),
+        };
+        let mut l = launcher(t.path(), Some(Arc::new(gate)), releases.clone());
+        for v in ["z", "a", "b", "c"] {
+            releases.publish(v, None);
+        }
+        for v in ["z", "a", "b"] {
+            fetch::ensure(v, &l.cfg.local, l.bucket.as_deref(), &*releases).unwrap();
+        }
+        set(&mut l, |s| {
+            s.start_with("a");
+            s.confirm("a");
+            s.switch("b");
+        });
+        let (reply, answer) = std::sync::mpsc::channel();
+        l.ask_switch("c".into(), "b", reply);
+        reached.recv_timeout(Duration::from_secs(20)).unwrap();
+        l.confirm("b").unwrap();
+        open.send(()).unwrap();
+        assert!(fetched(&mut l));
+        assert_eq!(
+            answer.recv_timeout(Duration::from_secs(5)).unwrap(),
+            json!({ "ok": true })
+        );
+        assert_eq!(l.st.current.as_deref(), Some("c"));
+        let bucket = Disk::new(&t.path().join("bucket"));
+        for name in fetch::FILES.iter().chain([fetch::SUMS].iter()) {
+            assert!(
+                bucket.get(&format!("releases/c/{name}")).unwrap().is_some(),
+                "{name}"
+            );
+        }
+        assert!(bucket.get("releases/z/corra-hub").unwrap().is_none());
+        assert!(bucket.get("releases/a/corra-hub").unwrap().is_some());
+        let (_, from) = fetch::ensure("c", &l.cfg.local, None, &*releases).unwrap();
+        assert_eq!(from, fetch::From::Disk);
+    }
+
+    #[test]
+    fn a_download_past_its_deadline_doesnt_switch() {
+        let t = tempfile::tempdir().unwrap();
+        let releases = Arc::new(fetch::testing::Fake::new(&t.path().join("rel")));
+        releases.publish("b", None);
+        let mut l = launcher(t.path(), None, releases);
+        set(&mut l, |s| {
+            s.start_with("a");
+            s.confirm("a");
+        });
+        let (reply, answer) = std::sync::mpsc::channel();
+        l.ask_switch("b".into(), "a", reply);
+        l.fetching
+            .as_mut()
+            .unwrap()
+            .overdue(Instant::now() + FETCH_WITHIN);
+        let told = answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            told["error"].as_str().unwrap().contains("didn't switch"),
+            "{told}"
+        );
+        assert!(!fetched(&mut l));
+        assert!(l.fetching.is_none());
+        assert_eq!(
+            store::load(&*l.state).unwrap().0.current.as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn a_rollback_across_a_schema_change_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let releases = Arc::new(fetch::testing::Fake::new(&t.path().join("rel")));
+        let mut l = launcher(t.path(), None, releases.clone());
+        set(&mut l, |s| {
+            s.start_with("a");
+            s.saw_schema("a", 13);
+            s.confirm("a");
+            s.switch("b");
+            s.saw_schema("b", 14);
+            s.confirm("b");
+        });
+        let (reply, answer) = std::sync::mpsc::channel();
+        l.ask_switch("a".into(), "b", reply);
+        let told = answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            told["error"]
+                .as_str()
+                .unwrap()
+                .contains("can't roll back to a"),
+            "{told}"
+        );
+        assert!(l.fetching.is_none());
+        assert!(releases.calls().is_empty());
+    }
+
+    #[test]
+    fn the_last_40_log_lines_are_kept() {
+        let tail: Tail = Arc::new(Mutex::new(VecDeque::new()));
+        let text: String = (0..50)
+            .map(|i| format!("\x1b[2mline {i}\x1b[0m\n"))
+            .collect();
+        tee(std::io::Cursor::new(text), std::io::sink(), tail.clone());
+        let until = Instant::now() + Duration::from_secs(10);
+        while lines(&tail).last().map(String::as_str) != Some("line 49") {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let got = lines(&tail);
+        assert_eq!((got.len(), got[0].as_str()), (TAIL, "line 10"));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,8 @@ pub struct State {
     pub trial: bool,
     #[serde(default)]
     pub failed: Option<Failure>,
+    #[serde(default)]
+    pub schemas: BTreeMap<String, i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,6 +27,8 @@ pub struct Failure {
     pub at: i64,
     #[serde(default)]
     pub log: Vec<String>,
+    #[serde(default)]
+    pub newer_database: bool,
 }
 
 pub fn valid_version(v: &str) -> bool {
@@ -44,8 +49,9 @@ impl State {
     }
 
     pub fn switch(&mut self, to: &str) {
-        if !self.trial {
-            self.previous = self.current.take();
+        let from = self.current.take();
+        if !self.trial || self.previous.is_none() {
+            self.previous = from;
         }
         self.current = Some(to.to_string());
         self.trial = true;
@@ -72,12 +78,58 @@ impl State {
             reason,
             at,
             log,
+            newer_database: false,
         });
         if let Some(p) = self.previous.take() {
             self.current = Some(p);
         }
         self.trial = false;
         true
+    }
+
+    pub fn refused(&mut self, version: &str, reason: String, log: Vec<String>, at: i64) -> bool {
+        if self.current.as_deref() != Some(version) {
+            return false;
+        }
+        let left = self
+            .failed
+            .as_ref()
+            .filter(|f| !f.newer_database)
+            .map(|f| f.version.clone());
+        let back = if self.trial {
+            self.previous.take()
+        } else {
+            left.or(self.previous.take())
+        };
+        self.failed = Some(Failure {
+            version: version.to_string(),
+            reason,
+            at,
+            log,
+            newer_database: true,
+        });
+        self.trial = false;
+        self.previous = None;
+        match back.filter(|b| b != version) {
+            Some(b) => {
+                self.current = Some(b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn saw_schema(&mut self, version: &str, schema: i64) {
+        self.schemas.insert(version.to_string(), schema);
+        let keep = self.keep();
+        self.schemas.retain(|v, _| keep.contains(v));
+    }
+
+    pub fn crosses_schema(&self, from: &str, to: &str) -> Option<(i64, i64)> {
+        match (self.schemas.get(to), self.schemas.get(from)) {
+            (Some(&a), Some(&b)) if a < b => Some((a, b)),
+            _ => None,
+        }
     }
 
     pub fn keep(&self) -> Vec<String> {
@@ -154,7 +206,7 @@ mod tests {
             current: Some(current.into()),
             previous: previous.map(Into::into),
             trial,
-            failed: None,
+            ..State::default()
         }
     }
 
@@ -228,11 +280,71 @@ mod tests {
             reason: "x".into(),
             at: 1,
             log: vec![],
+            newer_database: false,
         });
         s.switch("c");
         assert!(s.failed.is_some());
         s.confirm("c");
         assert_eq!(s.failed, None);
+    }
+
+    #[test]
+    fn an_update_during_the_first_trial_can_still_go_back() {
+        let mut s = State::default();
+        s.start_with("a");
+        s.switch("b");
+        assert_eq!(s, st("b", Some("a"), true));
+        assert!(s.fail("b", "it exited".into(), vec![], 1));
+        assert_eq!(s.current.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_rollback_the_database_refuses_returns_to_the_newer_version() {
+        let mut s = st("b", Some("a"), false);
+        s.switch("a");
+        assert_eq!(s, st("a", Some("b"), true));
+        assert!(s.refused("a", "newer database".into(), vec![], 1));
+        assert_eq!(
+            (s.current.as_deref(), s.previous.as_deref(), s.trial),
+            (Some("b"), None, false)
+        );
+        let f = s.failed.clone().unwrap();
+        assert!(f.newer_database && f.version == "a");
+    }
+
+    #[test]
+    fn an_old_version_left_after_a_failed_update_returns_to_the_update() {
+        let mut s = st("b", Some("a"), true);
+        assert!(s.fail(
+            "b",
+            "it exited 30 seconds after it started answering".into(),
+            vec![],
+            1
+        ));
+        assert_eq!(s.current.as_deref(), Some("a"));
+        assert!(s.refused("a", "newer database".into(), vec![], 2));
+        assert_eq!((s.current.as_deref(), s.trial), (Some("b"), false));
+        assert!(!s.refused("b", "newer database".into(), vec![], 3));
+        assert_eq!(s.current.as_deref(), Some("b"));
+        assert!(!s.refused("b", "newer database".into(), vec![], 4));
+        assert_eq!(s.current.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_rollback_across_a_schema_change_is_known_before_it_is_tried() {
+        let mut s = st("a", None, false);
+        s.saw_schema("a", 13);
+        s.switch("b");
+        s.saw_schema("b", 14);
+        s.confirm("b");
+        assert_eq!(s.crosses_schema("b", "a"), Some((13, 14)));
+        assert_eq!(s.crosses_schema("a", "b"), None);
+        assert_eq!(s.crosses_schema("b", "unknown"), None);
+        s.switch("c");
+        s.saw_schema("c", 14);
+        s.confirm("c");
+        assert_eq!(s.schemas.keys().collect::<Vec<_>>(), vec!["b", "c"]);
+        assert_eq!(s.crosses_schema("c", "b"), None);
     }
 
     #[test]

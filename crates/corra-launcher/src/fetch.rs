@@ -199,12 +199,17 @@ pub fn ensure(
 }
 
 pub fn prune(local: &Path, bucket: Option<&dyn Blobs>, keep: &[String]) {
-    let gone = |v: &String| !v.starts_with('.') && !keep.contains(v);
+    let gone = |v: &str| !keep.iter().any(|k| k == v);
     if let Ok(rd) = std::fs::read_dir(local.join("releases")) {
         for e in rd.flatten() {
-            if let Ok(name) = e.file_name().into_string()
-                && (gone(&name) || name.ends_with(".partial"))
-            {
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            let version = name
+                .strip_prefix('.')
+                .and_then(|n| n.strip_suffix(".partial"))
+                .unwrap_or(&name);
+            if gone(version) {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -226,25 +231,24 @@ pub fn prune(local: &Path, bucket: Option<&dyn Blobs>, keep: &[String]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod testing {
     use super::*;
-    use crate::store::Disk;
     use std::sync::Mutex;
 
-    struct Fake {
+    pub struct Fake {
         dir: PathBuf,
         calls: Mutex<Vec<String>>,
     }
 
     impl Fake {
-        fn new(dir: &Path) -> Fake {
+        pub fn new(dir: &Path) -> Fake {
             Fake {
                 dir: dir.to_path_buf(),
                 calls: Mutex::new(Vec::new()),
             }
         }
 
-        fn publish(&self, version: &str, tamper: Option<&str>) {
+        pub fn publish(&self, version: &str, tamper: Option<&str>) {
             let d = self.dir.join(version);
             std::fs::create_dir_all(&d).unwrap();
             let mut sums = String::new();
@@ -262,7 +266,7 @@ mod tests {
             std::fs::write(self.dir.join(VERSION_FILE), version).unwrap();
         }
 
-        fn calls(&self) -> Vec<String> {
+        pub fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
     }
@@ -278,6 +282,46 @@ mod tests {
             Ok(std::fs::read(self.dir.join(version).join(name))?)
         }
     }
+
+    pub struct Gate<B> {
+        pub inner: B,
+        pub at: String,
+        pub reached: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        pub open: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl<B: Blobs> Blobs for Gate<B> {
+        fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Option<String>)>> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &str, body: &[u8], cond: Cond) -> Result<crate::store::Put> {
+            if key == self.at {
+                if let Some(r) = self.reached.lock().unwrap().take() {
+                    let _ = r.send(());
+                }
+                if let Some(o) = self.open.lock().unwrap().take() {
+                    let _ = o.recv();
+                }
+            }
+            self.inner.put(key, body, cond)
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+
+        fn dirs(&self, prefix: &str) -> Result<Vec<String>> {
+            self.inner.dirs(prefix)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::Fake;
+    use super::*;
+    use crate::store::Disk;
 
     struct Dirs {
         _t: tempfile::TempDir,
@@ -411,6 +455,17 @@ mod tests {
         assert!(d.bucket.get("releases/v1/corra-hub").unwrap().is_none());
         assert!(d.bucket.get("releases/v3/corra-hub").unwrap().is_some());
         assert!(left.contains(&"v2".to_string()));
+    }
+
+    #[test]
+    fn prune_spares_the_download_of_a_version_it_keeps() {
+        let d = dirs();
+        let releases = d.local.join("releases");
+        std::fs::create_dir_all(releases.join(".v3.partial")).unwrap();
+        std::fs::create_dir_all(releases.join(".v0.partial")).unwrap();
+        prune(&d.local, None, &["v2".into(), "v3".into()]);
+        assert!(releases.join(".v3.partial").exists());
+        assert!(!releases.join(".v0.partial").exists());
     }
 
     #[test]
