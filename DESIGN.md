@@ -179,8 +179,11 @@ button by Send once the cache has expired, which runs `/compact` before the mess
 idle thread about ten minutes before its cache expires, falling back to the button when that's missed. A follower isn't
 told about a `/compact` the hub sent.
 
-A turn whose machine restarts, sleeps or is destroyed is closed as stopped, and its waiting requests are cancelled. Each
-message carries an id from the app, so one sent twice goes once.
+A turn whose machine restarts, sleeps or is destroyed is closed as stopped, and its waiting requests are cancelled. So
+is a turn that shows running for a minute with no session behind it, with a notice. The hub keeps each message it sends
+a machine until the runner says it took it, and sends it again when the runner reconnects or the hub restarts. Each
+message carries an id from the app, which the hub keeps for a day, so one sent twice goes once. The app sends a message
+again if its connection dropped before the hub replied.
 
 A thread can follow another: when the followed thread finishes a turn, stops with an error or waits on me, the hub
 sends a short message into the follower, which wakes it. A thread started with `threads.start` is followed by the
