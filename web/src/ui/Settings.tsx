@@ -1234,20 +1234,28 @@ function Backups() {
 
 const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/([^.])$/, '$1.')
 
-function VersionRow(props: { icon: JSX.Element; tone?: 'warn'; version: string; children: JSX.Element; action?: JSX.Element }) {
+function VersionRow(props: {
+  icon: JSX.Element
+  tone?: 'warn'
+  version: string
+  children: JSX.Element
+  details?: JSX.Element
+  action?: JSX.Element
+}) {
   return (
-    <div class="flex items-center gap-3 px-3.5 py-3">
+    <div class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 px-3.5 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
       <div
         class="flex size-9 shrink-0 items-center justify-center rounded-lg"
         classList={{ 'bg-ink/[0.05] text-mute': !props.tone, 'bg-warn/10 text-warn': props.tone === 'warn' }}
       >
         {props.icon}
       </div>
-      <div class="min-w-0 flex-1">
+      <div class="min-w-0">
         <div class="truncate font-mono text-[12px] font-medium sm:text-[12.5px]">{props.version}</div>
         <div class="text-[12.5px] text-mute">{props.children}</div>
       </div>
-      {props.action}
+      <div class="col-start-2 mt-1 text-[12.5px] text-mute empty:hidden sm:col-end-4">{props.details}</div>
+      <div class="col-start-2 mt-2 empty:hidden sm:col-start-3 sm:row-start-1 sm:mt-0">{props.action}</div>
     </div>
   )
 }
@@ -1310,7 +1318,7 @@ function Version() {
           version={info()?.version ?? '…'}
           action={
             <Show when={managed() && !info()?.update && !info()?.trial && !going()}>
-              <Btn small kind="ghost" disabled={checking()} onClick={() => void checkNow()}>
+              <Btn small kind="ghost" class="max-sm:-ml-2.5" disabled={checking()} onClick={() => void checkNow()}>
                 {checking() ? 'Checking' : 'Check now'}
               </Btn>
             </Show>
@@ -1382,39 +1390,39 @@ function Version() {
         </Show>
         <Show when={info()?.failed}>
           {(f) => (
-            <div>
-              <VersionRow
-                icon={<TriangleAlert size={16} />}
-                tone="warn"
-                version={f().version}
-                action={
-                  <Show when={retry() && !going()}>
-                    <Btn small onClick={() => void switchTo(f().version, false)}>
-                      Try again
-                    </Btn>
-                  </Show>
-                }
-              >
-                <span class="text-ink">
-                  {f().version === info()?.version ? 'Failed its first start, then started again' : 'Didn’t start, so the hub went back'}
-                </span>{' '}
-                · {when(f().at)}
-              </VersionRow>
-              <div class="-mt-1 pr-3.5 pb-3 pl-[62px] text-[12.5px] text-mute">
-                {sentence(f().reason)}
-                <Show when={f().log.length}>
-                  <button class="mt-1.5 flex items-center gap-1 hover:text-ink" onClick={() => setLog(!log())}>
-                    <ChevronDown size={14} class={log() ? 'rotate-180' : ''} />
-                    {log() ? 'Hide its last log lines' : 'Show its last log lines'}
-                  </button>
-                  <Show when={log()}>
-                    <pre class="mt-2 max-h-64 overflow-auto rounded-lg bg-ink/[0.04] p-2.5 font-mono text-[11.5px] leading-[1.5] break-words whitespace-pre-wrap">
-                      {f().log.join('\n')}
-                    </pre>
-                  </Show>
+            <VersionRow
+              icon={<TriangleAlert size={16} />}
+              tone="warn"
+              version={f().version}
+              action={
+                <Show when={retry() && !going()}>
+                  <Btn small onClick={() => void switchTo(f().version, false)}>
+                    Try again
+                  </Btn>
                 </Show>
-              </div>
-            </div>
+              }
+              details={
+                <>
+                  {sentence(f().reason)}
+                  <Show when={f().log.length}>
+                    <button class="mt-1.5 flex items-center gap-1 hover:text-ink" onClick={() => setLog(!log())}>
+                      <ChevronDown size={14} class={log() ? 'rotate-180' : ''} />
+                      {log() ? 'Hide its last log lines' : 'Show its last log lines'}
+                    </button>
+                    <Show when={log()}>
+                      <pre class="mt-2 max-h-64 overflow-auto rounded-lg bg-ink/[0.04] p-2.5 font-mono text-[11.5px] leading-[1.5] break-words whitespace-pre-wrap">
+                        {f().log.join('\n')}
+                      </pre>
+                    </Show>
+                  </Show>
+                </>
+              }
+            >
+              <span class="text-ink">
+                {f().version === info()?.version ? 'Failed its first start, then started again' : 'Didn’t start, so the hub went back'}
+              </span>{' '}
+              · {when(f().at)}
+            </VersionRow>
           )}
         </Show>
       </Card>
