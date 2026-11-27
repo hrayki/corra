@@ -362,6 +362,7 @@ impl Hub {
             self.touch_machine(m);
         }
         let mut changed = false;
+        let mut drain = false;
         if let Some(mut t) = self.db.thread(thread)? {
             match &event {
                 Event::Session {
@@ -387,7 +388,15 @@ impl Hub {
                     changed = true;
                 }
                 Event::RequestResolved { .. } => {
-                    t.status = ThreadStatus::Running;
+                    let (settled, outcome) = self.settled_status(thread)?;
+                    drain = settled == ThreadStatus::Idle
+                        && matches!(t.status, ThreadStatus::Running | ThreadStatus::Waiting)
+                        && matches!(outcome, None | Some(TurnOutcome::Completed));
+                    if t.status != ThreadStatus::Starting
+                        || !matches!(settled, ThreadStatus::Idle | ThreadStatus::Error)
+                    {
+                        t.status = settled;
+                    }
                     changed = true;
                 }
                 Event::TurnCompleted { outcome, .. } => {
@@ -416,6 +425,12 @@ impl Hub {
         ));
         crate::notify::on_event(self, thread, &event);
         self.tell_follower(thread, &event);
+        if let Event::TurnCompleted { turn, .. } = &event {
+            self.cancel_cards_of(thread, turn)?;
+        }
+        if drain {
+            self.send_next_queued(thread);
+        }
         match &event {
             Event::TurnStarted { input, .. } => {
                 crate::schedule::cancel_continue(self, thread);
@@ -442,6 +457,57 @@ impl Hub {
             }
             Event::TurnCompleted { .. } => self.note_context(thread),
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn settled_status(&self, thread: ThreadId) -> Result<(ThreadStatus, Option<TurnOutcome>)> {
+        let outcome = self.db.last_outcome(thread)?;
+        let status = if !self.db.open_requests(thread)?.is_empty() {
+            ThreadStatus::Waiting
+        } else if self.db.open_turn(thread)?.is_some() {
+            ThreadStatus::Running
+        } else if outcome == Some(TurnOutcome::Failed) {
+            ThreadStatus::Error
+        } else {
+            ThreadStatus::Idle
+        };
+        Ok((status, outcome))
+    }
+
+    fn cancel_cards_of(&self, thread: ThreadId, turn: &str) -> Result<()> {
+        for e in self.db.open_requests(thread)? {
+            let Event::Request {
+                id,
+                turn: of,
+                request: AgentRequest::HubAction { action, .. },
+            } = e.event
+            else {
+                continue;
+            };
+            if of != turn || action == "git.push" {
+                continue;
+            }
+            let secret = self.secret_requests.lock().unwrap().remove(&id);
+            let ask = self.hub_requests.lock().unwrap().remove(&id);
+            if secret.is_none() && ask.is_none() {
+                continue;
+            }
+            self.append(
+                thread,
+                None,
+                now_ms(),
+                Event::RequestResolved {
+                    id,
+                    response: RequestResponse::Cancelled,
+                },
+            )?;
+            if let Some(tx) = secret {
+                let _ = tx.send(None);
+            }
+            if let Some(tx) = ask {
+                let _ = tx.send(RequestResponse::Cancelled);
+            }
         }
         Ok(())
     }
