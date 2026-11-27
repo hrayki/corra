@@ -395,6 +395,11 @@ async fn run_connection(
                     .map(|(id, _)| *id)
                     .collect();
                 for t in busy { runner.sync_thread(t); }
+                if welcomed {
+                    for (id, s) in &runner.sessions {
+                        let _ = out_tx.send(RunnerMsg::ThreadStatus { thread: *id, status: s.status });
+                    }
+                }
                 runner.park_idle();
                 if runner.ready_to_update() {
                     runner.update().await;

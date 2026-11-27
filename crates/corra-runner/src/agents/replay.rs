@@ -82,17 +82,23 @@ impl Ids {
 }
 
 pub async fn replay(name: &str) -> Vec<AgentOut> {
-    replay_entries(name, load(name)).await
+    replay_entries(name, load(name), Duration::ZERO).await
+}
+
+async fn replay_without(name: &str, line: usize, linger: Duration) -> Vec<AgentOut> {
+    let mut entries = load(name);
+    entries.remove(line);
+    replay_entries(name, entries, linger).await
 }
 
 async fn replay_until_exit(name: &str, lines: usize) -> Vec<AgentOut> {
     let mut entries = load(name);
     entries.truncate(lines);
     entries.push(json!({ "from": "exit" }));
-    replay_entries(name, entries).await
+    replay_entries(name, entries, Duration::ZERO).await
 }
 
-async fn replay_entries(name: &str, entries: Vec<Value>) -> Vec<AgentOut> {
+async fn replay_entries(name: &str, entries: Vec<Value>, linger: Duration) -> Vec<AgentOut> {
     let start = entries
         .iter()
         .find(|e| e["from"] == "start")
@@ -202,6 +208,7 @@ async fn replay_entries(name: &str, entries: Vec<Value>) -> Vec<AgentOut> {
         }
     }
     if !exited {
+        tokio::time::sleep(linger).await;
         drop(cmd_tx);
     }
     tokio::time::timeout(WAIT, session)
@@ -572,6 +579,16 @@ async fn an_exit_marks_a_message_claude_code_never_took_and_shows_it_once() {
     assert_eq!(turns.len(), 1, "{turns:#?}");
     assert_eq!(turns[0].outcome, Some(TurnOutcome::Failed));
     assert_eq!(unread(&out), [message_id(&turns[0], "SECOND_DONE")]);
+    assert_eq!(shown(&out, "SECOND_DONE"), 1);
+}
+
+#[tokio::test]
+async fn a_turn_whose_result_never_comes_ends_when_claude_code_says_its_command_finished() {
+    let out = replay_without("mid_turn_message", 69, Duration::from_secs(5)).await;
+    let turns = turns(&out);
+    assert_eq!(turns.len(), 1, "{turns:#?}");
+    assert_eq!(turns[0].outcome, Some(TurnOutcome::Completed));
+    assert!(unread(&out).is_empty(), "{:?}", unread(&out));
     assert_eq!(shown(&out, "SECOND_DONE"), 1);
 }
 

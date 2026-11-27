@@ -34,6 +34,9 @@ pub fn spawn(hub: Arc<Hub>) {
             if let Err(e) = sweep(&hub).await {
                 tracing::warn!("machine sweep failed: {e:#}");
             }
+            if let Err(e) = hub.settle_strays(now_ms()) {
+                tracing::warn!("settling stray threads failed: {e:#}");
+            }
             if let Err(e) = crate::schedule::continue_limited(&hub, now_ms()).await {
                 tracing::warn!("continuing limited threads failed: {e:#}");
             }

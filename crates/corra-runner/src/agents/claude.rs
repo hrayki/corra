@@ -327,6 +327,7 @@ struct BackgroundTask {
 
 struct State {
     turn: Option<String>,
+    ended: Option<(String, TurnOutcome, tokio::time::Instant)>,
     last_turn: Option<String>,
     user_turn: bool,
     turn_began: bool,
@@ -371,6 +372,7 @@ impl State {
 fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
     let mut st = State {
         turn: None,
+        ended: None,
         last_turn: None,
         user_turn: false,
         turn_began: false,
@@ -502,6 +504,26 @@ async fn converse(ctx: &mut SessionCtx, st: &mut State, proc: &mut Proc) -> Resu
                     Err(_) => { tracing::debug!("non-json from claude: {line}"); continue; }
                 };
                 on_message(ctx, st, proc, msg).await?;
+            }
+            _ = async { tokio::time::sleep_until(st.ended.as_ref().map(|e| e.2).unwrap()).await }, if st.ended.is_some() => {
+                let (turn, outcome, _) = st.ended.take().unwrap();
+                if st.turn.as_deref() == Some(turn.as_str()) {
+                    st.turn = None;
+                    close_running_tools(ctx, st, &turn);
+                    emit(
+                        ctx,
+                        Event::TurnCompleted {
+                            turn,
+                            outcome,
+                            usage: None,
+                            error: None,
+                            anchor: st.anchor.clone(),
+                            resets_at: None,
+                        },
+                    );
+                    st.interrupting = false;
+                    next_or_idle(ctx, st, outcome);
+                }
             }
             Some(v) = deferred_rx.recv() => {
                 proc.write(&v).await?;
@@ -1132,6 +1154,9 @@ fn on_lifecycle(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             "started" => {
                 st.taken.insert(id.to_string());
             }
+            "completed" => {
+                st.ran.insert(id.to_string());
+            }
             _ => {}
         }
         return;
@@ -1142,9 +1167,23 @@ fn on_lifecycle(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             finish_open_turn(ctx, st, TurnOutcome::Interrupted, None);
             let _ = ctx.out.send(AgentOut::Status(ThreadStatus::Idle));
         }
+        state @ ("completed" | "cancelled") => {
+            let outcome = if state == "completed" {
+                TurnOutcome::Completed
+            } else {
+                TurnOutcome::Interrupted
+            };
+            st.ended = Some((
+                st.turn.clone().unwrap_or_default(),
+                outcome,
+                tokio::time::Instant::now() + UNENDED_TURN,
+            ));
+        }
         _ => {}
     }
 }
+
+const UNENDED_TURN: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn parent_of(msg: &Value) -> Option<String> {
     msg["parent_tool_use_id"].as_str().map(String::from)
@@ -1636,6 +1675,10 @@ fn on_result(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             resets_at,
         },
     );
+    next_or_idle(ctx, st, outcome);
+}
+
+fn next_or_idle(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome) {
     while st
         .queued_turns
         .front()
