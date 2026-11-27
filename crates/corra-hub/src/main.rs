@@ -11,7 +11,7 @@ use corra_proto::MachineStatus;
 #[derive(Parser)]
 #[command(
     name = "corra-hub",
-    version,
+    version = corra_hub::update::VERSION,
     about = "Corra's hub: machines, threads, credentials and tools"
 )]
 struct Cli {

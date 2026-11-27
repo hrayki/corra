@@ -111,6 +111,13 @@ pub enum AppCall {
     },
     BackupNow,
     BackupStatus,
+    HubVersion {
+        #[serde(default)]
+        check: bool,
+    },
+    SwitchHub {
+        version: String,
+    },
     Sessions,
     RevokeSession {
         session: String,
