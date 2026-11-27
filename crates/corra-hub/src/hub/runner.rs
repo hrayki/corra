@@ -175,6 +175,9 @@ impl Hub {
                 ..
             } => {
                 self.take_thread_kv(thread, "continues");
+                if let Ok(Some(t)) = self.db.thread(thread) {
+                    crate::usage::note_turn_completed(self, t.agent);
+                }
                 self.note_context(thread);
                 self.send_next_queued(thread);
             }
@@ -188,12 +191,28 @@ impl Hub {
             Event::TurnCompleted {
                 outcome: TurnOutcome::Failed,
                 resets_at: Some(at),
+                error,
                 ..
             } => {
+                if let Ok(Some(t)) = self.db.thread(thread) {
+                    crate::usage::record_limit_hit(self, t.agent, Some(*at), error.as_deref());
+                }
                 self.note_context(thread);
                 crate::schedule::plan_continue(self, thread, *at)
             }
-            Event::TurnCompleted { .. } => self.note_context(thread),
+            Event::TurnCompleted {
+                outcome: TurnOutcome::Failed,
+                resets_at: None,
+                error,
+                ..
+            } => {
+                if crate::usage::is_quota_error(error.as_deref())
+                    && let Ok(Some(t)) = self.db.thread(thread)
+                {
+                    crate::usage::record_limit_hit(self, t.agent, None, error.as_deref());
+                }
+                self.note_context(thread);
+            }
             _ => {}
         }
         Ok(())

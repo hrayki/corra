@@ -10,7 +10,8 @@ import Search from 'lucide-solid/icons/search'
 import { call, closeThread, loadEarlier, openThread, state } from '../lib/store'
 import { panel, setPanel } from '../lib/panel'
 import { tokens } from '../lib/format'
-import { Composer, UsageRing } from './Composer'
+import { Composer } from './Composer'
+import { UsageMeter } from './UsagePopover'
 import ArrowDown from 'lucide-solid/icons/arrow-down'
 import { EntryView, TurnBlock, setDraftFor } from './Timeline'
 import type { Queued } from '../proto/Queued'
@@ -21,7 +22,7 @@ import { SidePanel } from './Panel'
 import { RunningTasks } from './Agents'
 import { threadActions } from './actions'
 import { refreshChanges, totals as changeTotals } from '../lib/changes'
-import { limitedNow } from '../lib/seen'
+import { limitedNow } from '../lib/usage'
 import { paired } from '../lib/catalog'
 import { FindBar, createFind } from './Find'
 
@@ -224,7 +225,7 @@ export function ThreadPane(props: { id: string }) {
                 <Show when={statusWord[thread()!.status]}>
                   <span class="text-faint">·</span>
                   <span classList={{ 'text-warn': thread()!.status === 'waiting', 'text-bad': thread()!.status === 'error' }}>
-                    {thread()!.status === 'error' && limitedNow(state.usage) ? 'Limited' : statusWord[thread()!.status]}
+                    {thread()!.status === 'error' && limitedNow(state.usage[thread()!.agent]) ? 'Limited' : statusWord[thread()!.status]}
                   </span>
                 </Show>
                 <Show when={context()}>
@@ -235,7 +236,7 @@ export function ThreadPane(props: { id: string }) {
                 </Show>
               </div>
             </div>
-            <UsageRing />
+            <UsageMeter agent={thread()!.agent} />
             <IconBtn label="Find in thread (Ctrl+F)" class="max-md:hidden" active={find.open()} onClick={find.toggle}>
               <Search size={16} />
             </IconBtn>

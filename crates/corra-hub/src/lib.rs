@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod storage;
 pub mod tools;
 pub mod update;
+pub mod usage;
 pub mod web;
 pub mod webpush;
 pub mod ws;

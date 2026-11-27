@@ -448,9 +448,10 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
         for status in hub.project_status_messages() {
             send_json(&tx, &status);
         }
-        if let Some(usage) = hub.usage() {
+        for usage in hub.usage_messages() {
             send_json(&tx, &usage);
         }
+        crate::usage::maybe_refresh_background(hub.clone());
 
         loop {
             if *shutdown.borrow() {
@@ -904,6 +905,7 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.db.kv_set("settings", &cur.to_string())?;
             cur
         }
+        AppCall::RefreshUsage { agent } => crate::usage::refresh_for(hub, agent).await?,
         AppCall::SetSecret { name, value } => {
             let name = name.trim();
             if name.is_empty()
@@ -915,6 +917,11 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
                 anyhow::bail!("a credential name may use letters, digits, '.', '_' and '-'");
             }
             hub.secrets.set(name, value.trim())?;
+            if name == "claude.token" {
+                hub.usage.reset(AgentKind::Claude);
+                crate::usage::publish_current(hub, AgentKind::Claude);
+                crate::usage::maybe_refresh_background(hub.clone());
+            }
             Value::Null
         }
         AppCall::DeleteSecret { name } => {
@@ -922,6 +929,10 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
                 anyhow::bail!("there's no credential called {name}");
             }
             hub.secrets.delete(&name)?;
+            if name == "claude.token" {
+                hub.usage.reset(AgentKind::Claude);
+                crate::usage::publish_current(hub, AgentKind::Claude);
+            }
             Value::Null
         }
         AppCall::ListProviders => serde_json::to_value(hub.providers.info(hub))?,

@@ -173,8 +173,9 @@ thread, with Send again.
 A background agent that keeps working after a turn ends doesn't open a new turn: its steps join the turn that started it
 and the thread stays idle. Each subagent shows as a row that opens what it was asked, its steps and its result.
 Background agents and commands still running are listed at the end of the thread, each with a Stop. A message sent
-mid-turn is placed in the thread where it was sent. The hub remembers Claude Code's latest usage report and sends it to
-every app. Drafts and read marks are kept per device, in the browser. A thread opens on its last four turns; earlier
+mid-turn is placed in the thread where it was sent. The hub tracks usage limits per agent, merging passive reports with
+cached Claude OAuth usage fetches (backing off on rate limits) and expiring windows past their reset time. Drafts and
+read marks are kept per device, in the browser. A thread opens on its last four turns; earlier
 ones load as you scroll up. Find (Ctrl+F) searches every message in the thread, mine and the agent's, including those
 folded into its work, but not tool calls, their output or thoughts. The hub reads the whole log for it, a chunk at a
 time and with no index, and returns the newest thousand matches. Going to a match loads the earlier turns down to it and

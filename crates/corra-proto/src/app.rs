@@ -3,8 +3,8 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::{
-    AgentKind, AgentSettings, InputPart, LiveDelta, Machine, MachineId, Project, ProjectId,
-    RequestResponse, SetupLog, StoredEvent, Thread, ThreadId,
+    AgentKind, AgentSettings, AgentUsage, InputPart, LiveDelta, Machine, MachineId, Project,
+    ProjectId, RequestResponse, SetupLog, StoredEvent, Thread, ThreadId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -151,6 +151,11 @@ pub enum AppCall {
     SetSettings {
         #[ts(type = "Record<string, unknown>")]
         settings: Value,
+    },
+    RefreshUsage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        agent: Option<AgentKind>,
     },
     CreateThread {
         project: ProjectId,
@@ -424,8 +429,7 @@ pub enum HubToApp {
         client_id: String,
     },
     Usage {
-        at: i64,
-        limits: Value,
+        usage: AgentUsage,
     },
     Notify {
         notice: Value,

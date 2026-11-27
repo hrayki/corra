@@ -15,7 +15,8 @@ import { StatusMark, openContextMenu, statusWord } from './bits'
 import { threadActions } from './actions'
 import { ago } from '../lib/format'
 import { route } from '../lib/route'
-import { knowThreads, limitedNow, markSeen, unread } from '../lib/seen'
+import { knowThreads, markSeen, unread } from '../lib/seen'
+import { limitedNow } from '../lib/usage'
 import { toggleSidebar } from '../lib/layout'
 import { AGENT_NAMES } from '../lib/choices'
 import { mostUrgent, needsYou, shownStatus, type Shown } from '../lib/status'
@@ -321,7 +322,7 @@ function Tree(props: { t: Thread; kids: Map<string, Thread[]>; current?: string;
 
 function Card(props: { t: Thread; active: boolean; project?: string; depth?: number }) {
   const shown = () => shownStatus(props.t.status, unread(props.t), props.active)
-  const word = () => (shown() === 'error' && limitedNow(state.usage) ? 'Limited' : statusWord[shown()])
+  const word = () => (shown() === 'error' && limitedNow(state.usage[props.t.agent]) ? 'Limited' : statusWord[shown()])
   const strong = () => shown() === 'waiting' || shown() === 'done'
   return (
     <a
