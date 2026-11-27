@@ -769,7 +769,7 @@ impl Hub {
             bail!("the secret is empty");
         }
         if request.starts_with("signin-") {
-            if !open_requests(&self.db.events_tail(thread, 2000)?).contains(&request) {
+            if !self.request_open(thread, &request)? {
                 bail!("that sign-in is no longer waiting");
             }
             let t = self
@@ -812,22 +812,29 @@ impl Hub {
         Ok(())
     }
 
+    fn request_open(&self, thread: ThreadId, request: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .open_requests(thread)?
+            .iter()
+            .any(|e| matches!(&e.event, Event::Request { id, .. } if id == request)))
+    }
+
+    fn open_request_ids(&self, thread: ThreadId) -> Result<Vec<String>> {
+        Ok(self
+            .db
+            .open_requests(thread)?
+            .into_iter()
+            .filter_map(|e| match e.event {
+                Event::Request { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect())
+    }
+
     pub fn close_open_turn(&self, thread: ThreadId) -> Result<bool> {
-        let tail = self.db.events_tail(thread, 2000)?;
-        let mut open: Option<String> = None;
-        let mut requests: Vec<String> = vec![];
-        for e in &tail {
-            match &e.event {
-                Event::TurnStarted { turn, .. } => open = Some(turn.clone()),
-                Event::TurnCompleted { turn, .. } if open.as_deref() == Some(turn.as_str()) => {
-                    open = None
-                }
-                Event::Request { id, .. } => requests.push(id.clone()),
-                Event::RequestResolved { id, .. } => requests.retain(|x| x != id),
-                _ => {}
-            }
-        }
-        for id in requests {
+        let open = self.db.open_turn(thread)?;
+        for id in self.open_request_ids(thread)? {
             if let Some(tx) = self.secret_requests.lock().unwrap().remove(&id) {
                 let _ = tx.send(None);
             }
@@ -868,8 +875,8 @@ impl Hub {
             if t.status != ThreadStatus::Waiting {
                 continue;
             }
-            let tail = self.db.events_tail(t.id, 500)?;
-            for id in unanswered_hub_requests(&tail) {
+            let ids = self.open_request_ids(t.id)?;
+            for id in ids.into_iter().filter(|id| id.starts_with("hub-")) {
                 self.append(
                     t.id,
                     None,
@@ -1746,7 +1753,7 @@ impl Hub {
             .thread(thread)?
             .ok_or_else(|| anyhow!("no such thread"))?;
         let m = t.machine.ok_or_else(|| anyhow!("thread has no machine"))?;
-        let waiting = open_requests(&self.db.events_tail(thread, 2000)?).contains(&request);
+        let waiting = self.request_open(thread, &request)?;
         {
             let mut answered = self.answered.lock().unwrap();
             answered.retain(|_, at| at.elapsed() < Duration::from_secs(60));
@@ -2159,24 +2166,6 @@ impl Hub {
         self.publish(Outbound::All(HubToApp::Reset { thread }));
         Ok(())
     }
-}
-
-pub fn unanswered_hub_requests(events: &[StoredEvent]) -> Vec<String> {
-    let mut open = open_requests(events);
-    open.retain(|id| id.starts_with("hub-"));
-    open
-}
-
-pub fn open_requests(events: &[StoredEvent]) -> Vec<String> {
-    let mut open: Vec<String> = vec![];
-    for e in events {
-        match &e.event {
-            Event::Request { id, .. } => open.push(id.clone()),
-            Event::RequestResolved { id, .. } => open.retain(|x| x != id),
-            _ => {}
-        }
-    }
-    open
 }
 
 const STRAY_AFTER_MS: i64 = 60_000;
