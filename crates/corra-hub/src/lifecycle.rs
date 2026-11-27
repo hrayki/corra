@@ -43,9 +43,13 @@ pub fn spawn(hub: Arc<Hub>) {
             if let Err(e) = crate::schedule::compact_idle(&hub, now_ms()).await {
                 tracing::warn!("compacting idle threads failed: {e:#}");
             }
+            if rounds == 1 {
+                hub.redeliver_unconnected();
+            }
             if rounds % 20 == 1 {
                 orphans(&hub).await;
                 let _ = hub.db.forget_sends_before(now_ms() - 24 * 3600 * 1000);
+                hub.forget_deliveries_before(now_ms() - 24 * 3600 * 1000);
             }
             rounds += 1;
         }

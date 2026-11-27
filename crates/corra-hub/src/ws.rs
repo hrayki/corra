@@ -80,6 +80,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         protocol,
         info,
         threads,
+        takes,
     } = serde_json::from_str(&text)?
     else {
         return Err(anyhow!("expected hello"));
@@ -130,6 +131,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
             live,
             prepared: HashSet::new(),
             conn_id,
+            takes,
         },
     );
     drop(old);
@@ -138,6 +140,9 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
         acks,
         runner: crate::files::runner_build(),
     });
+    if takes {
+        hub.redeliver_to(machine);
+    }
     hub.touch_machine(machine);
     hub.publish_machine(machine);
     tracing::info!(%machine, host = %info.hostname, "runner connected");
@@ -360,6 +365,7 @@ async fn handle_runner_msg(
                 },
             ));
         }
+        RunnerMsg::Took { delivery, taken } => hub.took(machine, delivery, taken),
         RunnerMsg::ThreadEnded { thread, error } => {
             if let Some(c) = hub.runners.lock().unwrap().get_mut(&machine) {
                 c.live.remove(&thread);

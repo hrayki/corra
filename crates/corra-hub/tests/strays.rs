@@ -59,6 +59,7 @@ fn connect(
             live: live.iter().copied().collect(),
             prepared: Default::default(),
             conn_id: 1,
+            takes: false,
         },
     );
     rx

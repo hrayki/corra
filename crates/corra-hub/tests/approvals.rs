@@ -51,6 +51,7 @@ fn connect(hub: &HubRef, machine: MachineId) -> mpsc::UnboundedReceiver<HubMsg> 
             live: Default::default(),
             prepared: Default::default(),
             conn_id: 1,
+            takes: false,
         },
     );
     rx

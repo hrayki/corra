@@ -155,6 +155,7 @@ async fn a_stop_hands_the_queue_back_and_nothing_is_sent_after_it() {
             live: Default::default(),
             prepared: Default::default(),
             conn_id: 1,
+            takes: false,
         },
     );
 
