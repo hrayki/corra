@@ -18,6 +18,7 @@ pub mod schedule;
 pub mod secrets;
 pub mod storage;
 pub mod tools;
+pub mod update;
 pub mod web;
 pub mod webpush;
 pub mod ws;
@@ -60,6 +61,7 @@ pub fn build(opts: Options) -> Result<Built> {
     }
     lifecycle::spawn(hub.clone());
     backup::spawn(hub.clone(), opts.data.clone());
+    update::spawn(hub.clone());
     let state = AppState {
         hub,
         auth,
@@ -75,7 +77,16 @@ pub fn build(opts: Options) -> Result<Built> {
         .route("/runner/import", post(files::import))
         .route(
             "/healthz",
-            get(|| async { ([("access-control-allow-origin", "*")], "ok") }),
+            get(|| async {
+                (
+                    [
+                        ("access-control-allow-origin", "*".to_string()),
+                        ("x-corra-version", update::VERSION.to_string()),
+                        ("x-corra-schema", db::SCHEMA_VERSION.to_string()),
+                    ],
+                    "ok",
+                )
+            }),
         )
         .route("/auth/key", post(auth::key_login))
         .route("/auth/pair/start", post(auth::pair_start))

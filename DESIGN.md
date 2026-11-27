@@ -10,7 +10,10 @@ The README says what corra is. This is how it fits together.
   code. With a storage bucket set, it runs under Litestream: an empty disk is restored from the bucket and every change
   streams back to it, so the hub needs no volume. A new hub waits until the running one has copied its last changes and
   handed over a lease in the bucket, so two never write at once. Session files live in the database too. Its schema is a
-  single base schema at version 12; a database older than that is refused rather than migrated.
+  single base schema at version 13; a database older than that is refused rather than migrated, and so is one a newer
+  hub has changed.
+- **Launcher** (`crates/corra-launcher`): the hub image's entry point. It runs the hub version it's been told to, from
+  corra's releases, and goes back to the version before when a new one doesn't come up.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
   through its stream-json interface, or Antigravity through `agy`'s Agent Client Protocol server, and serves the
   thread's panel: changes, files, terminal, browser, phone. When the hub serves a newer runner, a runner switches to it
@@ -135,6 +138,35 @@ The lease is `lease.json` in the bucket, and it's only ever written conditionall
 or 30 seconds old, takes it, and reads it back. The running hub renews it every 5 seconds, checking first that it still
 holds it. If another hub holds it, or it hasn't renewed for 15 seconds, it exits rather than keep writing. On SIGTERM
 it stops renewing, has Litestream copy its last changes, then marks the lease released.
+
+## Updating the hub
+
+Each push to main that passes CI publishes a GitHub release named for its commit: the commit time in UTC, then the
+short hash, like `2026.11.26-143205-6793d3e`, so versions sort by time. It holds `corra-hub` with the app built in,
+`corra-runner`, `corra-modal`, `VERSION` and `SHA256SUMS`.
+
+The launcher keeps its state in `launcher/state.json` under the storage prefix, or in the data folder's `launcher/`
+without a bucket. The state holds the version to run, the one before it, whether the current one is on trial, the last
+failure, and the database schema each of those two versions runs with. With a bucket, the file is written conditionally,
+like the lease. Each version's files are kept in `launcher/releases/<version>/` beside it and checked against
+`SHA256SUMS` at every start, so only a version that has never run is fetched from GitHub. Once a new version is kept,
+every copy except it and the one before is deleted.
+
+The hub checks the newest release hourly and when Settings opens. Update asks the launcher to switch, over a Unix socket
+that only the launcher and the hub can open. The launcher fetches and checks the new version while the old hub runs, and
+records it as on trial. It then sends the old hub SIGTERM, so the old hub hands over the lease as on a deploy, and
+starts the new one. If the download takes more than 10 minutes, it doesn't switch. On trial, a version must answer
+`/healthz` with its own version in `x-corra-version` within 3 minutes, then stay up a minute. Otherwise the launcher
+records why, with the hub's last 40 log lines, and goes back to the version before. A hub won't open a database whose
+schema is newer than its own: it exits with status 65 before Litestream starts, and with a bucket it restores the
+database itself first so it can check. The launcher then goes back to the newer version it came from and records why.
+Each hub reports its schema in `x-corra-schema` beside its version, so the launcher refuses a rollback to a version with
+an older schema, and Settings doesn't offer one. Outside a trial, a hub that exits is started again after 2 seconds,
+doubling up to a minute, so a bad version never takes the container down with it. The launcher is the container's PID 1:
+it reaps orphaned processes, passes SIGTERM on once (Litestream gives up its last copy on a second one), and kills
+what's left of the hub's process group.
+
+The desktop app's built-in hub doesn't use the launcher; it updates with the app.
 
 ## Threads
 

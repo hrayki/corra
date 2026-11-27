@@ -1042,6 +1042,13 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
         }
         AppCall::BackupNow => bail_local(hub, crate::backup::run(hub, &hub.data).await)?,
         AppCall::BackupStatus => crate::backup::status(hub),
+        AppCall::HubVersion { check } => {
+            serde_json::to_value(crate::update::status(hub, check).await)?
+        }
+        AppCall::SwitchHub { version } => {
+            crate::update::switch(&version).await?;
+            Value::Null
+        }
         AppCall::Sessions => crate::auth::list_sessions(hub)?,
         AppCall::RevokeSession { session } => {
             crate::auth::revoke_session(hub, &session)?;

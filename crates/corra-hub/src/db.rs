@@ -85,11 +85,46 @@ CREATE TABLE IF NOT EXISTS thread_files (
 ) WITHOUT ROWID;
 "#;
 
-const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 13;
 const OLDEST_VERSION: i64 = 12;
+pub const NEWER_DATABASE: i32 = 65;
+
+#[derive(Debug)]
+pub struct NewerDatabase(pub i64);
+
+impl std::fmt::Display for NewerDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "the database is at schema version {}, which a newer hub made; this one knows up to {SCHEMA_VERSION}, so it won't open it",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NewerDatabase {}
+
+pub fn is_newer_database(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<NewerDatabase>())
+}
+
+pub fn schema_of(path: &Path) -> Result<Option<i64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+    Ok(Some(conn.pragma_query_value(
+        None,
+        "user_version",
+        |r| r.get(0),
+    )?))
+}
 
 fn migrate(conn: &Connection) -> Result<()> {
     let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if v > SCHEMA_VERSION {
+        return Err(NewerDatabase(v).into());
+    }
     let fresh: bool = conn.query_row(
         "SELECT NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects')",
         [],
@@ -995,4 +1030,25 @@ fn row_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         hidden_at: r.get(14)?,
         started_by: opt_uuid(r.get(15)?),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_a_newer_hub_changed_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corra.db");
+        assert_eq!(schema_of(&path).unwrap(), None);
+        drop(Db::open(&path).unwrap());
+        assert_eq!(schema_of(&path).unwrap(), Some(SCHEMA_VERSION));
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let err = Db::open(&path).err().unwrap();
+        assert!(is_newer_database(&err), "{err:#}");
+        assert_eq!(schema_of(&path).unwrap(), Some(SCHEMA_VERSION + 1));
+    }
 }

@@ -56,3 +56,48 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./...
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [rust, web, modal-helper]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        with:
+          version: latest
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: latest
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.17.1
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83
+        with:
+          tool: cargo-zigbuild
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        with:
+          go-version: stable
+          cache-dependency-path: helpers/modal/go.sum
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - run: scripts/release dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export LC_ALL=C
+          v=$(cat dist/VERSION)
+          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          newest=--latest
+          if [[ -n "$latest" && ! "$v" > "$latest" ]]; then newest=--latest=false; fi
+          gh release create "$v" dist/* --target "$GITHUB_SHA" --title "$v" --notes "$(git log -1 --format=%s)" "$newest"

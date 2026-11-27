@@ -327,21 +327,50 @@ pub async fn run_under_litestream(
     take(st.as_ref(), &holder, TIMING).await?;
     let _ = stop.send(());
     let _ = server.await;
+    let db = data.join("corra.db");
     let config = std::env::temp_dir().join("corra-litestream.yml");
-    std::fs::write(&config, st.litestream_config(&data.join("corra.db")))?;
+    std::fs::write(&config, st.litestream_config(&db))?;
+    if let Err(e) = restore(&config, &db).await {
+        let _ = release(st.as_ref(), &holder).await;
+        return Err(e);
+    }
     let exe = std::env::current_exe()?;
-    tracing::info!("restoring the hub's data if needed, then starting it under litestream");
+    tracing::info!("starting the hub under litestream");
     let err = std::process::Command::new(litestream_bin())
         .arg("replicate")
         .arg("-config")
         .arg(&config)
-        .arg("-restore-if-db-not-exists")
         .arg("-exec")
         .arg(format!("{} serve", exe.display()))
         .env(CHILD, "1")
         .env(HOLDER, &holder)
         .exec();
     Err(anyhow!("couldn't start litestream: {err}"))
+}
+
+async fn restore(config: &Path, db: &Path) -> Result<()> {
+    tracing::info!("restoring the hub's data if needed");
+    let out = tokio::process::Command::new(litestream_bin())
+        .arg("restore")
+        .arg("-config")
+        .arg(config)
+        .args(["-if-db-not-exists", "-if-replica-exists"])
+        .arg(db)
+        .output()
+        .await
+        .map_err(|e| anyhow!("couldn't start litestream: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "litestream couldn't restore the hub's data: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if let Some(v) = crate::db::schema_of(db)?
+        && v > crate::db::SCHEMA_VERSION
+    {
+        return Err(crate::db::NewerDatabase(v).into());
+    }
+    Ok(())
 }
 
 pub fn hold(st: Arc<Storage>) -> String {

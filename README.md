@@ -28,9 +28,11 @@ Corra was built by AI with close to no supervision, and so were most of these do
 
 ## Running the hub
 
-The hub is one container, built from the `Dockerfile`. Wherever it runs, it needs:
+The hub is one container, built from the `Dockerfile`. The image holds a small launcher and Litestream. The launcher
+fetches the hub, the runner and the Modal helper from corra's GitHub releases, so the hub updates itself from Settings.
+Wherever it runs, it needs:
 
-- a health check on `/healthz`;
+- a health check on `/healthz`, allowing about 5 minutes for a first start, which downloads the hub;
 - somewhere for its data: an S3-compatible bucket (below), or else a volume at `/data`;
 - for a deploy without downtime, the new container started and answering `/healthz` while the old one still runs, then
   SIGTERM to the old one with 30 seconds to finish. With a bucket, the new hub waits until the old one has copied its
@@ -54,6 +56,9 @@ And if you need them:
 - `CORRA_TRUST_IP_HEADER`: the header your host puts each visitor's address in, like `x-real-ip` on Railway. Wrong keys
   and pairing codes are limited to ten a minute per address; without this, the address is the connection's own, which
   behind a proxy is the proxy's.
+- `CORRA_RELEASES`: where the launcher and the hub look for releases. Default
+  `https://github.com/hrayki/corra/releases`. Anything that serves `latest/download/VERSION` and
+  `download/<version>/<file>` the same way will do, such as a folder made by `scripts/release`.
 - `CORRA_RUNNER_BIN`, `CORRA_MODAL_HELPER` and `CORRA_LITESTREAM`: the helper binaries, when they aren't beside the
   hub's.
 - `CORRA_DEV_NO_AUTH`: skips signing in. Only on a loopback address, for working on corra.
@@ -70,6 +75,12 @@ Open the address, sign in with the key, and in Settings add:
   projects get them.
 - Your setup repo, the env vars your projects need, a bucket for backups, and how long to keep hidden threads.
 - Notifications, in each browser that should get them.
+
+Settings › Version shows which version runs and, when there's a newer release, an Update button. The hub restarts into
+it within a few seconds. A version that doesn't answer `/healthz` within 3 minutes, or stops in its first minute, is
+rolled back automatically, and Settings says why. Roll back, there, returns to the version before, unless that version
+can't open the database the newer one changed. A change to the image itself, the launcher or Litestream, still needs a
+deploy.
 
 ## The apps
 
@@ -120,6 +131,7 @@ A setup runs on a project's first machine and again after it changes, so it has 
 ## Working on corra
 
     scripts/build                                       # everything, as static binaries
+    scripts/release DIR                                 # a release's files, as CI publishes them
     cargo run -p corra-hub -- serve                     # a hub on 127.0.0.1:7810
     cargo run -p corra-local                            # the desktop app's core, without its window
     cd web && pnpm dev                                  # the app on :7820, against the hub at CORRA_HUB

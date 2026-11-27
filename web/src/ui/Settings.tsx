@@ -1,14 +1,20 @@
-import { For, Show, createMemo, createResource, createRoot, createSignal, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createRoot, createSignal, on, onCleanup, type JSX } from 'solid-js'
 import ChevronDown from 'lucide-solid/icons/chevron-down'
 import ArrowLeft from 'lucide-solid/icons/arrow-left'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
 import Bell from 'lucide-solid/icons/bell'
+import Server from 'lucide-solid/icons/server'
+import History from 'lucide-solid/icons/rotate-ccw-clock'
+import TriangleAlert from 'lucide-solid/icons/triangle-exclamation-point'
+import ArrowUpRight from 'lucide-solid/icons/arrow-up-right'
+import CircleArrowUp from 'lucide-solid/icons/circle-arrow-up'
 import { callOn, state, type MachineX } from '../lib/store'
 import { newPairingCode, signOut } from '../lib/auth'
 import { renderSVG } from 'uqr'
 import { choice, omarchy, setChoice, type ThemeChoice } from '../lib/theme'
 import { ago } from '../lib/format'
+import { runningLine, when } from '../lib/hubversion'
 import { Btn, Menu, inputClass } from './bits'
 import { RepoPicker } from './RepoPicker'
 import { pushState, turnOff, turnOn, type PushState } from '../lib/notify'
@@ -17,6 +23,7 @@ import type { KindInfo } from '../proto/KindInfo'
 import type { ProviderInfo } from '../proto/ProviderInfo'
 import type { PhoneHost } from '../proto/PhoneHost'
 import type { Leftover } from '../proto/Leftover'
+import type { HubVersion } from '../proto/HubVersion'
 
 const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
@@ -89,6 +96,7 @@ export function Settings() {
               <Show when={hubUp()}>
                 <Notifications />
                 <Compaction />
+                <Version />
               </Show>
               <Show when={state.connectUrl}>
                 <HubLink />
@@ -1220,6 +1228,205 @@ function Backups() {
         </Show>
       </Card>
       <p class="mt-2 text-[12.5px] text-bad">{error()}</p>
+    </Section>
+  )
+}
+
+const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/([^.])$/, '$1.')
+
+function VersionRow(props: {
+  icon: JSX.Element
+  tone?: 'warn'
+  version: string
+  children: JSX.Element
+  details?: JSX.Element
+  action?: JSX.Element
+}) {
+  return (
+    <div class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 px-3.5 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+      <div
+        class="flex size-9 shrink-0 items-center justify-center rounded-lg"
+        classList={{ 'bg-ink/[0.05] text-mute': !props.tone, 'bg-warn/10 text-warn': props.tone === 'warn' }}
+      >
+        {props.icon}
+      </div>
+      <div class="min-w-0">
+        <div class="truncate font-mono text-[12px] font-medium sm:text-[12.5px]">{props.version}</div>
+        <div class="text-[12.5px] text-mute">{props.children}</div>
+      </div>
+      <div class="col-start-2 mt-1 text-[12.5px] text-mute empty:hidden sm:col-end-4">{props.details}</div>
+      <div class="col-start-2 mt-2 empty:hidden sm:col-start-3 sm:row-start-1 sm:mt-0">{props.action}</div>
+    </div>
+  )
+}
+
+function Version() {
+  const [info, { mutate, refetch }] = createResource(() => callOn<HubVersion>('hub', { op: 'hub_version', check: false }))
+  const [checking, setChecking] = createSignal(false)
+  const [going, setGoing] = createSignal<{ to: string; restarting: boolean } | null>(null)
+  createEffect(
+    on(
+      () => state.conn.hub,
+      (c) => {
+        if (c !== 'open') return
+        if (going()?.restarting) setGoing(null)
+        void refetch()
+      },
+      { defer: true },
+    ),
+  )
+  const every = setInterval(() => !going() && void refetch(), 30_000)
+  onCleanup(() => clearInterval(every))
+  const [error, setError] = createSignal('')
+  const [log, setLog] = createSignal(false)
+  const checkNow = async () => {
+    setChecking(true)
+    setError('')
+    try {
+      mutate(await callOn<HubVersion>('hub', { op: 'hub_version', check: true }))
+    } catch (e) {
+      setError((e as Error).message)
+    }
+    setChecking(false)
+  }
+  const switchTo = async (to: string, back: boolean) => {
+    const ask = `${back ? 'Roll the hub back' : 'Update the hub'} to ${to}? It restarts, so the app and machines reconnect after a few seconds, and requests waiting on you are cancelled.`
+    if (!confirm(ask)) return
+    setError('')
+    setGoing({ to, restarting: false })
+    try {
+      await callOn('hub', { op: 'switch_hub', version: to })
+      setGoing({ to, restarting: true })
+    } catch (e) {
+      setError((e as Error).message)
+      setGoing(null)
+    }
+  }
+  const managed = () => !!info()?.managed
+  const update = () => (managed() ? (info()?.update ?? null) : null)
+  const retry = () => !!update() && info()?.failed?.version === update()
+  const previous = () => {
+    const i = info()
+    if (!i?.managed || !i.previous || i.previous === i.update) return null
+    return { version: i.previous, older: i.previous < i.version, tooOld: i.previous_too_old }
+  }
+  return (
+    <Section title="Version" hint="Updates come from corra's releases on GitHub. A version that doesn't start is rolled back by itself.">
+      <Card>
+        <VersionRow
+          icon={<Server size={16} />}
+          version={info()?.version ?? '…'}
+          action={
+            <Show when={managed() && !info()?.update && !info()?.trial && !going()}>
+              <Btn small kind="ghost" class="max-sm:-ml-2.5" disabled={checking()} onClick={() => void checkNow()}>
+                {checking() ? 'Checking' : 'Check now'}
+              </Btn>
+            </Show>
+          }
+        >
+          <Show
+            when={going()}
+            fallback={
+              <Show when={info()} fallback="Checking…">
+                {(i) => <span classList={{ 'text-bad': !!runningLine(i()).bad }}>{runningLine(i()).text}</span>}
+              </Show>
+            }
+          >
+            {(g) => (
+              <span class="text-ink">
+                {g().restarting ? 'Restarting into ' : 'Getting '}
+                <span class="font-mono">{g().to}</span>…
+              </span>
+            )}
+          </Show>
+        </VersionRow>
+        <Show when={update() && !retry()}>
+          <VersionRow
+            icon={<CircleArrowUp size={16} />}
+            version={update()!}
+            action={
+              <Show when={!going()}>
+                <Btn small kind="primary" onClick={() => void switchTo(update()!, false)}>
+                  Update
+                </Btn>
+              </Show>
+            }
+          >
+            New version
+            <Show when={info()?.changes}>
+              {(c) => (
+                <>
+                  {' · '}
+                  <a
+                    class="inline-flex items-center gap-0.5 text-ink underline-offset-2 hover:underline"
+                    href={c()}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    What's new
+                    <ArrowUpRight size={12} />
+                  </a>
+                </>
+              )}
+            </Show>
+          </VersionRow>
+        </Show>
+        <Show when={previous()}>
+          {(p) => (
+            <VersionRow
+              icon={<History size={16} />}
+              version={p().version}
+              action={
+                <Show when={!going() && !p().tooOld}>
+                  <Btn small onClick={() => void switchTo(p().version, p().older)}>
+                    {p().older ? 'Roll back' : 'Switch back'}
+                  </Btn>
+                </Show>
+              }
+            >
+              {p().tooOld ? "Previous version · can't go back past a database change" : 'Previous version'}
+            </VersionRow>
+          )}
+        </Show>
+        <Show when={info()?.failed}>
+          {(f) => (
+            <VersionRow
+              icon={<TriangleAlert size={16} />}
+              tone="warn"
+              version={f().version}
+              action={
+                <Show when={retry() && !going()}>
+                  <Btn small onClick={() => void switchTo(f().version, false)}>
+                    Try again
+                  </Btn>
+                </Show>
+              }
+              details={
+                <>
+                  {sentence(f().reason)}
+                  <Show when={f().log.length}>
+                    <button class="mt-1.5 flex items-center gap-1 hover:text-ink" onClick={() => setLog(!log())}>
+                      <ChevronDown size={14} class={log() ? 'rotate-180' : ''} />
+                      {log() ? 'Hide its last log lines' : 'Show its last log lines'}
+                    </button>
+                    <Show when={log()}>
+                      <pre class="mt-2 max-h-64 overflow-auto rounded-lg bg-ink/[0.04] p-2.5 font-mono text-[11.5px] leading-[1.5] break-words whitespace-pre-wrap">
+                        {f().log.join('\n')}
+                      </pre>
+                    </Show>
+                  </Show>
+                </>
+              }
+            >
+              <span class="text-ink">
+                {f().version === info()?.version ? 'Failed its first start, then started again' : 'Didn’t start, so the hub went back'}
+              </span>{' '}
+              · {when(f().at)}
+            </VersionRow>
+          )}
+        </Show>
+      </Card>
+      <p class="mt-2 text-[12.5px] text-bad">{error() || info()?.launcher_error}</p>
     </Section>
   )
 }

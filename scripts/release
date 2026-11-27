@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+out=${1:?usage: scripts/release OUT_DIR}
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+if [[ -z "${CORRA_VERSION:-}" ]]; then
+  CORRA_VERSION=$(TZ=UTC0 git show -s --format=%cd --date=format-local:%Y.%m.%d-%H%M%S HEAD)-$(git rev-parse --short=7 HEAD)
+fi
+export CORRA_VERSION
+target=x86_64-unknown-linux-musl
+bin=${CARGO_TARGET_DIR:-$PWD/target}/$target/release
+(cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
+cargo zigbuild --release --locked --target $target -p corra-hub -p corra-runner
+cp "$bin/corra-hub" "$bin/corra-runner" "$out/"
+(cd helpers/modal && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$out/corra-modal" .)
+echo "$CORRA_VERSION" > "$out/VERSION"
+(cd "$out" && sha256sum corra-hub corra-runner corra-modal VERSION > SHA256SUMS)
+echo "$CORRA_VERSION"
