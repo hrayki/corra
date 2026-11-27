@@ -1,6 +1,8 @@
-import { createSignal, onCleanup, onMount, Show } from 'solid-js'
+import { createEffect, createSignal, on, onCleanup, onMount, Show } from 'solid-js'
 import { init, Terminal, FitAddon } from 'ghostty-web'
-import { b64bytes, call, listenTerm } from '../lib/store'
+import { b64bytes, call, listenTerm, state } from '../lib/store'
+import { providerOf } from '../lib/catalog'
+import { WakeNotice } from './Panel'
 
 let ready: Promise<void> | undefined
 
@@ -102,7 +104,26 @@ export function TerminalPanel(props: { thread: string }) {
     term.focus()
   }
 
-  onMount(() => void start(false))
+  const needsWake = () => {
+    const t = state.threads[props.thread]
+    const p = t ? state.projects[t.project] : undefined
+    if (!p || !providerOf(p.provider)?.creates_machines) return false
+    const m =
+      (t?.machine && state.machines[t.machine]) ||
+      Object.values(state.machines)
+        .filter((x) => x.project === p.id && x.status !== 'destroyed')
+        .sort((a, b) => b.created_at - a.created_at)[0]
+    return m?.status !== 'connected'
+  }
+
+  onMount(() => {
+    if (!needsWake()) void start(false)
+  })
+  createEffect(
+    on(needsWake, (sleeping, prev) => {
+      if (prev && !sleeping) void start(false)
+    }),
+  )
   onCleanup(() => {
     stop?.()
     observer?.disconnect()
@@ -111,7 +132,8 @@ export function TerminalPanel(props: { thread: string }) {
 
   return (
     <div class="flex h-full flex-col">
-      <Show when={status() === 'error' || status() === 'closed'}>
+      <WakeNotice thread={props.thread} />
+      <Show when={!needsWake() && (status() === 'error' || status() === 'closed')}>
         <div class="flex items-center gap-3 border-b border-line px-3 py-2 text-[12px]">
           <span class={status() === 'error' ? 'text-bad' : 'text-mute'}>{status() === 'error' ? error() : 'The shell exited.'}</span>
           <button class="h-7 rounded-lg border border-line px-2.5 hover:border-faint" onClick={() => void start(true)}>
@@ -119,7 +141,7 @@ export function TerminalPanel(props: { thread: string }) {
           </button>
         </div>
       </Show>
-      <div ref={host} class="min-h-0 flex-1 overflow-hidden p-2" />
+      <div ref={host} class="min-h-0 flex-1 overflow-hidden p-2" classList={{ hidden: needsWake() }} />
     </div>
   )
 }

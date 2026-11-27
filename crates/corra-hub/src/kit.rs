@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -27,8 +27,6 @@ pub struct Kit {
     pub setups: Vec<SetupInfo>,
 }
 
-static CACHE: Mutex<Option<(Instant, Arc<Kit>)>> = Mutex::new(None);
-
 fn lines(s: &str) -> Vec<String> {
     s.lines()
         .map(str::trim)
@@ -42,7 +40,7 @@ pub async fn current(hub: &Hub) -> Result<Option<Arc<Kit>>> {
         return Ok(None);
     };
     let repo = repo.trim_end_matches(".git").to_string();
-    let cached = CACHE.lock().unwrap().clone();
+    let cached = hub.kit_cache.lock().unwrap().clone();
     if let Some((at, k)) = &cached
         && k.repo == repo
         && at.elapsed() < Duration::from_secs(60)
@@ -74,7 +72,7 @@ pub async fn current(hub: &Hub) -> Result<Option<Arc<Kit>>> {
         && k.repo == repo
         && k.version == version
     {
-        *CACHE.lock().unwrap() = Some((Instant::now(), k.clone()));
+        *hub.kit_cache.lock().unwrap() = Some((Instant::now(), k.clone()));
         return Ok(Some(k));
     }
     let tarball = gh(format!(
@@ -92,7 +90,7 @@ pub async fn current(hub: &Hub) -> Result<Option<Arc<Kit>>> {
         tar,
         setups,
     });
-    *CACHE.lock().unwrap() = Some((Instant::now(), kit.clone()));
+    *hub.kit_cache.lock().unwrap() = Some((Instant::now(), kit.clone()));
     Ok(Some(kit))
 }
 
@@ -204,17 +202,7 @@ pub fn only(tar: &[u8], setups: &[String]) -> Result<Vec<u8>> {
 }
 
 pub async fn serve(State(s): State<AppState>, headers: HeaderMap) -> Response {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let machine = token.and_then(
-        |t| match s.hub.db.machine_by_token(&crate::hub::hash_token(t)) {
-            Ok(Some(m)) if m.status != MachineStatus::Destroyed => Some(m.id),
-            _ => None,
-        },
-    );
-    let Some(machine) = machine else {
+    let Some(machine) = s.hub.auth_machine_bearer(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     match current(&s.hub).await {
@@ -238,6 +226,21 @@ pub async fn serve(State(s): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 pub async fn prepare(hub: &Hub, p: &Project, machine: MachineId) -> Result<()> {
+    prepare_with(hub, p, machine, false).await?;
+    Ok(())
+}
+
+pub async fn prepare_with(
+    hub: &Hub,
+    p: &Project,
+    machine: MachineId,
+    force: bool,
+) -> Result<SetupLog> {
+    let stage = match &p.setup {
+        Some(name) => format!("Cloning repos & running setup ({name})…"),
+        None => "Cloning repos & preparing workspace…".into(),
+    };
+    hub.set_project_stage(p.id, Some(stage));
     let wants_kit = hub.db.kv_get(&format!("machine:{machine}:kit"))?.as_deref() != Some("off");
     let kit = match current(hub).await {
         Ok(k) if wants_kit => k.map(|k| version_for(&k, &machine_setups(hub, machine))),
@@ -256,22 +259,34 @@ pub async fn prepare(hub: &Hub, p: &Project, machine: MachineId) -> Result<()> {
                 setup: p.setup.clone(),
                 kit,
                 env: hub.project_env(p),
+                force,
             },
             Duration::from_secs(45 * 60),
         )
         .await;
-    let failed = match &result {
-        Ok(v) if v["ok"] == true => None,
-        Ok(v) => Some(v["log"].as_str().unwrap_or_default().to_string()),
-        Err(e) => Some(format!("setup didn't run: {e:#}")),
+    hub.set_project_stage(p.id, None);
+    let (ok, raw_log) = match &result {
+        Ok(v) if v["ok"] == true => (true, v["log"].as_str().unwrap_or_default().to_string()),
+        Ok(v) => (false, v["log"].as_str().unwrap_or_default().to_string()),
+        Err(e) => (false, format!("setup didn't run: {e:#}")),
     };
-    if let Some(log) = failed {
-        tracing::warn!(project = %p.name, "setup failed: {log}");
-        let tail: Vec<&str> = log.lines().collect();
-        let tail = tail[tail.len().saturating_sub(30)..].join("\n");
+    let all_lines: Vec<&str> = raw_log.lines().collect();
+    let kept = all_lines[all_lines.len().saturating_sub(200)..].join("\n");
+    let entry = SetupLog {
+        ok,
+        at: now_ms(),
+        setup: p.setup.clone(),
+        log: kept.clone(),
+    };
+    if !ok {
+        tracing::warn!(project = %p.name, "setup failed: {raw_log}");
+        let tail = all_lines[all_lines.len().saturating_sub(30)..].join("\n");
         hub.db.kv_set(&format!("setup_failed:{}", p.id), &tail)?;
+    } else {
+        let _ = hub.db.kv_delete(&format!("setup_failed:{}", p.id));
     }
-    Ok(())
+    hub.save_project_setup_log(p.id, &entry);
+    Ok(entry)
 }
 
 pub async fn setups(hub: &Hub) -> Result<Vec<SetupInfo>> {

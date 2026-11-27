@@ -15,36 +15,30 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::AppState;
-use crate::hub::{HubRef, Outbound, RunnerConn, hash_token};
+use crate::hub::{HubRef, Outbound, RunnerConn};
 
 pub async fn runner_ws(
     State(AppState { hub, .. }): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let auth = match hub.db.machine_by_token(&hash_token(token)) {
-        Ok(Some(a)) if a.status != MachineStatus::Destroyed => a,
-        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(machine) = hub.auth_machine_bearer(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
     if hub
         .runners
         .lock()
         .unwrap()
-        .get(&auth.id)
+        .get(&machine)
         .is_some_and(|c| !c.tx.is_closed())
     {
-        tracing::warn!(machine = %auth.id, "refused a second connection with a token that's already connected");
+        tracing::warn!(%machine, "refused a second connection with a token that's already connected");
         return (StatusCode::CONFLICT, "this machine is already connected").into_response();
     }
     ws.max_message_size(64 << 20)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = runner_loop(hub, auth.id, socket).await {
-                tracing::warn!(machine = %auth.id, "runner connection ended: {e:#}");
+            if let Err(e) = runner_loop(hub, machine, socket).await {
+                tracing::warn!(%machine, "runner connection ended: {e:#}");
             }
         })
 }
@@ -386,11 +380,9 @@ pub struct Client {
     pub session: String,
 }
 
-static NEXT_CLIENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()> {
     let client = Arc::new(Client {
-        id: NEXT_CLIENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        id: hub.next_id(),
         session,
     });
     let (mut sink, mut stream) = socket.split();
@@ -453,6 +445,9 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
             return Ok(());
         }
         send_json(&tx, &hub.snapshot()?);
+        for status in hub.project_status_messages() {
+            send_json(&tx, &status);
+        }
         if let Some(usage) = hub.usage() {
             send_json(&tx, &usage);
         }
@@ -730,6 +725,23 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             }
             Value::Null
         }
+        AppCall::RemoveRepo { project, name } => {
+            serde_json::to_value(hub.remove_repo(project, &name)?)?
+        }
+        AppCall::DeleteProject { project } => {
+            hub.delete_project(project).await?;
+            Value::Null
+        }
+        AppCall::WakeProject { project } => {
+            let m = hub.wake_project(project).await?;
+            json!({ "machine": m })
+        }
+        AppCall::SleepProject { project } => {
+            hub.sleep_project(project).await?;
+            Value::Null
+        }
+        AppCall::RerunSetup { project } => serde_json::to_value(hub.rerun_setup(project).await?)?,
+        AppCall::ProjectSetupLog { project } => hub.project_runtime_info(project)?,
         AppCall::ResetMachine { project } => {
             crate::lifecycle::reset_project(hub, project).await?;
             Value::Null

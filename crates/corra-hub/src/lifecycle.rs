@@ -320,6 +320,37 @@ async fn retire(hub: &Arc<Hub>, machine: MachineId, notice: Option<&str>) {
     hub.compact_woke.lock().unwrap().remove(&machine);
 }
 
+pub async fn sleep_project(hub: &Arc<Hub>, project: ProjectId) -> Result<()> {
+    let m = hub
+        .db
+        .machines()?
+        .into_iter()
+        .find(|m| m.project == Some(project) && m.status == MachineStatus::Connected)
+        .ok_or_else(|| anyhow!("this project has no awake machine"))?;
+    let provider = hub
+        .providers
+        .get(&m.provider)
+        .ok_or_else(|| anyhow!("unknown provider {}", m.provider))?;
+    if !provider.creates_machines() || !provider.sleeps() {
+        anyhow::bail!(
+            "{} machines can't be put to sleep",
+            provider.describe().label
+        );
+    }
+    hub.set_project_stage(
+        project,
+        Some("Saving disk & putting machine to sleep…".into()),
+    );
+    rest(
+        hub,
+        &m,
+        Some("The machine was put to sleep. Send a message or press Wake to resume."),
+    )
+    .await;
+    hub.set_project_stage(project, None);
+    Ok(())
+}
+
 pub async fn reset_project(hub: &Arc<Hub>, project: ProjectId) -> Result<()> {
     let machines: Vec<Machine> = hub
         .db

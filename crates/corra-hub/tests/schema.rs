@@ -92,7 +92,36 @@ async fn a_new_database_gets_the_whole_schema_and_opens_again() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 13);
+    assert_eq!(v, 14);
+}
+
+#[tokio::test]
+async fn v13_started_by_and_follower_kv_migrate_into_thread_columns() {
+    let dir = fixture();
+    let parent = new_id();
+    let follower = new_id();
+    {
+        let c = rusqlite::Connection::open(dir.path().join("corra.db")).unwrap();
+        let tid: String = c
+            .query_row("SELECT id FROM threads LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        c.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("thread:{tid}:started_by"), parent.to_string()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("thread:{tid}:follower"), follower.to_string()],
+        )
+        .unwrap();
+    }
+    let hub = open(dir.path()).unwrap();
+    let t = hub.db.threads().unwrap().pop().unwrap();
+    assert_eq!(t.started_by, Some(parent));
+    assert_eq!(hub.follower(t.id), Some(follower));
+    assert_eq!(hub.thread_kv(t.id, "started_by"), None);
+    assert_eq!(hub.thread_kv(t.id, "follower"), None);
 }
 
 #[tokio::test]

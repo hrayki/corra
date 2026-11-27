@@ -13,6 +13,12 @@ import type { HubToApp } from '../proto/HubToApp'
 import type { StoredEvent } from '../proto/StoredEvent'
 import type { AppCall } from '../proto/AppCall'
 import type { Found } from '../proto/Found'
+import type { SetupLog } from '../proto/SetupLog'
+
+export type ProjectRuntimeStatus = {
+  stage?: string
+  setup?: SetupLog
+}
 
 export type LiveStatus = {
   context?: { used_tokens: number; window_tokens?: number }
@@ -27,6 +33,7 @@ type State = {
   conn: ConnState | 'none'
   loaded: boolean
   projects: Record<string, Project>
+  projectStatus: Record<string, ProjectRuntimeStatus>
   machines: Record<string, Machine>
   threads: Record<string, Thread>
   views: Record<string, ThreadView>
@@ -43,6 +50,7 @@ const [state, setState] = createStore<State>({
   conn: 'none',
   loaded: false,
   projects: {},
+  projectStatus: {},
   machines: {},
   threads: {},
   views: {},
@@ -281,6 +289,8 @@ function applySnapshot(m: Extract<HubToApp, { t: 'snapshot' }>) {
     setState(
       produce((s) => {
         for (const k of Object.keys(s.projects)) delete s.projects[k]
+        const keepProjects = new Set(m.projects.map((p) => p.id))
+        for (const k of Object.keys(s.projectStatus)) if (!keepProjects.has(k)) delete s.projectStatus[k]
         for (const k of Object.keys(s.machines)) delete s.machines[k]
         const keep = new Set(m.threads.map((t) => t.id))
         for (const k of Object.keys(s.threads)) if (!keep.has(k)) delete s.threads[k]
@@ -302,6 +312,13 @@ function onMessage(m: HubToApp) {
       break
     case 'project':
       setState('projects', m.project.id, m.project)
+      break
+    case 'project_removed':
+      setState('projects', m.project, undefined!)
+      setState('projectStatus', m.project, undefined!)
+      break
+    case 'project_status':
+      setState('projectStatus', m.project, { stage: m.stage, setup: m.setup })
       break
     case 'machine':
       setState('machines', m.machine.id, m.machine)

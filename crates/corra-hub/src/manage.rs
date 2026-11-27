@@ -166,8 +166,26 @@ pub fn defs(hub: &HubRef) -> Vec<ToolDef> {
     all
 }
 
-pub fn is_manage(hub: &HubRef, action: &str) -> bool {
-    defs(hub).iter().any(|d| d.action == action)
+const MANAGE_ACTIONS: &[&str] = &[
+    "threads.list",
+    "threads.read",
+    "threads.start",
+    "threads.send",
+    "threads.stop",
+    "threads.follow",
+    "threads.move",
+    "projects.list",
+    "projects.create",
+    "projects.update",
+    "machines.list",
+    "machines.destroy",
+    "credentials.list",
+    "credentials.set",
+    "credentials.remove",
+];
+
+pub fn is_manage(action: &str) -> bool {
+    MANAGE_ACTIONS.contains(&action)
 }
 
 fn find_thread(hub: &HubRef, key: &str) -> Result<Thread> {
@@ -391,13 +409,11 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 },
             )
             .await?;
-            if let Some(id) = v["id"].as_str().and_then(|s| s.parse().ok()) {
+            if let Some(id) = v["id"].as_str().and_then(|s| s.parse::<ThreadId>().ok()) {
                 hub.mark_started_by(id, caller.id);
-            }
-            if let Some(id) = v["id"].as_str().filter(|_| follow) {
-                let _ = hub
-                    .db
-                    .kv_set(&format!("thread:{id}:follower"), &caller.id.to_string());
+                if follow {
+                    hub.set_follower(id, Some(caller.id));
+                }
             }
             Ok(
                 json!({ "thread": v["id"], "title": v["title"], "agent": target_agent, "following": follow }),
@@ -423,11 +439,11 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                         );
                     }
                 }
-                hub.set_thread_kv(t.id, "follower", &caller.id.to_string());
+                hub.set_follower(t.id, Some(caller.id));
                 Ok(json!({ "following": t.title, "status": t.status }))
             } else {
                 if hub.follower(t.id) == Some(caller.id) {
-                    hub.take_thread_kv(t.id, "follower");
+                    hub.set_follower(t.id, None);
                 }
                 Ok(json!({ "stopped_following": t.title }))
             }

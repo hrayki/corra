@@ -4,7 +4,7 @@ use ts_rs::TS;
 
 use crate::{
     AgentKind, AgentSettings, InputPart, LiveDelta, Machine, MachineId, Project, ProjectId,
-    RequestResponse, StoredEvent, Thread, ThreadId,
+    RequestResponse, SetupLog, StoredEvent, Thread, ThreadId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -80,6 +80,25 @@ pub enum AppCall {
     AddRepo {
         project: ProjectId,
         github: String,
+    },
+    RemoveRepo {
+        project: ProjectId,
+        name: String,
+    },
+    DeleteProject {
+        project: ProjectId,
+    },
+    WakeProject {
+        project: ProjectId,
+    },
+    SleepProject {
+        project: ProjectId,
+    },
+    RerunSetup {
+        project: ProjectId,
+    },
+    ProjectSetupLog {
+        project: ProjectId,
     },
     ResetMachine {
         project: ProjectId,
@@ -354,6 +373,18 @@ pub enum HubToApp {
     },
     Project {
         project: Project,
+    },
+    ProjectRemoved {
+        project: ProjectId,
+    },
+    ProjectStatus {
+        project: ProjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        stage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        setup: Option<SetupLog>,
     },
     Machine {
         machine: Machine,

@@ -213,6 +213,17 @@ pub struct Project {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct SetupLog {
+    pub ok: bool,
+    pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub setup: Option<String>,
+    pub log: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Queued {
     pub id: String,
     pub input: Vec<InputPart>,

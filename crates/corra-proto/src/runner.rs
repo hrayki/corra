@@ -190,6 +190,8 @@ pub enum RunnerRequest {
         kit: Option<String>,
         #[serde(default)]
         env: Vec<(String, String)>,
+        #[serde(default)]
+        force: bool,
     },
     Rewind {
         cwd: String,
