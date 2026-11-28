@@ -1104,6 +1104,7 @@ fn row_machine(r: &rusqlite::Row) -> rusqlite::Result<Machine> {
         created_at: r.get(7)?,
         last_seen: r.get(8)?,
         kind: r.get(9)?,
+        update_pending: false,
     })
 }
 

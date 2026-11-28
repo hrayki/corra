@@ -188,11 +188,20 @@ pub fn is_manage(action: &str) -> bool {
     MANAGE_ACTIONS.contains(&action)
 }
 
-fn find_thread(hub: &HubRef, key: &str) -> Result<Thread> {
-    let threads = hub.db.threads()?;
+pub fn find_thread_scoped(hub: &HubRef, key: &str, project: Option<ProjectId>) -> Result<Thread> {
+    let threads: Vec<Thread> = hub
+        .db
+        .threads()?
+        .into_iter()
+        .filter(|t| project.is_none_or(|p| t.project == p))
+        .collect();
     crate::follow::pick(&threads, key)
         .cloned()
         .map_err(|e| anyhow!(e))
+}
+
+fn find_thread(hub: &HubRef, key: &str) -> Result<Thread> {
+    find_thread_scoped(hub, key, None)
 }
 
 fn find_project(hub: &HubRef, name: &str) -> Result<Project> {
@@ -301,6 +310,131 @@ fn digest(events: &[StoredEvent], last: usize) -> Value {
     json!(turns.into_iter().skip(skip).collect::<Vec<_>>())
 }
 
+pub fn read_thread(
+    hub: &HubRef,
+    key: &str,
+    last: usize,
+    project: Option<ProjectId>,
+) -> Result<Value> {
+    let t = find_thread_scoped(hub, key, project)?;
+    let last = last.max(1);
+    let from = hub
+        .db
+        .last_turns_started(t.id, last as i64)?
+        .last()
+        .map_or(0, |e| e.seq - 1);
+    let events = hub.db.events_after(t.id, from, 1_000_000)?;
+    Ok(json!({
+        "id": t.id,
+        "title": t.title,
+        "agent": t.agent,
+        "status": t.status,
+        "model": t.settings.model,
+        "effort": t.settings.effort,
+        "permission_mode": t.settings.permission_mode,
+        "turns": digest(&events, last),
+    }))
+}
+
+pub fn follow_thread(
+    hub: &HubRef,
+    caller: &Thread,
+    key: &str,
+    follow: bool,
+    project: Option<ProjectId>,
+) -> Result<Value> {
+    let t = find_thread_scoped(hub, key, project)?;
+    if t.id == caller.id {
+        bail!("that's this thread");
+    }
+    if follow {
+        if hub.hands_off(caller.agent) {
+            bail!(
+                "Antigravity threads signed in with Google can't receive automated follower messages. Use threads.read to check progress instead."
+            );
+        }
+        let mut up = Some(caller.id);
+        for _ in 0..64 {
+            up = up.and_then(|id| hub.follower(id));
+            if up == Some(t.id) {
+                bail!("that thread follows this one, so the two would wake each other without end");
+            }
+        }
+        hub.set_follower(t.id, Some(caller.id));
+        Ok(json!({ "following": t.title, "status": t.status }))
+    } else {
+        if hub.follower(t.id) == Some(caller.id) {
+            hub.set_follower(t.id, None);
+        }
+        Ok(json!({ "stopped_following": t.title }))
+    }
+}
+
+pub async fn send_thread(
+    hub: &HubRef,
+    caller: &Thread,
+    key: &str,
+    message: String,
+    queue: bool,
+    project: Option<ProjectId>,
+) -> Result<Value> {
+    let t = find_thread_scoped(hub, key, project)?;
+    if t.id == caller.id {
+        bail!("that's this thread");
+    }
+    if hub.hands_off(t.agent) {
+        bail!(
+            "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
+        );
+    }
+    exec_call(
+        hub,
+        AppCall::Send {
+            thread: t.id,
+            input: vec![InputPart::Text { text: message }],
+            settings: None,
+            queue,
+            client_id: None,
+        },
+    )
+    .await?;
+    Ok(json!({ "sent_to": t.title }))
+}
+
+pub async fn stop_thread(
+    hub: &HubRef,
+    caller: &Thread,
+    key: &str,
+    project: Option<ProjectId>,
+) -> Result<Value> {
+    let t = find_thread_scoped(hub, key, project)?;
+    let quiet = hub.follower(t.id) == Some(caller.id)
+        && matches!(t.status, ThreadStatus::Running | ThreadStatus::Waiting);
+    if quiet {
+        hub.quiet_stops
+            .lock()
+            .unwrap()
+            .insert(t.id, std::time::Instant::now());
+    }
+    let unsent = match exec_call(hub, AppCall::Interrupt { thread: t.id }).await {
+        Ok(v) => v["unsent"].clone(),
+        Err(e) => {
+            hub.quiet_stops.lock().unwrap().remove(&t.id);
+            return Err(e);
+        }
+    };
+    let texts: Vec<String> = serde_json::from_value::<Vec<Queued>>(unsent)
+        .unwrap_or_default()
+        .iter()
+        .map(|q| crate::hub::input_text(&q.input))
+        .collect();
+    if texts.is_empty() {
+        Ok(json!({ "stopped": t.title }))
+    } else {
+        Ok(json!({ "stopped": t.title, "unsent": texts }))
+    }
+}
+
 pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> Result<Value> {
     match action {
         "threads.list" => {
@@ -338,24 +472,8 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
             Ok(json!(list))
         }
         "threads.read" => {
-            let t = find_thread(hub, &text(&input, "thread")?)?;
-            let last = input["last"].as_u64().unwrap_or(3).max(1) as usize;
-            let from = hub
-                .db
-                .last_turns_started(t.id, last as i64)?
-                .last()
-                .map_or(0, |e| e.seq - 1);
-            let events = hub.db.events_after(t.id, from, 1_000_000)?;
-            Ok(json!({
-                "id": t.id,
-                "title": t.title,
-                "agent": t.agent,
-                "status": t.status,
-                "model": t.settings.model,
-                "effort": t.settings.effort,
-                "permission_mode": t.settings.permission_mode,
-                "turns": digest(&events, last),
-            }))
+            let last = input["last"].as_u64().unwrap_or(3) as usize;
+            read_thread(hub, &text(&input, "thread")?, last, None)
         }
         "threads.start" => {
             let target_agent = match input["agent"].as_str() {
@@ -419,88 +537,25 @@ pub async fn run(hub: &HubRef, caller: &Thread, action: &str, input: Value) -> R
                 json!({ "thread": v["id"], "title": v["title"], "agent": target_agent, "following": follow }),
             )
         }
-        "threads.follow" => {
-            let t = find_thread(hub, &text(&input, "thread")?)?;
-            if t.id == caller.id {
-                bail!("that's this thread");
-            }
-            if input["follow"].as_bool().unwrap_or(true) {
-                if hub.hands_off(caller.agent) {
-                    bail!(
-                        "Antigravity threads signed in with Google can't receive automated follower messages. Use threads.read to check progress instead."
-                    );
-                }
-                let mut up = Some(caller.id);
-                for _ in 0..64 {
-                    up = up.and_then(|id| hub.follower(id));
-                    if up == Some(t.id) {
-                        bail!(
-                            "that thread follows this one, so the two would wake each other without end"
-                        );
-                    }
-                }
-                hub.set_follower(t.id, Some(caller.id));
-                Ok(json!({ "following": t.title, "status": t.status }))
-            } else {
-                if hub.follower(t.id) == Some(caller.id) {
-                    hub.set_follower(t.id, None);
-                }
-                Ok(json!({ "stopped_following": t.title }))
-            }
-        }
+        "threads.follow" => follow_thread(
+            hub,
+            caller,
+            &text(&input, "thread")?,
+            input["follow"].as_bool().unwrap_or(true),
+            None,
+        ),
         "threads.send" => {
-            let t = find_thread(hub, &text(&input, "thread")?)?;
-            if t.id == caller.id {
-                bail!("that's this thread");
-            }
-            if hub.hands_off(t.agent) {
-                bail!(
-                    "Antigravity threads signed in with Google take messages only from the user. Ask the user to send it, or to add a Gemini API key in Settings."
-                );
-            }
-            exec_call(
+            send_thread(
                 hub,
-                AppCall::Send {
-                    thread: t.id,
-                    input: vec![InputPart::Text {
-                        text: text(&input, "message")?,
-                    }],
-                    settings: None,
-                    queue: input["queue"].as_bool().unwrap_or(false),
-                    client_id: None,
-                },
+                caller,
+                &text(&input, "thread")?,
+                text(&input, "message")?,
+                input["queue"].as_bool().unwrap_or(false),
+                None,
             )
-            .await?;
-            Ok(json!({ "sent_to": t.title }))
+            .await
         }
-        "threads.stop" => {
-            let t = find_thread(hub, &text(&input, "thread")?)?;
-            let quiet = hub.follower(t.id) == Some(caller.id)
-                && matches!(t.status, ThreadStatus::Running | ThreadStatus::Waiting);
-            if quiet {
-                hub.quiet_stops
-                    .lock()
-                    .unwrap()
-                    .insert(t.id, std::time::Instant::now());
-            }
-            let unsent = match exec_call(hub, AppCall::Interrupt { thread: t.id }).await {
-                Ok(v) => v["unsent"].clone(),
-                Err(e) => {
-                    hub.quiet_stops.lock().unwrap().remove(&t.id);
-                    return Err(e);
-                }
-            };
-            let texts: Vec<String> = serde_json::from_value::<Vec<Queued>>(unsent)
-                .unwrap_or_default()
-                .iter()
-                .map(|q| crate::hub::input_text(&q.input))
-                .collect();
-            if texts.is_empty() {
-                Ok(json!({ "stopped": t.title }))
-            } else {
-                Ok(json!({ "stopped": t.title, "unsent": texts }))
-            }
-        }
+        "threads.stop" => stop_thread(hub, caller, &text(&input, "thread")?, None).await,
         "threads.move" => {
             let t = find_thread(hub, &text(&input, "thread")?)?;
             let machine = match input["to"].as_str() {

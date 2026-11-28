@@ -247,8 +247,20 @@ impl Hub {
         self.publish(Outbound::All(HubToApp::Thread { thread: t.clone() }));
     }
 
+    pub fn machine_update_pending(m: &Machine, want: Option<&str>) -> bool {
+        m.status == MachineStatus::Connected
+            && want.is_some()
+            && m.info.as_ref().and_then(|i| i.runner_build.as_deref()) != want
+    }
+
+    pub fn decorate_machine(&self, m: &mut Machine) {
+        let want = crate::files::runner_build();
+        m.update_pending = Self::machine_update_pending(m, want.as_deref());
+    }
+
     pub fn publish_machine(&self, id: MachineId) {
-        if let Ok(Some(m)) = self.db.machine(id) {
+        if let Ok(Some(mut m)) = self.db.machine(id) {
+            self.decorate_machine(&mut m);
             self.publish(Outbound::All(HubToApp::Machine { machine: m }));
         }
     }
@@ -333,9 +345,13 @@ impl Hub {
     }
 
     pub fn snapshot(&self) -> Result<HubToApp> {
+        let mut machines = self.db.machines()?;
+        for m in &mut machines {
+            self.decorate_machine(m);
+        }
         Ok(HubToApp::Snapshot {
             projects: self.projects()?,
-            machines: self.db.machines()?,
+            machines,
             threads: self.db.threads()?,
             build: crate::web::build(),
             settings: self.settings(),
