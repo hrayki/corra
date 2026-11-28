@@ -7,13 +7,15 @@ import Ellipsis from 'lucide-solid/icons/ellipsis'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
 import Search from 'lucide-solid/icons/search'
-import { call, closeThread, loadEarlier, openThread, state } from '../lib/store'
+import GitBranch from 'lucide-solid/icons/git-branch'
+import GitPullRequest from 'lucide-solid/icons/git-pull-request'
+import ArrowDown from 'lucide-solid/icons/arrow-down'
+import { call, closeThread, loadEarlier, openThread, restoreDraft, state } from '../lib/store'
 import { panel, setPanel } from '../lib/panel'
 import { tokens } from '../lib/format'
 import { Composer } from './Composer'
 import { UsageMeter } from './UsagePopover'
-import ArrowDown from 'lucide-solid/icons/arrow-down'
-import { EntryView, TurnBlock, setDraftFor } from './Timeline'
+import { EntryView, TurnBlock } from './Timeline'
 import type { Queued } from '../proto/Queued'
 import type { InputPart } from '../proto/InputPart'
 import type { TurnView } from '../lib/timeline'
@@ -21,7 +23,7 @@ import { IconBtn, Menu, StatusMark, Thumbs, statusWord, type MenuItem } from './
 import { SidePanel } from './Panel'
 import { RunningTasks } from './Agents'
 import { threadActions } from './actions'
-import { refreshChanges, totals as changeTotals } from '../lib/changes'
+import { prOf, primaryBranch, refreshChanges, totals as changeTotals } from '../lib/changes'
 import { limitedNow } from '../lib/usage'
 import { paired } from '../lib/catalog'
 import { FindBar, createFind } from './Find'
@@ -59,11 +61,8 @@ function Outgoing(props: { parts: InputPart[]; note: string; queued?: boolean; a
   )
 }
 
-const [clock, setClock] = createSignal(Date.now())
-setInterval(() => setClock(Date.now()), 5000)
-
 export function ThreadPane(props: { id: string }) {
-  void openThread(props.id)
+  openThread(props.id)
   onCleanup(() => closeThread(props.id))
   const thread = () => state.threads[props.id]
   const view = () => state.views[props.id]
@@ -170,6 +169,29 @@ export function ThreadPane(props: { id: string }) {
     const t = changeTotals(props.id)
     return { n: t.files, a: t.added, r: t.removed }
   }
+  const branchInfo = () => primaryBranch(props.id)
+  const pr = () => prOf(props.id)
+  const prSummary = () => {
+    const p = pr()
+    if (!p) return null
+    const c = p.checks
+    let tone: 'ok' | 'bad' | 'warn' | 'mute' = 'mute'
+    let checksNote = p.draft ? 'Draft' : 'Open'
+    if (c && c.total > 0) {
+      if (c.failing > 0) {
+        tone = 'bad'
+        checksNote = `${c.failing} failing`
+      } else if (c.pending > 0) {
+        tone = 'warn'
+        checksNote = `${c.pending} running`
+      } else {
+        tone = 'ok'
+        checksNote = `${c.total}/${c.total} passed`
+      }
+    }
+    return { pr: p, tone, title: `PR #${p.number}: ${p.title} (${checksNote})` }
+  }
+
   createEffect(
     on(
       () => [props.id, view()?.turns.filter((t) => t.outcome).length ?? 0] as const,
@@ -183,19 +205,28 @@ export function ThreadPane(props: { id: string }) {
     const t = q.input.find((p) => p.type === 'text')
     run(
       call({ op: 'unqueue', thread: props.id, id: q.id, send: false }).then(() =>
-        setDraftFor({ thread: props.id, text: t && t.type === 'text' ? t.text : '' }),
+        restoreDraft(props.id, [t && t.type === 'text' ? t.text : ''], true),
       ),
     )
   }
   const find = createFind({ thread: props.id, scroller: () => scroller, unstick: () => setStick(false) })
   const menu = createMemo<MenuItem[]>(() =>
-    thread() ? [{ label: 'Find', onSelect: find.show }, 'sep', ...threadActions(thread()!, setError)] : [],
+    thread() ? [{ label: 'Find in thread', hint: 'Ctrl+F', onSelect: find.show }, 'sep', ...threadActions(thread()!, setError)] : [],
   )
 
-  const background = () => {
+  const [background, setBackground] = createSignal(false)
+  createEffect(() => {
     const at = state.live[props.id]?.background ?? 0
-    return at > 0 && clock() - at < 45_000
-  }
+    const left = at > 0 ? 45_000 - (Date.now() - at) : 0
+    if (left <= 0) {
+      setBackground(false)
+      return
+    }
+    setBackground(true)
+    const id = window.setTimeout(() => setBackground(false), left)
+    onCleanup(() => clearTimeout(id))
+  })
+
   return (
     <Show when={thread()} fallback={<Missing id={props.id} />}>
       <div class="relative flex min-h-0 flex-1">
@@ -222,6 +253,43 @@ export function ThreadPane(props: { id: string }) {
                   {machine() && paired(machine()!.provider) ? <Laptop size={12} /> : <Cloud size={12} />}
                   {where()}
                 </span>
+                <Show when={branchInfo()}>
+                  {(b) => (
+                    <>
+                      <span class="text-faint max-lg:hidden">·</span>
+                      <span
+                        class="inline-flex max-w-36 items-center gap-1 truncate font-mono text-[11.5px] text-ink/75 max-lg:hidden"
+                        title={`Branch ${b().branch}`}
+                      >
+                        <GitBranch size={11} class="shrink-0 text-faint" />
+                        <span class="truncate">{b().branch}</span>
+                      </span>
+                    </>
+                  )}
+                </Show>
+                <Show when={prSummary()}>
+                  {(p) => (
+                    <a
+                      href={p().pr.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={p().title}
+                      class="inline-flex shrink-0 items-center gap-1 rounded-md border border-line bg-raised px-1.5 py-px font-mono text-[11px] hover:border-faint max-md:hidden"
+                    >
+                      <GitPullRequest size={11} class="text-mute" />
+                      <span>#{p().pr.number}</span>
+                      <span
+                        class="size-1.5 rounded-full"
+                        classList={{
+                          'bg-ok': p().tone === 'ok',
+                          'bg-bad': p().tone === 'bad',
+                          'bg-warn pulse': p().tone === 'warn',
+                          'bg-faint': p().tone === 'mute',
+                        }}
+                      />
+                    </a>
+                  )}
+                </Show>
                 <Show when={statusWord[thread()!.status]}>
                   <span class="text-faint">·</span>
                   <span classList={{ 'text-warn': thread()!.status === 'waiting', 'text-bad': thread()!.status === 'error' }}>
@@ -268,10 +336,10 @@ export function ThreadPane(props: { id: string }) {
               <SquareTerminal size={16} />
             </IconBtn>
             <Menu
-              label="More"
+              label="Thread actions"
               align="end"
               items={menu()}
-              class="inline-flex size-8 items-center justify-center rounded-lg text-mute hover:bg-ink/5 hover:text-ink md:hidden"
+              class="inline-flex size-8 items-center justify-center rounded-lg text-mute hover:bg-ink/5 hover:text-ink"
             >
               <Ellipsis size={16} />
             </Menu>

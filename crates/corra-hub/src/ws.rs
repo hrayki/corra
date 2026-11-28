@@ -1057,6 +1057,21 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.runner_request(m, RunnerRequest::Changes { cwd: t.cwd })
                 .await?
         }
+        AppCall::ThreadPr {
+            thread,
+            repo,
+            branch,
+        } => {
+            let t = hub
+                .db
+                .thread(thread)?
+                .ok_or_else(|| anyhow!("no such thread"))?;
+            let p = hub
+                .db
+                .project(t.project)?
+                .ok_or_else(|| anyhow!("no such project"))?;
+            crate::github::branch_pr(hub, &p, repo.as_deref(), &branch).await?
+        }
         AppCall::ListFolders { machine, path } => {
             hub.runner_request(machine, RunnerRequest::Folders { path })
                 .await?

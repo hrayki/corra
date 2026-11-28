@@ -1,9 +1,8 @@
 import { batch } from 'solid-js'
 import type { Queued } from '../proto/Queued'
 import type { InputPart } from '../proto/InputPart'
-import { createStore, produce, reconcile } from 'solid-js/store'
+import { createStore, produce } from 'solid-js/store'
 import { Conn, type ConnState } from './conn'
-import { cache } from './cache'
 import { checkBuild } from './version'
 import { apply, applyDelta, buildView, emptyView, type ThreadView } from './timeline'
 import type { Project } from '../proto/Project'
@@ -16,6 +15,8 @@ import type { Found } from '../proto/Found'
 import type { SetupLog } from '../proto/SetupLog'
 import type { AgentKind } from '../proto/AgentKind'
 import type { AgentUsage } from '../proto/AgentUsage'
+import type { ProviderInfo } from '../proto/ProviderInfo'
+import type { ToolInfo } from '../proto/ToolInfo'
 
 export type ProjectRuntimeStatus = {
   stage?: string
@@ -28,6 +29,11 @@ export type LiveStatus = {
   agents?: string[]
   continue_at?: number
   rate_limit?: { rate_limit_info?: { unifiedWindows?: Record<string, { utilization: number; resetsAt: number; status: string }> } }
+}
+
+export type DraftRestore = {
+  texts: string[]
+  replace: boolean
 }
 
 type State = {
@@ -43,8 +49,11 @@ type State = {
   live: Record<string, LiveStatus>
   queues: Record<string, Queued[]>
   usage: Partial<Record<AgentKind, AgentUsage>>
+  settings: Record<string, unknown>
+  providers: ProviderInfo[]
+  tools: ToolInfo[]
   pending: Record<string, { id: number; parts: InputPart[]; queued: boolean; client?: string }[]>
-  restore: Record<string, string[]>
+  restore: Record<string, DraftRestore | undefined>
 }
 
 const [state, setState] = createStore<State>({
@@ -60,6 +69,9 @@ const [state, setState] = createStore<State>({
   live: {},
   queues: {},
   usage: {},
+  settings: {},
+  providers: [],
+  tools: [],
   pending: {},
   restore: {},
 })
@@ -70,27 +82,6 @@ const raw = new Map<string, StoredEvent[]>()
 const subscribed = new Set<string>()
 const catching = new Map<string, StoredEvent[]>()
 const TAIL = 4
-const saveTimers = new Map<string, number>()
-
-function persistEvents(thread: string) {
-  if (saveTimers.has(thread)) return
-  saveTimers.set(
-    thread,
-    window.setTimeout(() => {
-      saveTimers.delete(thread)
-      const evs = raw.get(thread)
-      if (evs) void cache.setEvents(thread, evs)
-    }, 1200),
-  )
-}
-
-function persistSnapshot() {
-  void cache.set('snapshot:hub', {
-    projects: Object.values(state.projects),
-    machines: Object.values(state.machines),
-    threads: Object.values(state.threads),
-  })
-}
 
 let pendingId = 0
 
@@ -112,15 +103,19 @@ export function dropPending(thread: string, id: number) {
 const stoppedAt = new Map<string, number>()
 const STOP_RETURNS = 60_000
 
-export function restoreDraft(thread: string, texts: string[]) {
-  const t = texts.filter((x) => x.trim())
-  if (t.length) setState('restore', thread, (l) => [...(l ?? []), ...t])
+export function restoreDraft(thread: string, texts: string[], replace = false) {
+  const clean = texts.filter((x) => x.trim())
+  if (!clean.length) return
+  setState('restore', thread, (prev) =>
+    replace || !prev ? { texts: clean, replace } : { texts: [...prev.texts, ...clean], replace: prev.replace },
+  )
 }
 
-export function takeRestored(thread: string): string[] {
-  const l = state.restore[thread] ?? []
-  if (l.length) setState('restore', thread, [])
-  return l
+export function takeRestored(thread: string): DraftRestore | null {
+  const cur = state.restore[thread]
+  if (!cur?.texts.length) return null
+  setState('restore', thread, undefined)
+  return cur
 }
 
 export async function stopThread(thread: string) {
@@ -189,60 +184,37 @@ function addEvents(thread: string, events: StoredEvent[]) {
     }),
   )
   returnUnread(thread, fresh)
-  persistEvents(thread)
 }
 
 function resetThread(thread: string) {
-  raw.delete(thread)
-  void cache.setEvents(thread, [])
-  setEarlier(thread, null)
+  raw.set(thread, [])
   setState('views', thread, emptyView())
+  setState('earlier', thread, null)
 }
 
-function setEarlier(thread: string, from: number | null) {
-  setState('earlier', thread, from)
-  void cache.set(`earlier:${thread}`, from)
-}
-
-function keepLive(from: ThreadView | undefined, to: ThreadView) {
-  const last = from?.turns.at(-1)
-  if (!last || last.outcome) return
-  const t = to.turns.find((x) => x.id === last.id)
-  if (!t) return
-  for (const e of last.entries) {
-    if (e.type !== 'item' || (!e.item.live && !e.item.liveInput)) continue
-    const it = t.entries.find((x) => x.type === 'item' && x.item.id === e.item.id)
-    if (it?.type === 'item' && !it.item.done) {
-      it.item.live = e.item.live
-      it.item.liveInput = e.item.liveInput
-    }
-  }
-}
-
-function showHistory(thread: string, events: StoredEvent[], earlier: number | null) {
+function showHistory(thread: string, events: StoredEvent[], from: number | null) {
   raw.set(thread, events)
-  const v = buildView(events, earlier !== null)
-  keepLive(state.views[thread], v)
-  setState('views', thread, reconcile(v, { key: 'id', merge: false }))
-  setEarlier(thread, earlier)
-  persistEvents(thread)
+  setState('views', thread, buildView(events, from !== null))
+  setState('earlier', thread, from)
 }
 
 function subscribe(id: string) {
-  if (!conn) return
-  if (!catching.has(id)) catching.set(id, [])
+  const had = raw.has(id)
+  if (!had) catching.set(id, [])
   void conn
-    .call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0, tail: TAIL })
-    .catch(() => {})
-    .finally(() => {
+    ?.call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0, tail: TAIL })
+    .then(() => {
       const caught = catching.get(id)
       catching.delete(id)
-      if (caught?.length)
+      if (!caught) return
+      if (caught.length)
         addEvents(
           id,
           caught.sort((a, b) => a.seq - b.seq),
         )
+      else if (!raw.has(id)) showHistory(id, [], null)
     })
+    .catch(() => catching.delete(id))
 }
 
 const fetching = new Map<string, Promise<void>>()
@@ -284,6 +256,24 @@ export async function refreshUsage(agent?: AgentKind) {
   return list
 }
 
+export async function updateSettings(patch: Record<string, unknown>) {
+  const next = await call<Record<string, unknown>>({ op: 'set_settings', settings: patch })
+  if (next && typeof next === 'object') setState('settings', next)
+  return next
+}
+
+export async function refreshCatalogState() {
+  if (state.conn !== 'open') return
+  const [providers, tools] = await Promise.all([
+    call<ProviderInfo[]>({ op: 'list_providers' }).catch(() => state.providers),
+    call<ToolInfo[]>({ op: 'list_tools' }).catch(() => state.tools),
+  ])
+  batch(() => {
+    setState('providers', providers)
+    setState('tools', tools)
+  })
+}
+
 function putThread(t: Thread) {
   setState('threads', t.id, {
     machine: undefined,
@@ -307,12 +297,14 @@ function applySnapshot(m: Extract<HubToApp, { t: 'snapshot' }>) {
         for (const k of Object.keys(s.threads)) if (!keep.has(k)) delete s.threads[k]
         for (const p of m.projects) s.projects[p.id] = p
         for (const x of m.machines) s.machines[x.id] = x
+        if (m.settings && typeof m.settings === 'object') s.settings = m.settings
+        if (Array.isArray(m.providers)) s.providers = m.providers
+        if (Array.isArray(m.tools)) s.tools = m.tools
         s.loaded = true
       }),
     )
     for (const t of m.threads) putThread(t)
   })
-  persistSnapshot()
 }
 
 function onMessage(m: HubToApp) {
@@ -403,36 +395,26 @@ export function b64bytes(s: string): Uint8Array {
   return out
 }
 
+let connGen = 0
+
 function startConn(url: () => string, onRefused?: () => void) {
   conn?.close()
-  const c = new Conn(
+  const gen = ++connGen
+  conn = new Conn(
     url,
     onMessage,
     () => {
       for (const t of subscribed) subscribe(t)
     },
     onRefused,
+    (s) => {
+      if (gen === connGen) setState('conn', s)
+    },
   )
-  conn = c
-  const track = () => {
-    if (conn !== c) return
-    setState('conn', c.state())
-    setTimeout(track, 400)
-  }
-  track()
+  setState('conn', conn.state())
 }
 
 const sameOrigin = () => `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-
-async function loadCached() {
-  const s = await cache.get<{ projects: Project[]; machines: Machine[]; threads: Thread[] }>('snapshot:hub')
-  if (!s || state.loaded) return
-  batch(() => {
-    for (const p of s.projects) if (!state.projects[p.id]) setState('projects', p.id, p)
-    for (const m of s.machines) if (!state.machines[m.id]) setState('machines', m.id, m)
-    for (const t of s.threads) if (!state.threads[t.id]) setState('threads', t.id, t)
-  })
-}
 
 export async function boot() {
   let auth: { signed_in: boolean }
@@ -448,7 +430,6 @@ export async function boot() {
     setState('boot', 'signin')
     return
   }
-  void loadCached()
   startConn(
     () => {
       const token = localStorage.getItem('corra_token')
@@ -471,27 +452,9 @@ export function call<T = unknown>(c: AppCall): Promise<T> {
   return conn.call<T>(c)
 }
 
-export async function openThread(id: string) {
+export function openThread(id: string) {
   if (subscribed.has(id)) return
   subscribed.add(id)
-  if (!raw.has(id)) {
-    const cached = await cache.events(id)
-    const from = (await cache.get<number | null>(`earlier:${id}`)) ?? null
-    if (cached?.length && !raw.has(id)) {
-      let v: ThreadView | undefined
-      try {
-        v = buildView(cached, from !== null)
-      } catch {
-        void cache.setEvents(id, [])
-        void cache.set(`earlier:${id}`, null)
-      }
-      if (v) {
-        raw.set(id, cached)
-        setState('views', id, v)
-        setState('earlier', id, from)
-      }
-    }
-  }
   subscribe(id)
 }
 

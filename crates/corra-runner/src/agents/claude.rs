@@ -953,17 +953,20 @@ fn on_system(ctx: &SessionCtx, st: &mut State, msg: &Value) {
             let status = msg["status"].as_str().unwrap_or("completed");
             st.background_said = None;
             background(ctx, 0);
+            let text = if summary.starts_with("Background ") {
+                summary.to_string()
+            } else if summary.is_empty() {
+                format!("Background agent {status}.")
+            } else {
+                format!("Background agent {status}: {summary}")
+            };
             let item = Item {
                 id: format!("task:{task}"),
                 parent: tool,
-                body: ItemBody::AgentMessage {
-                    text: if summary.starts_with("Background ") {
-                        summary.to_string()
-                    } else if summary.is_empty() {
-                        format!("Background agent {status}.")
-                    } else {
-                        format!("Background agent {status}: {summary}")
-                    },
+                body: ItemBody::TaskResult {
+                    status: status.to_string(),
+                    summary: (!summary.is_empty()).then(|| summary.to_string()),
+                    text,
                 },
             };
             if st.turn.is_none() {

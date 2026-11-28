@@ -94,3 +94,24 @@ test('a send in flight when the connection drops is sent again with the same id;
   conn.close()
   mock.timers.reset()
 })
+
+test('onState reports connection transitions without firing synchronously during construction', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  FakeSocket.all = []
+  const seen: string[] = []
+  const conn = new Conn(
+    () => '/app',
+    () => {},
+    () => {},
+    undefined,
+    (s) => seen.push(`${conn.state()}:${s}`),
+  )
+  assert.deepEqual(seen, [])
+  latest().open()
+  latest().drop()
+  mock.timers.tick(500)
+  latest().open()
+  assert.deepEqual(seen, ['open:open', 'closed:closed', 'connecting:connecting', 'open:open'])
+  conn.close()
+  mock.timers.reset()
+})

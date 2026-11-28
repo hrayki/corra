@@ -451,7 +451,7 @@ async fn a_background_agent_joins_its_turn_and_wakes_the_thread_once() {
         "a foreground command showed as a background agent: {tasks:#?}"
     );
     assert!(
-        matches!(&tasks[0].body, ItemBody::AgentMessage { text } if text == "Background agent completed: BG_DONE")
+        matches!(&tasks[0].body, ItemBody::TaskResult { status, summary, text } if status == "completed" && summary.as_deref() == Some("BG_DONE") && text == "Background agent completed: BG_DONE")
     );
     assert!(
         first
@@ -649,7 +649,7 @@ async fn a_background_agent_shows_as_running_until_it_is_stopped() {
     );
     assert!(
         first.items.iter().any(|i| i.parent.as_ref() == Some(&agent)
-            && matches!(&i.body, ItemBody::AgentMessage { text } if text == "Background agent stopped: Wait a minute")),
+            && matches!(&i.body, ItemBody::TaskResult { status, summary, text } if status == "stopped" && summary.as_deref() == Some("Wait a minute") && text == "Background agent stopped: Wait a minute")),
         "{first:#?}"
     );
     assert_eq!(

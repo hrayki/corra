@@ -71,6 +71,7 @@ pub struct Hub {
     pub github_api: Mutex<String>,
     pub claude_usage_url: Mutex<String>,
     pub usage: crate::usage::UsageTracker,
+    pub pr_cache: Mutex<HashMap<(String, String), (Instant, Value)>>,
     pub kit_cache: Mutex<Option<(Instant, Arc<crate::kit::Kit>)>>,
     pub git_pending: GitPendingMap,
     pub project_stages: Mutex<HashMap<ProjectId, String>>,
@@ -130,6 +131,7 @@ impl Hub {
             github_api: Mutex::new("https://api.github.com".into()),
             claude_usage_url: Mutex::new(crate::usage::CLAUDE_USAGE_URL.into()),
             usage: crate::usage::UsageTracker::default(),
+            pr_cache: Mutex::new(HashMap::new()),
             kit_cache: Mutex::new(None),
             git_pending: Mutex::new(HashMap::new()),
             project_stages: Mutex::new(HashMap::new()),
@@ -338,6 +340,9 @@ impl Hub {
             machines: self.db.machines()?,
             threads: self.db.threads()?,
             build: crate::web::build(),
+            settings: self.settings(),
+            providers: self.providers.info(self),
+            tools: crate::tools::info(self),
         })
     }
 

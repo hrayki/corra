@@ -4,7 +4,7 @@ use ts_rs::TS;
 
 use crate::{
     AgentKind, AgentSettings, AgentUsage, InputPart, LiveDelta, Machine, MachineId, Project,
-    ProjectId, RequestResponse, SetupLog, StoredEvent, Thread, ThreadId,
+    ProjectId, ProviderInfo, RequestResponse, SetupLog, StoredEvent, Thread, ThreadId, ToolInfo,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -289,6 +289,13 @@ pub enum AppCall {
     Changes {
         thread: ThreadId,
     },
+    ThreadPr {
+        thread: ThreadId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        repo: Option<String>,
+        branch: String,
+    },
     ListFolders {
         machine: MachineId,
         #[serde(default)]
@@ -375,6 +382,13 @@ pub enum HubToApp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         build: Option<String>,
+        #[serde(default)]
+        #[ts(type = "Record<string, unknown>")]
+        settings: Value,
+        #[serde(default)]
+        providers: Vec<ProviderInfo>,
+        #[serde(default)]
+        tools: Vec<ToolInfo>,
     },
     Project {
         project: Project,

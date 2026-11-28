@@ -5,4 +5,4 @@ import type { ToolOutput } from "./ToolOutput";
 import type { ToolStatus } from "./ToolStatus";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type ItemBody = { "type": "user_message", content: Array<InputPart>, } | { "type": "agent_message", text: string, } | { "type": "reasoning", text: string, } | { "type": "tool_call", name: string, input: JsonValue, output?: ToolOutput, status: ToolStatus, } | { "type": "todos", todos: Array<Todo>, };
+export type ItemBody = { "type": "user_message", content: Array<InputPart>, } | { "type": "agent_message", text: string, } | { "type": "reasoning", text: string, } | { "type": "tool_call", name: string, input: JsonValue, output?: ToolOutput, status: ToolStatus, } | { "type": "todos", todos: Array<Todo>, } | { "type": "task_result", status: string, summary?: string, text: string, };

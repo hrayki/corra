@@ -1,20 +1,28 @@
-import { For, Show, createEffect, createMemo, createSignal, on } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from 'solid-js'
 import Bot from 'lucide-solid/icons/bot'
 import SquareTerminal from 'lucide-solid/icons/square-terminal'
 import ChevronRight from 'lucide-solid/icons/chevron-right'
 import MessagesSquare from 'lucide-solid/icons/messages-square'
 import { call, state } from '../lib/store'
 import { setPanel } from '../lib/panel'
-import { duration } from '../lib/format'
+import { ago, duration } from '../lib/format'
 import { agentInfo, findCall, isAgentCall, kidsOf, startedThread, type AgentInfo } from '../lib/agents'
 import type { ItemView } from '../lib/timeline'
 import { toolSummary } from './tools'
-import { EntryView, Markdown } from './Timeline'
+import { EntryView } from './Timeline'
+import { Markdown } from './Markdown'
 import { Btn, StatusMark, statusWord } from './bits'
-import { ago } from '../lib/format'
 
-const [now, setNow] = createSignal(Date.now())
-setInterval(() => setNow(Date.now()), 1000)
+function useLiveClock(active: () => boolean) {
+  const [now, setNow] = createSignal(Date.now())
+  createEffect(() => {
+    if (!active()) return
+    setNow(Date.now())
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    onCleanup(() => clearInterval(id))
+  })
+  return now
+}
 
 function lastStep(it: ItemView | undefined, cwd?: string): string {
   if (!it) return ''
@@ -24,12 +32,13 @@ function lastStep(it: ItemView | undefined, cwd?: string): string {
     return [s.verb, s.detail].filter(Boolean).join(' ')
   }
   if (b.type === 'agent_message') return (it.live ?? b.text).trim().split('\n')[0]
+  if (b.type === 'task_result') return b.text.trim().split('\n')[0]
   if (b.type === 'reasoning') return 'Thinking'
   return ''
 }
 
-function stateLine(a: AgentInfo): string {
-  const took = a.started ? duration((a.ended ?? now()) - a.started) : ''
+function stateLine(a: AgentInfo, now: number): string {
+  const took = a.started ? duration((a.ended ?? now) - a.started) : ''
   switch (a.state) {
     case 'running':
       return took ? `Working ${took}` : 'Working'
@@ -59,6 +68,10 @@ function Face(props: { agent: boolean; size?: 'sm' | 'lg' }) {
 }
 
 export function AgentRow(props: { thread?: string; item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
+  const base = createMemo(() =>
+    agentInfo(props.item, props.kids?.get(props.item.id) ?? [], props.thread ? state.live[props.thread]?.agents : undefined, Date.now()),
+  )
+  const now = useLiveClock(() => base().state === 'running')
   const a = createMemo(() =>
     agentInfo(props.item, props.kids?.get(props.item.id) ?? [], props.thread ? state.live[props.thread]?.agents : undefined, now()),
   )
@@ -82,7 +95,7 @@ export function AgentRow(props: { thread?: string; item: ItemView; kids?: Map<st
             <span class="size-1.5 shrink-0 translate-y-[-1px] self-center rounded-full bg-accent pulse" />
           </Show>
           <span class="num shrink-0" classList={{ 'text-bad': a().state === 'failed' }}>
-            {stateLine(a())}
+            {stateLine(a(), now())}
           </span>
           <Show when={detail()}>
             <span class="min-w-0 truncate text-faint">· {detail()}</span>
@@ -97,6 +110,10 @@ export function AgentRow(props: { thread?: string; item: ItemView; kids?: Map<st
 export function AgentPanel(props: { thread: string; tool: string; cwd?: string }) {
   const found = createMemo(() => findCall(state.views[props.thread], props.tool))
   const kids = createMemo(() => (found() ? kidsOf(found()!.turn) : new Map<string, ItemView[]>()))
+  const base = createMemo(() =>
+    found() ? agentInfo(found()!.item, kids().get(props.tool) ?? [], state.live[props.thread]?.agents, Date.now()) : undefined,
+  )
+  const now = useLiveClock(() => base()?.state === 'running')
   const a = createMemo(() =>
     found() ? agentInfo(found()!.item, kids().get(props.tool) ?? [], state.live[props.thread]?.agents, now()) : undefined,
   )
@@ -132,7 +149,7 @@ export function AgentPanel(props: { thread: string; tool: string; cwd?: string }
                   <span class="size-1.5 shrink-0 rounded-full bg-accent pulse" />
                 </Show>
                 <span class="num" classList={{ 'text-bad': info().state === 'failed' }}>
-                  {[info().kind, info().background ? 'in the background' : '', stateLine(info())].filter(Boolean).join(' · ')}
+                  {[info().kind, info().background ? 'in the background' : '', stateLine(info(), now())].filter(Boolean).join(' · ')}
                 </span>
               </div>
             </div>
@@ -222,6 +239,7 @@ export function RunningTasks(props: { thread: string; cwd?: string }) {
 function CommandRow(props: { item: ItemView; cwd?: string }) {
   const b = () => props.item.body as Extract<ItemView['body'], { type: 'tool_call' }>
   const s = () => toolSummary(b().name, b().input, undefined, props.cwd)
+  const now = useLiveClock(() => true)
   return (
     <div class="flex items-start gap-2.5">
       <Face agent={false} />

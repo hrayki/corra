@@ -5,6 +5,8 @@ import { NewThread } from './ui/NewThread'
 import { Settings } from './ui/Settings'
 import { Gate } from './ui/Gate'
 import { ContextMenuHost, PictureViewer } from './ui/bits'
+import { RenameDialog, ToastHost } from './ui/Overlays'
+import { CommandPalette } from './ui/CommandPalette'
 import { NewProject } from './ui/NewProject'
 import { ImportSession } from './ui/ImportSession'
 import { ProjectPage } from './ui/ProjectPage'
@@ -56,6 +58,9 @@ function Main() {
     <div class="flex h-full">
       <PictureViewer />
       <ContextMenuHost />
+      <ToastHost />
+      <RenameDialog />
+      <CommandPalette />
       <Show when={sidebarCollapsed()}>
         <div class="hidden h-full w-12 shrink-0 flex-col items-center border-r border-line bg-panel md:flex">
           <div class="flex flex-col items-center gap-1 py-2.5">
@@ -120,7 +125,7 @@ function Main() {
       </div>
       <main class="flex min-w-0 flex-1 flex-col" classList={{ 'max-md:hidden': r().kind === 'home' }}>
         <Show when={offline()}>
-          <div class="border-b border-line bg-warn/10 px-5 py-1.5 text-[12.5px]">Reconnecting. You can read saved threads meanwhile.</div>
+          <div class="border-b border-line bg-warn/10 px-5 py-1.5 text-[12.5px]">Reconnecting to the hub…</div>
         </Show>
         <Switch>
           <Match when={r().kind === 'thread' && (r() as { id: string }).id} keyed>
