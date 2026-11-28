@@ -1400,6 +1400,7 @@ fn on_user(ctx: &SessionCtx, st: &mut State, msg: &Value) {
                             text,
                             is_error,
                             images,
+                            deferred: None,
                         }),
                         status,
                     },

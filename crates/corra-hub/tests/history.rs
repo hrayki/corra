@@ -176,3 +176,134 @@ async fn a_thread_an_agent_starts_knows_which_thread_started_it() {
     );
     assert_eq!(hub.db.thread(parent.id).unwrap().unwrap().started_by, None);
 }
+
+#[tokio::test]
+async fn slim_events_defers_large_tool_outputs_but_keeps_summary_and_agent_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let p = hub
+        .create_project(NewProject {
+            name: "slim".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let t = Thread {
+        id: new_id(),
+        project: p.id,
+        title: "slim".into(),
+        agent: AgentKind::Claude,
+        machine: None,
+        session_id: None,
+        cwd: "~".into(),
+        settings: AgentSettings::default(),
+        status: ThreadStatus::Idle,
+        last_seq: 0,
+        created_at: 0,
+        updated_at: 0,
+        pinned_at: None,
+        settled_at: None,
+        hidden_at: None,
+        started_by: None,
+    };
+    hub.db.insert_thread(&t).unwrap();
+    let big_text = "x".repeat(4000);
+    let big_content = "y".repeat(4000);
+    hub.append(
+        t.id,
+        None,
+        10,
+        Event::ItemCompleted {
+            turn: "t1".into(),
+            item: Item {
+                id: "i-read".into(),
+                parent: None,
+                body: ItemBody::ToolCall {
+                    name: "Write".into(),
+                    input: json!({ "file_path": "src/main.rs", "content": big_content }),
+                    output: Some(ToolOutput {
+                        text: big_text.clone(),
+                        is_error: false,
+                        images: vec![],
+                        deferred: None,
+                    }),
+                    status: ToolStatus::Completed,
+                },
+            },
+        },
+    )
+    .unwrap();
+    hub.append(
+        t.id,
+        None,
+        11,
+        Event::ItemCompleted {
+            turn: "t1".into(),
+            item: Item {
+                id: "i-agent".into(),
+                parent: None,
+                body: ItemBody::ToolCall {
+                    name: "Agent".into(),
+                    input: json!({ "prompt": "check" }),
+                    output: Some(ToolOutput {
+                        text: big_text.clone(),
+                        is_error: false,
+                        images: vec![],
+                        deferred: None,
+                    }),
+                    status: ToolStatus::Completed,
+                },
+            },
+        },
+    )
+    .unwrap();
+
+    let mut events = hub.db.events_after(t.id, 0, 10).unwrap();
+    corra_hub::hub::threads::slim_events(&mut events);
+
+    match &events[0].event {
+        Event::ItemCompleted { item, .. } => match &item.body {
+            ItemBody::ToolCall { input, output, .. } => {
+                assert_eq!(input["file_path"], "src/main.rs");
+                assert!(input.get("content").is_none());
+                let out = output.as_ref().unwrap();
+                assert!(out.text.is_empty());
+                assert_eq!(out.deferred, Some(true));
+            }
+            other => panic!("unexpected body {other:?}"),
+        },
+        other => panic!("unexpected event {other:?}"),
+    }
+
+    match &events[1].event {
+        Event::ItemCompleted { item, .. } => match &item.body {
+            ItemBody::ToolCall { output, .. } => {
+                let out = output.as_ref().unwrap();
+                assert_eq!(out.text.len(), 4000);
+                assert_eq!(out.deferred, None);
+            }
+            other => panic!("unexpected body {other:?}"),
+        },
+        other => panic!("unexpected event {other:?}"),
+    }
+
+    let detail = corra_hub::ws::exec_call(
+        &hub,
+        corra_proto::app::AppCall::EventDetail {
+            thread: t.id,
+            seq: events[0].seq,
+        },
+    )
+    .await
+    .unwrap();
+    let full: StoredEvent = serde_json::from_value(detail).unwrap();
+    match full.event {
+        Event::ItemCompleted { item, .. } => match item.body {
+            ItemBody::ToolCall { input, output, .. } => {
+                assert_eq!(input["content"].as_str().unwrap().len(), 4000);
+                assert_eq!(output.unwrap().text.len(), 4000);
+            }
+            other => panic!("unexpected body {other:?}"),
+        },
+        other => panic!("unexpected event {other:?}"),
+    }
+}

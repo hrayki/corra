@@ -1429,6 +1429,7 @@ fn finish_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Op
                             text: t.output,
                             is_error: false,
                             images: vec![],
+                            deferred: None,
                         }),
                         status: if outcome == TurnOutcome::Completed {
                             ToolStatus::Completed
@@ -2064,6 +2065,7 @@ fn complete_tool(ctx: &SessionCtx, st: &mut State, turn: &str, id: &str, failed:
                         text: t.output,
                         is_error: failed,
                         images: vec![],
+                        deferred: None,
                     }),
                     status: if failed {
                         ToolStatus::Failed

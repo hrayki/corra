@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { apply, buildView, emptyView, folds, type Entry } from '../src/lib/timeline.ts'
+import { apply, buildView, emptyView, folds, patchItemDetail, type Entry } from '../src/lib/timeline.ts'
 import type { StoredEvent } from '../src/proto/StoredEvent.ts'
 
 let seq = 0
@@ -174,4 +174,45 @@ test('a message the agent never read is marked on its own bubble, whether it was
   assert.ok(mid && mid.type === 'item' && mid.item.unread)
   assert.ok(!t1.unread)
   assert.ok(t3.unread)
+})
+
+test('deferred tool calls keep their completed seq and patch full detail cleanly', () => {
+  const start = ev(1000, { kind: 'turn_started', turn: 't1', input: [{ type: 'text', text: 'read' }], settings: {} })
+  const toolStart = ev(1100, {
+    kind: 'item_started',
+    turn: 't1',
+    item: { id: 'tool-1', type: 'tool_call', name: 'Read', input: { file_path: 'a.rs' }, status: 'running' },
+  })
+  const toolDone = ev(1200, {
+    kind: 'item_completed',
+    turn: 't1',
+    item: {
+      id: 'tool-1',
+      type: 'tool_call',
+      name: 'Read',
+      input: { file_path: 'a.rs' },
+      output: { text: '', is_error: false, images: [], deferred: true },
+      status: 'completed',
+    },
+  })
+  const v = buildView([start, toolStart, toolDone], false)
+  const entry = v.turns[0].entries[0]
+  assert.equal(entry.type, 'item')
+  assert.equal(entry.item.seq, toolDone.seq)
+  assert.equal(entry.item.body.type, 'tool_call')
+  assert.equal(entry.item.body.output?.deferred, true)
+
+  const ok = patchItemDetail(v, 'tool-1', {
+    type: 'tool_call',
+    name: 'Read',
+    input: { file_path: 'a.rs' },
+    output: { text: 'full file body', is_error: false, images: [] },
+    status: 'completed',
+  })
+  assert.equal(ok, true)
+  const updated = v.turns[0].entries[0]
+  assert.equal(updated.type, 'item')
+  assert.equal(updated.item.body.type, 'tool_call')
+  assert.equal(updated.item.body.output?.text, 'full file body')
+  assert.equal(updated.item.body.output?.deferred, undefined)
 })

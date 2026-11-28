@@ -12,7 +12,7 @@ import GitPullRequest from 'lucide-solid/icons/git-pull-request'
 import ArrowDown from 'lucide-solid/icons/arrow-down'
 import { call, closeThread, loadEarlier, openThread, restoreDraft, state } from '../lib/store'
 import { panel, setPanel } from '../lib/panel'
-import { tokens } from '../lib/format'
+import { dayKey, dayLabel, tokens } from '../lib/format'
 import { Composer } from './Composer'
 import { UsageMeter } from './UsagePopover'
 import { EntryView, TurnBlock } from './Timeline'
@@ -382,6 +382,18 @@ export function ThreadPane(props: { id: string }) {
                   </button>
                 </div>
               </Show>
+              <Show when={!view() && state.loading[props.id]}>
+                <div class="space-y-6 py-4" aria-label="Loading thread">
+                  <div class="flex justify-end">
+                    <div class="h-10 w-56 rounded-2xl rounded-br-md bg-panel pulse" />
+                  </div>
+                  <div class="space-y-2.5">
+                    <div class="h-3.5 w-32 rounded bg-ink/[0.06] pulse" />
+                    <div class="h-4 w-5/6 rounded bg-ink/[0.05] pulse" />
+                    <div class="h-4 w-2/3 rounded bg-ink/[0.05] pulse" />
+                  </div>
+                </div>
+              </Show>
               <For each={view()?.preface ?? []}>
                 {(e) => (
                   <div class="pb-4">
@@ -390,20 +402,36 @@ export function ThreadPane(props: { id: string }) {
                 )}
               </For>
               <For each={view()?.turns ?? []}>
-                {(t, i) => (
-                  <>
-                    <Show when={!repeatsError(view()!.turns, i())}>
-                      <TurnBlock thread={props.id} turn={t} last={i() === (view()?.turns.length ?? 0) - 1} cwd={cwd()} />
-                    </Show>
-                    <For each={t.after}>
-                      {(e) => (
-                        <div class="pb-4">
-                          <EntryView thread={props.id} entry={e} />
+                {(t, i) => {
+                  const showDay = () => {
+                    if (!t.started) return false
+                    const turns = view()?.turns ?? []
+                    if (i() === 0) return true
+                    const prev = turns[i() - 1]
+                    return !prev?.started || dayKey(prev.started) !== dayKey(t.started)
+                  }
+                  return (
+                    <>
+                      <Show when={showDay()}>
+                        <div class="mb-5 flex items-center gap-3 text-[11.5px] font-medium text-faint">
+                          <span class="h-px flex-1 bg-line/70" />
+                          <span>{dayLabel(t.started)}</span>
+                          <span class="h-px flex-1 bg-line/70" />
                         </div>
-                      )}
-                    </For>
-                  </>
-                )}
+                      </Show>
+                      <Show when={!repeatsError(view()!.turns, i())}>
+                        <TurnBlock thread={props.id} turn={t} last={i() === (view()?.turns.length ?? 0) - 1} cwd={cwd()} />
+                      </Show>
+                      <For each={t.after}>
+                        {(e) => (
+                          <div class="pb-4">
+                            <EntryView thread={props.id} entry={e} />
+                          </div>
+                        )}
+                      </For>
+                    </>
+                  )
+                }}
               </For>
               <For each={(state.pending[props.id] ?? []).filter((p) => !p.queued)}>
                 {(p) => <Outgoing parts={p.parts} note="Sending" />}

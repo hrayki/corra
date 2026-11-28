@@ -558,40 +558,51 @@ async fn handle_app_call(
             if subs.lock().unwrap().insert(thread) {
                 hub.watch(thread, true);
             }
-            let mut after = after_seq;
-            let last = hub.db.thread(thread)?.map(|t| t.last_seq).unwrap_or(0);
-            if after > last {
-                send_json(tx, &HubToApp::Reset { thread });
-                after = 0;
-            }
-            if let Some(turns) = tail.filter(|n| *n > 0) {
-                let h = hub.history_before(thread, i64::MAX, turns as i64)?;
-                if h.earlier && after < h.from_seq - 1 {
-                    after = h.events.last().map(|e| e.seq).unwrap_or(after);
-                    send_json(
-                        tx,
-                        &HubToApp::Window {
-                            thread,
-                            events: h.events,
-                            from_seq: h.from_seq,
-                            earlier: true,
-                        },
-                    );
+            let hub_bg = hub.clone();
+            let tx_bg = tx.clone();
+            let after = tokio::task::spawn_blocking(move || -> Result<i64> {
+                let mut after = after_seq;
+                let last = hub_bg.db.thread(thread)?.map(|t| t.last_seq).unwrap_or(0);
+                if after > last {
+                    send_json(&tx_bg, &HubToApp::Reset { thread });
+                    after = 0;
                 }
-            }
-            loop {
-                let events = hub.db.events_after(thread, after, 500)?;
-                let n = events.len();
-                if let Some(last) = events.last() {
-                    after = last.seq;
+                if let Some(turns) = tail.filter(|n| *n > 0) {
+                    let (from, earlier) = hub_bg.tail_start(thread, turns as i64)?;
+                    if after == 0 || (earlier && after < from - 1) {
+                        let mut h = hub_bg.history_before(thread, i64::MAX, turns as i64)?;
+                        crate::hub::threads::slim_events(&mut h.events);
+                        after = h.events.last().map(|e| e.seq).unwrap_or(after);
+                        send_json(
+                            &tx_bg,
+                            &HubToApp::Window {
+                                thread,
+                                events: h.events,
+                                from_seq: h.from_seq,
+                                earlier: h.earlier,
+                            },
+                        );
+                    }
                 }
-                if n > 0 {
-                    send_json(tx, &HubToApp::Events { thread, events });
+                if after < last {
+                    loop {
+                        let mut events = hub_bg.db.events_after(thread, after, 500)?;
+                        let n = events.len();
+                        if let Some(last_ev) = events.last() {
+                            after = last_ev.seq;
+                        }
+                        if n > 0 {
+                            crate::hub::threads::slim_events(&mut events);
+                            send_json(&tx_bg, &HubToApp::Events { thread, events });
+                        }
+                        if n < 500 {
+                            break;
+                        }
+                    }
                 }
-                if n < 500 {
-                    break;
-                }
-            }
+                Ok(after)
+            })
+            .await??;
             if let Some(status) = hub.live_status(thread) {
                 send_json(tx, &HubToApp::Status { thread, status });
             }
@@ -646,12 +657,23 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             before_seq,
             to_seq,
         } => {
-            let turns = match to_seq {
-                Some(to) => EARLIER_TURNS.max(hub.turns_down_to(thread, before_seq, to)?),
-                None => EARLIER_TURNS,
-            };
-            let h = hub.history_before(thread, before_seq, turns)?;
+            let hub = hub.clone();
+            let h = tokio::task::spawn_blocking(move || -> Result<_> {
+                let turns = match to_seq {
+                    Some(to) => EARLIER_TURNS.max(hub.turns_down_to(thread, before_seq, to)?),
+                    None => EARLIER_TURNS,
+                };
+                let mut h = hub.history_before(thread, before_seq, turns)?;
+                crate::hub::threads::slim_events(&mut h.events);
+                Ok(h)
+            })
+            .await??;
             json!({ "events": h.events, "from_seq": h.from_seq, "earlier": h.earlier })
+        }
+        AppCall::EventDetail { thread, seq } => {
+            let hub = hub.clone();
+            let ev = tokio::task::spawn_blocking(move || hub.db.event_at(thread, seq)).await??;
+            serde_json::to_value(ev.ok_or_else(|| anyhow!("no such event"))?)?
         }
         AppCall::Find { thread, query } => {
             let hub = hub.clone();

@@ -32,6 +32,14 @@ impl Hub {
         })
     }
 
+    pub fn tail_start(&self, thread: ThreadId, turns: i64) -> Result<(i64, bool)> {
+        let starts = self.db.turn_starts_before(thread, i64::MAX, turns + 1)?;
+        Ok(match starts.get(turns as usize) {
+            Some(_) => (starts[turns as usize - 1], true),
+            None => (0, false),
+        })
+    }
+
     pub fn follower(&self, thread: ThreadId) -> Option<ThreadId> {
         self.db.follower(thread).ok().flatten()
     }
@@ -984,4 +992,122 @@ fn turn_before(events: &[StoredEvent], turn: &str) -> Option<(i64, Option<String
         _ => None,
     });
     Some((start - 1, prev.flatten()))
+}
+
+const SLIM_OUTPUT_BYTES: usize = 1024;
+const SLIM_INPUT_BYTES: usize = 2048;
+const SLIM_FIELD_BYTES: usize = 512;
+const SUMMARY_INPUT_KEYS: &[&str] = &[
+    "file_path",
+    "path",
+    "Path",
+    "AbsolutePath",
+    "TargetFile",
+    "command",
+    "CommandLine",
+    "pattern",
+    "query",
+    "Query",
+    "description",
+    "title",
+    "url",
+    "Url",
+    "glob",
+    "name",
+    "subagent_type",
+];
+
+fn keep_tool_verbatim(name: &str) -> bool {
+    matches!(name, "Agent" | "Task" | "threads.start")
+        || name.ends_with("__threads_start")
+        || name.ends_with(".threads.start")
+}
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn slim_tool_input(input: &mut serde_json::Value) -> bool {
+    let serialized_len = serde_json::to_string(input).map(|s| s.len()).unwrap_or(0);
+    if serialized_len <= SLIM_INPUT_BYTES {
+        return false;
+    }
+    match input {
+        serde_json::Value::Object(map) => {
+            let mut slim = serde_json::Map::new();
+            for &key in SUMMARY_INPUT_KEYS {
+                if let Some(v) = map.get(key) {
+                    let kept = match v {
+                        serde_json::Value::String(s) => {
+                            serde_json::Value::String(truncate_utf8(s, SLIM_FIELD_BYTES))
+                        }
+                        other => other.clone(),
+                    };
+                    slim.insert(key.to_string(), kept);
+                }
+            }
+            *map = slim;
+            true
+        }
+        _ => {
+            *input = serde_json::Value::Null;
+            true
+        }
+    }
+}
+
+pub fn slim_events(events: &mut [StoredEvent]) {
+    for ev in events {
+        match &mut ev.event {
+            Event::ItemStarted { item, .. } => {
+                if let ItemBody::ToolCall { name, input, .. } = &mut item.body
+                    && !keep_tool_verbatim(name)
+                {
+                    slim_tool_input(input);
+                }
+            }
+            Event::ItemCompleted { item, .. } => {
+                if let ItemBody::ToolCall {
+                    name,
+                    input,
+                    output,
+                    ..
+                } = &mut item.body
+                    && !keep_tool_verbatim(name)
+                {
+                    let trimmed_input = slim_tool_input(input);
+                    let heavy_output = output
+                        .as_ref()
+                        .is_some_and(|o| o.text.len() > SLIM_OUTPUT_BYTES || !o.images.is_empty());
+                    if trimmed_input || heavy_output {
+                        match output {
+                            Some(out) => {
+                                if heavy_output {
+                                    out.text.clear();
+                                    out.images.clear();
+                                }
+                                out.deferred = Some(true);
+                            }
+                            None => {
+                                *output = Some(ToolOutput {
+                                    text: String::new(),
+                                    is_error: false,
+                                    images: vec![],
+                                    deferred: Some(true),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

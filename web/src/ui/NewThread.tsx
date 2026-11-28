@@ -3,7 +3,7 @@ import ArrowLeft from 'lucide-solid/icons/arrow-left'
 import Laptop from 'lucide-solid/icons/laptop'
 import Cloud from 'lucide-solid/icons/cloud'
 import ChevronDown from 'lucide-solid/icons/chevron-down'
-import { call, state } from '../lib/store'
+import { addPending, call, state } from '../lib/store'
 import { InputBox, SendButton, SettingsPickers, useInput } from './Composer'
 import { Menu, type MenuItem } from './bits'
 import { paired, providerLabel, providerOf } from '../lib/catalog'
@@ -83,6 +83,7 @@ export function NewThread(props: { project?: string }) {
         settings: settings(),
         input: parts,
       })
+      addPending(thread.id, parts, false)
       input.clear()
       location.hash = `#/t/${thread.id}`
     } catch (e) {

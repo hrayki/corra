@@ -4,7 +4,8 @@ import type { InputPart } from '../proto/InputPart'
 import { createStore, produce } from 'solid-js/store'
 import { Conn, type ConnState } from './conn'
 import { checkBuild } from './version'
-import { apply, applyDelta, buildView, emptyView, type ThreadView } from './timeline'
+import { apply, applyDelta, buildView, emptyView, patchItemDetail, type ThreadView } from './timeline'
+import type { ItemBody } from '../proto/ItemBody'
 import type { Project } from '../proto/Project'
 import type { Machine } from '../proto/Machine'
 import type { Thread } from '../proto/Thread'
@@ -45,6 +46,7 @@ type State = {
   machines: Record<string, Machine>
   threads: Record<string, Thread>
   views: Record<string, ThreadView>
+  loading: Record<string, boolean>
   earlier: Record<string, number | null>
   live: Record<string, LiveStatus>
   queues: Record<string, Queued[]>
@@ -65,6 +67,7 @@ const [state, setState] = createStore<State>({
   machines: {},
   threads: {},
   views: {},
+  loading: {},
   earlier: {},
   live: {},
   queues: {},
@@ -194,13 +197,21 @@ function resetThread(thread: string) {
 
 function showHistory(thread: string, events: StoredEvent[], from: number | null) {
   raw.set(thread, events)
-  setState('views', thread, buildView(events, from !== null))
-  setState('earlier', thread, from)
+  const hadTurn = events.some((e) => e.kind === 'turn_started' || (e.kind === 'item_completed' && e.item.type === 'user_message'))
+  batch(() => {
+    setState('views', thread, buildView(events, from !== null))
+    setState('earlier', thread, from)
+    setState('loading', thread, false)
+    if (hadTurn && state.pending[thread]?.length) setState('pending', thread, (l) => (l ?? []).filter((p) => p.queued))
+  })
 }
 
 function subscribe(id: string) {
   const had = raw.has(id)
-  if (!had) catching.set(id, [])
+  if (!had) {
+    catching.set(id, [])
+    setState('loading', id, true)
+  }
   void conn
     ?.call({ op: 'subscribe', thread: id, after_seq: raw.get(id)?.at(-1)?.seq ?? 0, tail: TAIL })
     .then(() => {
@@ -215,6 +226,36 @@ function subscribe(id: string) {
       else if (!raw.has(id)) showHistory(id, [], null)
     })
     .catch(() => catching.delete(id))
+    .finally(() => setState('loading', id, false))
+}
+
+const fetchingDetail = new Map<string, Promise<void>>()
+
+export function loadItemDetail(thread: string, itemId: string, seq: number): Promise<void> {
+  const key = `${thread}:${seq}`
+  const existing = fetchingDetail.get(key)
+  if (existing) return existing
+  const p = (async () => {
+    const full = await call<StoredEvent>({ op: 'event_detail', thread, seq })
+    if (full.kind !== 'item_completed' && full.kind !== 'item_started') return
+    const list = raw.get(thread)
+    if (list) {
+      const idx = list.findIndex((e) => e.seq === seq)
+      if (idx >= 0) list[idx] = full
+    }
+    const { id: _id, parent: _parent, ...rest } = full.item
+    const body = rest as ItemBody
+    if (state.views[thread])
+      setState(
+        'views',
+        thread,
+        produce((v) => {
+          patchItemDetail(v, itemId, body)
+        }),
+      )
+  })().finally(() => fetchingDetail.delete(key))
+  fetchingDetail.set(key, p)
+  return p
 }
 
 const fetching = new Map<string, Promise<void>>()
