@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use corra_proto::*;
 use serde_json::{Value, json};
 
-use crate::hub::HubRef;
+use crate::hub::{Hub, HubRef};
 
 const ASK_UNLESS_MAIN_ALLOWED: &[&str] = &["github.pr.merge"];
 
@@ -321,7 +321,7 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
     }
 }
 
-pub fn info(hub: &HubRef) -> Vec<ToolInfo> {
+pub fn info(hub: &Hub) -> Vec<ToolInfo> {
     let has = |k: &str| hub.secrets.get(k).ok().flatten().is_some();
     let tool = |name: &str, label: &str, about: &str, needs: &[&str], host: Option<&str>| {
         let missing: Vec<&str> = needs.iter().copied().filter(|k| !has(k)).collect();

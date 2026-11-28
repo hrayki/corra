@@ -408,6 +408,72 @@ async fn checks_summary(gh: &Gh<'_>, r: &str) -> Result<Value> {
     Ok(json!({ "total": runs.len(), "failing": failing, "pending": pending, "runs": runs }))
 }
 
+const PR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub async fn branch_pr(
+    hub: &HubRef,
+    project: &Project,
+    repo: Option<&str>,
+    branch: &str,
+) -> Result<Value> {
+    let branch = branch.trim();
+    if branch.is_empty() || matches!(branch, "HEAD" | "main" | "master") {
+        return Ok(Value::Null);
+    }
+    let input = match repo.filter(|r| !r.is_empty() && *r != ".") {
+        Some(r) => json!({ "repo": r }),
+        None => json!({}),
+    };
+    let Ok(gh) = Gh::new(hub, project, &input) else {
+        return Ok(Value::Null);
+    };
+    let cache_key = (gh.repo.clone(), branch.to_string());
+    if let Some((at, cached)) = hub.pr_cache.lock().unwrap().get(&cache_key)
+        && at.elapsed() < PR_CACHE_TTL
+    {
+        return Ok(cached.clone());
+    }
+    let Some((owner, _)) = gh.repo.split_once('/') else {
+        return Ok(Value::Null);
+    };
+    let query = format!(
+        "/pulls?state=open&head={}:{}&per_page=1",
+        path_part(owner),
+        path_part(branch)
+    );
+    let result = match gh.get(&query).await {
+        Ok(v) => {
+            if let Some(p) = v.as_array().and_then(|a| a.first()) {
+                let sha = p["head"]["sha"].as_str().unwrap_or_default();
+                let checks = if sha.is_empty() {
+                    Value::Null
+                } else {
+                    checks_summary(&gh, sha).await.unwrap_or(Value::Null)
+                };
+                json!({
+                    "repo": gh.repo,
+                    "number": p["number"],
+                    "title": p["title"],
+                    "url": p["html_url"],
+                    "draft": p["draft"],
+                    "state": p["state"],
+                    "head": p["head"]["ref"],
+                    "base": p["base"]["ref"],
+                    "checks": checks,
+                })
+            } else {
+                Value::Null
+            }
+        }
+        Err(_) => Value::Null,
+    };
+    hub.pr_cache
+        .lock()
+        .unwrap()
+        .insert(cache_key, (std::time::Instant::now(), result.clone()));
+    Ok(result)
+}
+
 pub async fn list_repos(hub: &HubRef) -> Result<Value> {
     let token = hub
         .secrets

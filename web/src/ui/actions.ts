@@ -3,6 +3,7 @@ import type { Thread } from '../proto/Thread'
 import { markSeen } from '../lib/seen'
 import type { MenuItem } from './bits'
 import { paired, providerLabel, providerOf } from '../lib/catalog'
+import { openRename } from '../lib/toast'
 
 export function threadActions(t: Thread, onError: (message: string) => void): MenuItem[] {
   const run = (p: Promise<unknown>) => void p.catch((e) => onError((e as Error).message))
@@ -16,10 +17,7 @@ export function threadActions(t: Thread, onError: (message: string) => void): Me
     },
     {
       label: 'Rename',
-      onSelect: () => {
-        const title = prompt('Thread title', t.title)
-        if (title?.trim()) set({ title: title.trim() })
-      },
+      onSelect: () => openRename(t),
     },
     { label: 'Mark as unread', disabled: t.status !== 'idle', onSelect: () => markSeen(t.id, t.last_seq - 1) },
     {

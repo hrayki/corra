@@ -31,6 +31,19 @@ test('a background agent runs until Claude Code reports how it ended, and that e
   assert.deepEqual([done.state, done.result], ['done', 'No errors in the last hour.'])
 })
 
+test('structured task_result sets background agent state and summary without regex scraping', () => {
+  const launched = call({ description: 'Run suite', run_in_background: true }, 'completed')
+  const structured = {
+    id: 'task:b',
+    parent: 'toolu_1',
+    body: { type: 'task_result', status: 'failed', summary: '2 tests failed', text: 'Background agent failed: 2 tests failed' },
+    done: true,
+    at: 8000,
+  } as unknown as ItemView
+  const info = agentInfo(launched, [structured], [], 60_000)
+  assert.deepEqual([info.state, info.result, info.ended], ['failed', '2 tests failed', 8000])
+})
+
 test('a background agent whose session went away no longer shows as working', () => {
   const launched = call({ description: 'Watch logs', run_in_background: true }, 'completed', 'Async agent launched successfully.')
   assert.equal(agentInfo(launched, [], [], 60_000).state, 'stopped')

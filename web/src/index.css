@@ -142,10 +142,12 @@ input:focus-visible {
 .md {
   overflow-wrap: anywhere;
 }
-.md > :first-child {
+.md > :first-child,
+.md > div:first-child > :first-child {
   margin-top: 0;
 }
-.md > :last-child {
+.md > :last-child,
+.md > div:last-child > :last-child {
   margin-bottom: 0;
 }
 .md p,

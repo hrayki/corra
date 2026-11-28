@@ -11,11 +11,11 @@ import { call, state } from '../lib/store'
 import type { Project } from '../proto/Project'
 import type { SetupLog } from '../proto/SetupLog'
 import { ago } from '../lib/format'
-import { kindOf, makers, paired, providerOf, sizeLabel, sizesFor } from '../lib/catalog'
+import { kindOf, providerOf, sizeLabel, sizesFor } from '../lib/catalog'
 import { RepoPicker } from './RepoPicker'
 import { Btn, Menu } from './bits'
+import { MainAndTagsPicker, PlaceAndKindPicker, SetupPicker, formPill, projectPlaces, type SetupRow } from './ProjectForm'
 
-type SetupRow = { name: string; repos: string[]; env: string[] }
 type RuntimeInfo = {
   stage?: string
   setup?: SetupLog
@@ -23,13 +23,6 @@ type RuntimeInfo = {
   manager_env: string[]
   tools: string[]
 }
-
-const MAIN = [
-  { value: false, label: 'Wait for you', hint: 'Pushing to the default branch or a tag, and merging, wait for your yes.' },
-  { value: true, label: 'On its own', hint: 'It pushes to the default branch and tags, and merges, on its own.' },
-]
-
-const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
 export function ProjectPage(props: { id: string }) {
   const p = () => state.projects[props.id] as Project | undefined
@@ -92,12 +85,7 @@ export function ProjectPage(props: { id: string }) {
     if (m.last_seen) parts.push(`seen ${ago(m.last_seen)} ago`)
     return parts.join(' · ')
   }
-  const places = createMemo(() => {
-    const out = makers().map((x) => ({ key: x.name, label: x.label }))
-    for (const m of Object.values(state.machines))
-      if (paired(m.provider) && m.status !== 'destroyed') out.push({ key: `machine:${m.id}`, label: m.name })
-    return out
-  })
+  const places = createMemo(() => projectPlaces())
   const makes = () => !!providerOf(p()?.provider)?.creates_machines
   const placeKey = () => (makes() ? p()?.provider : `machine:${p()?.default_machine}`)
   const kinds = () => providerOf(p()?.provider)?.kinds ?? []
@@ -170,43 +158,25 @@ export function ProjectPage(props: { id: string }) {
                 It sleeps after 15 idle minutes, with its disk kept, and wakes with the next message.
               </p>
               <div class="mt-2 flex flex-wrap items-center gap-2">
-                <Show when={places().length}>
-                  <Menu
-                    label="Runs on"
-                    class={pill}
-                    items={places().map((x) => ({
-                      label: x.label,
-                      checked: x.key === placeKey(),
-                      onSelect: () =>
-                        void update(
-                          x.key.startsWith('machine:')
-                            ? { provider: state.machines[x.key.slice(8)]?.provider ?? 'existing', default_machine: x.key.slice(8) }
-                            : { provider: x.key },
-                        ),
-                    }))}
-                  >
-                    <span>{places().find((x) => x.key === placeKey())?.label ?? p()!.provider}</span>
-                    <ChevronDown size={13} class="text-faint" />
-                  </Menu>
-                </Show>
-                <Show when={makes() && kinds().length > 1}>
-                  <Menu
-                    label="Kind"
-                    class={pill}
-                    items={kinds().map((k) => ({
-                      label: k.label,
-                      checked: k.name === kind()?.name,
-                      onSelect: () => void update({ kind: k.name }),
-                    }))}
-                  >
-                    <span>{kind()?.label}</span>
-                    <ChevronDown size={13} class="text-faint" />
-                  </Menu>
-                </Show>
+                <PlaceAndKindPicker
+                  places={places()}
+                  selectedPlace={placeKey()}
+                  fallbackLabel={p()!.provider}
+                  onSelectPlace={(key) =>
+                    void update(
+                      key.startsWith('machine:')
+                        ? { provider: state.machines[key.slice(8)]?.provider ?? 'existing', default_machine: key.slice(8) }
+                        : { provider: key },
+                    )
+                  }
+                  kinds={makes() ? kinds() : []}
+                  selectedKind={kind()}
+                  onSelectKind={(k) => void update({ kind: k })}
+                />
                 <Show when={makes()}>
                   <Menu
                     label="Size"
-                    class={pill}
+                    class={formPill}
                     items={sizesFor(kind()).map((s) => ({
                       label: sizeLabel(s),
                       checked: s === p()!.size,
@@ -275,21 +245,7 @@ export function ProjectPage(props: { id: string }) {
             <span class="pt-1.5 text-[13px] text-mute">Setup</span>
             <div>
               <div class="flex flex-wrap items-center gap-2">
-                <Menu
-                  label="Setup"
-                  class={pill}
-                  items={[
-                    { label: 'None', checked: !p()!.setup, onSelect: () => void update({ setup: '' }) },
-                    ...(setups() ?? []).map((s) => ({
-                      label: s.name,
-                      checked: s.name === p()!.setup,
-                      onSelect: () => void update({ setup: s.name }),
-                    })),
-                  ]}
-                >
-                  <span>{p()!.setup ?? 'None'}</span>
-                  <ChevronDown size={13} class="text-faint" />
-                </Menu>
+                <SetupPicker setups={setups() ?? []} value={p()!.setup} onChange={(name) => void update({ setup: name ?? '' })} />
                 <Btn
                   kind="ghost"
                   disabled={busy() || !!stage()}
@@ -371,29 +327,11 @@ export function ProjectPage(props: { id: string }) {
                   </Menu>
                 </Show>
               </div>
-              <p class="mt-1 text-[12.5px] text-faint">Values are set once, in Settings → Env vars.</p>
+              <p class="mt-1 text-[12.5px] text-faint">Values are set once, in Settings → Secrets & Setup.</p>
             </div>
 
             <span class="pt-1.5 text-[13px] text-mute">Main and tags</span>
-            <div>
-              <div class="inline-flex flex-wrap self-start justify-self-start rounded-lg bg-ink/[0.05] p-0.5 text-[13px]">
-                <For each={MAIN}>
-                  {(m) => (
-                    <button
-                      class="h-7 rounded-md px-3"
-                      classList={{
-                        'bg-raised font-medium shadow-[0_1px_2px_rgb(0_0_0/0.08)]': p()!.allow_main === m.value,
-                        'text-mute': p()!.allow_main !== m.value,
-                      }}
-                      onClick={() => void update({ allow_main: m.value })}
-                    >
-                      {m.label}
-                    </button>
-                  )}
-                </For>
-              </div>
-              <p class="mt-1 text-[12.5px] text-faint">{MAIN.find((m) => m.value === p()!.allow_main)?.hint}</p>
-            </div>
+            <MainAndTagsPicker value={p()!.allow_main} onChange={(allow_main) => void update({ allow_main })} />
 
             <span class="text-[13px] text-mute">Manager</span>
             <div>

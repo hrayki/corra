@@ -1,23 +1,15 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from 'solid-js'
 import ArrowLeft from 'lucide-solid/icons/arrow-left'
-import ChevronDown from 'lucide-solid/icons/chevron-down'
 import Lock from 'lucide-solid/icons/lock'
 import Search from 'lucide-solid/icons/search'
 import { call, state } from '../lib/store'
 import type { Project } from '../proto/Project'
 import { ago } from '../lib/format'
-import { makers, paired, providerOf } from '../lib/catalog'
+import { providerOf } from '../lib/catalog'
 import { Btn, Menu, inputClass } from './bits'
+import { MainAndTagsPicker, PlaceAndKindPicker, SetupPicker, projectPlaces, type SetupRow } from './ProjectForm'
 
 type RepoRow = { full_name: string; private: boolean; description: string | null; pushed_at: string }
-type SetupRow = { name: string; repos: string[]; env: string[] }
-
-const MAIN = [
-  { value: false, label: 'Wait for you', hint: 'Pushing to the default branch or a tag, and merging, wait for your yes.' },
-  { value: true, label: 'On its own', hint: 'It pushes to the default branch and tags, and merges, on its own.' },
-]
-
-const pill = 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-[13px] hover:border-faint'
 
 export function NewProject() {
   const hubUp = () => state.conn === 'open'
@@ -32,9 +24,9 @@ export function NewProject() {
       const m = (e as Error).message
       setReposError(
         /401|Bad credentials/i.test(m)
-          ? 'GitHub refused the hub’s key. Replace the GitHub key in Settings, under Keys.'
+          ? 'GitHub refused the hub’s key. Replace the GitHub key in Settings → Secrets & Setup.'
           : /no GitHub credential|github\.token/i.test(m)
-            ? 'The hub has no GitHub key yet. Add one in Settings, under Keys.'
+            ? 'The hub has no GitHub key yet. Add one in Settings → Secrets & Setup.'
             : `Couldn't list your GitHub repos: ${m}`,
       )
       return []
@@ -55,12 +47,7 @@ export function NewProject() {
   const [error, setError] = createSignal('')
   const [busy, setBusy] = createSignal(false)
 
-  const machines = createMemo(() => Object.values(state.machines).filter((m) => paired(m.provider) && m.status !== 'destroyed'))
-  const places = createMemo(() => {
-    const out = makers().map((p) => ({ key: p.name, label: p.label }))
-    for (const m of machines()) out.push({ key: `machine:${m.id}`, label: m.name })
-    return out
-  })
+  const places = createMemo(() => projectPlaces())
   const place = () => places().find((p) => p.key === where()) ?? places()[0]
   const [kindName, setKindName] = createSignal<string>('')
   const kinds = () => providerOf(place()?.key)?.kinds ?? []
@@ -84,8 +71,8 @@ export function NewProject() {
       null
     )
   }
-  const tickRepos = (name: string | null) => {
-    const s = (setups() ?? []).find((x) => x.name === name)
+  const tickRepos = (n: string | null) => {
+    const s = (setups() ?? []).find((x) => x.name === n)
     if (!s) return
     const extra = s.repos.filter((r) => !picked().some((p) => p.toLowerCase() === r.toLowerCase()))
     if (extra.length) setPicked([...picked(), ...extra])
@@ -205,28 +192,16 @@ export function NewProject() {
                 when={places().length}
                 fallback={<span class="text-[13px] text-warn">Connect a provider in Settings first, or pair a machine.</span>}
               >
-                <Menu
-                  label="Runs on"
-                  class={pill}
-                  items={places().map((p) => ({ label: p.label, checked: p.key === place()?.key, onSelect: () => setWhere(p.key) }))}
-                >
-                  <span>{place()?.label}</span>
-                  <ChevronDown size={13} class="text-faint" />
-                </Menu>
-                <Show when={kinds().length > 1}>
-                  <Menu
-                    label="Kind"
-                    class={`${pill} ml-2`}
-                    items={kinds().map((k) => ({
-                      label: k.label,
-                      checked: k.name === kind()?.name,
-                      onSelect: () => setKindName(k.name),
-                    }))}
-                  >
-                    <span>{kind()?.label}</span>
-                    <ChevronDown size={13} class="text-faint" />
-                  </Menu>
-                </Show>
+                <div class="flex flex-wrap items-center gap-2">
+                  <PlaceAndKindPicker
+                    places={places()}
+                    selectedPlace={place()?.key}
+                    onSelectPlace={(k) => setWhere(k)}
+                    kinds={kinds()}
+                    selectedKind={kind()}
+                    onSelectKind={(k) => setKindName(k)}
+                  />
+                </div>
                 <Show when={kind()?.about}>
                   <p class="mt-1.5 text-[12.5px] text-faint">{kind()!.about}</p>
                 </Show>
@@ -235,21 +210,15 @@ export function NewProject() {
 
             <span class="text-[13px] text-mute">Setup</span>
             <div class="flex flex-wrap items-center gap-2">
-              <Menu
-                label="Setup"
-                class={pill}
-                items={[
-                  { label: 'None', checked: !setup(), onSelect: () => (setSetupTouched(true), setSetup(null)) },
-                  ...(setups() ?? []).map((s) => ({
-                    label: s.name,
-                    checked: s.name === setup(),
-                    onSelect: () => (setSetupTouched(true), setSetup(s.name), tickRepos(s.name)),
-                  })),
-                ]}
-              >
-                <span>{setup() ?? 'None'}</span>
-                <ChevronDown size={13} class="text-faint" />
-              </Menu>
+              <SetupPicker
+                setups={setups() ?? []}
+                value={setup()}
+                onChange={(n) => {
+                  setSetupTouched(true)
+                  setSetup(n)
+                  tickRepos(n)
+                }}
+              />
               <Show when={!(setups() ?? []).length}>
                 <span class="text-[12.5px] text-faint">Setups come from your setup repo's corra/setups folder.</span>
               </Show>
@@ -290,25 +259,7 @@ export function NewProject() {
             </Show>
 
             <span class="self-start pt-1.5 text-[13px] text-mute">Main and tags</span>
-            <div>
-              <div class="inline-flex flex-wrap rounded-lg bg-ink/[0.05] p-0.5 text-[13px]">
-                <For each={MAIN}>
-                  {(m) => (
-                    <button
-                      class="h-7 rounded-md px-3"
-                      classList={{
-                        'bg-raised font-medium shadow-[0_1px_2px_rgb(0_0_0/0.08)]': allowMain() === m.value,
-                        'text-mute': allowMain() !== m.value,
-                      }}
-                      onClick={() => setAllowMain(m.value)}
-                    >
-                      {m.label}
-                    </button>
-                  )}
-                </For>
-              </div>
-              <p class="mt-1.5 text-[12.5px] text-faint">{MAIN.find((m) => m.value === allowMain())?.hint}</p>
-            </div>
+            <MainAndTagsPicker value={allowMain()} onChange={setAllowMain} />
           </div>
 
           <div class="mt-8 flex items-center gap-3">

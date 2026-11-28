@@ -86,7 +86,14 @@ pub async fn uncommitted(root: &Path) -> serde_json::Value {
                 }));
             }
         }
-        out.push(serde_json::json!({ "repo": name, "base": base, "files": files }));
+        let branch = git(&path, &["symbolic-ref", "--short", "HEAD"], &[])
+            .await
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| (base != EMPTY_TREE).then(|| base.chars().take(7).collect::<String>()));
+        out.push(
+            serde_json::json!({ "repo": name, "base": base, "branch": branch, "files": files }),
+        );
     }
     serde_json::Value::Array(out)
 }

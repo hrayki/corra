@@ -9,7 +9,10 @@ import ChevronUp from 'lucide-solid/icons/chevron-up'
 import Pin from 'lucide-solid/icons/pin'
 import FolderPlus from 'lucide-solid/icons/folder-plus'
 import SlidersHorizontal from 'lucide-solid/icons/sliders-horizontal'
+import BellRing from 'lucide-solid/icons/bell-ring'
 import { state } from '../lib/store'
+import { pushToast, setPaletteOpen } from '../lib/toast'
+import { attentionThreads, jumpToNextAttention } from './CommandPalette'
 import type { Thread } from '../proto/Thread'
 import { StatusMark, openContextMenu, statusWord } from './bits'
 import { threadActions } from './actions'
@@ -96,6 +99,7 @@ export function Sidebar() {
   )
   const hubProject = (name: string) => Object.values(state.projects).find((p) => p.name === name)
   const empty = () => state.loaded && Object.keys(state.projects).length === 0 && threads().length === 0
+  const urgentCount = createMemo(() => attentionThreads().length)
   return (
     <aside class="flex h-full w-full flex-col bg-panel">
       <div class="flex h-[52px] shrink-0 items-center gap-1 px-2.5">
@@ -103,6 +107,18 @@ export function Sidebar() {
           <img src="/favicon.svg" alt="" class="size-[22px]" />
         </a>
         <div class="flex-1" />
+        <Show when={urgentCount() > 0}>
+          <button
+            type="button"
+            aria-label={`Next thread needing you (${urgentCount()})`}
+            title={`Next thread needing you (${urgentCount()}) · Alt+N`}
+            onClick={() => jumpToNextAttention()}
+            class="inline-flex h-8 items-center gap-1 rounded-lg bg-warn/15 px-2 text-[12px] font-medium text-warn hover:bg-warn/25"
+          >
+            <BellRing size={13} />
+            <span class="num">{urgentCount()}</span>
+          </button>
+        </Show>
         <a href="#/new-project" aria-label="New project" title="New project" class={headBtn}>
           <FolderPlus size={16} />
         </a>
@@ -111,15 +127,25 @@ export function Sidebar() {
         </a>
       </div>
       <div class="px-3 pb-2">
-        <label class="flex h-8 items-center gap-2 rounded-lg bg-ink/[0.04] px-2.5 text-mute focus-within:bg-ink/[0.07]">
+        <div class="flex h-8 items-center gap-2 rounded-lg bg-ink/[0.04] px-2.5 text-mute focus-within:bg-ink/[0.07]">
           <Search size={13} />
           <input
+            aria-label="Find a thread"
             class="min-w-0 flex-1 bg-transparent text-[13px] text-ink placeholder:text-faint"
             placeholder="Find a thread"
             value={q()}
             onInput={(e) => setQ(e.currentTarget.value)}
           />
-        </label>
+          <button
+            type="button"
+            aria-label="Open quick switcher"
+            title="Quick switcher (Ctrl+K)"
+            onClick={() => setPaletteOpen(true)}
+            class="shrink-0 rounded border border-line/80 bg-raised/70 px-1.5 py-px font-mono text-[10.5px] text-faint hover:border-faint hover:text-ink max-md:hidden"
+          >
+            ⌘K
+          </button>
+        </div>
       </div>
       <nav class="min-h-0 overflow-y-auto px-2 pt-1 pb-3" classList={{ 'flex-1': !settledOpen(), 'shrink grow-0': settledOpen() }}>
         <Show when={pinned().length}>
@@ -330,7 +356,7 @@ function Card(props: { t: Thread; active: boolean; project?: string; depth?: num
       onContextMenu={(e) =>
         openContextMenu(
           e,
-          threadActions(props.t, (m) => alert(m)),
+          threadActions(props.t, (m) => pushToast(m)),
         )
       }
       aria-current={props.active ? 'page' : undefined}

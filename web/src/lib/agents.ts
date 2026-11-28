@@ -56,12 +56,18 @@ export function agentInfo(it: ItemView, kids: ItemView[], running: string[] | un
     latest: steps.at(-1),
   }
   if (background) {
-    const text = task?.body.type === 'agent_message' ? task.body.text : undefined
-    const m = text?.match(/^Background (?:agent|command)[^:]*? (completed|failed|stopped|killed)(?:: ([\s\S]*))?/)
     if (task) {
       info.ended = task.at
-      info.state = m?.[1] === 'completed' ? 'done' : m?.[1] === 'failed' ? 'failed' : m ? 'stopped' : 'done'
-      info.result = m?.[2]
+      if (task.body.type === 'task_result') {
+        const s = task.body.status
+        info.state = s === 'completed' ? 'done' : s === 'failed' ? 'failed' : s === 'stopped' || s === 'killed' ? 'stopped' : 'done'
+        info.result = task.body.summary ?? (task.body.text || undefined)
+      } else {
+        const text = task.body.type === 'agent_message' ? task.body.text : undefined
+        const m = text?.match(/^Background (?:agent|command)[^:]*? (completed|failed|stopped|killed)(?:: ([\s\S]*))?/)
+        info.state = m?.[1] === 'completed' ? 'done' : m?.[1] === 'failed' ? 'failed' : m ? 'stopped' : 'done'
+        info.result = m?.[2]
+      }
     } else if (running && !running.includes(it.id) && now - (it.at ?? now) > 10_000) {
       info.state = 'stopped'
     }

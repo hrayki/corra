@@ -1,24 +1,11 @@
-import { createResource, createRoot } from 'solid-js'
-import { call, state } from './store'
-import type { ProviderInfo } from '../proto/ProviderInfo'
-import type { ToolInfo } from '../proto/ToolInfo'
+import { refreshCatalogState, state } from './store'
 import type { KindInfo } from '../proto/KindInfo'
 
-const hubUp = () => state.conn === 'open'
-
-const [providerList, providerRes] = createRoot(() =>
-  createResource(hubUp, (up) => (up ? call<ProviderInfo[]>({ op: 'list_providers' }) : Promise.resolve([]))),
-)
-const [toolList, toolRes] = createRoot(() =>
-  createResource(hubUp, (up) => (up ? call<ToolInfo[]>({ op: 'list_tools' }) : Promise.resolve([]))),
-)
-
-export const providers = () => providerList() ?? []
-export const tools = () => toolList() ?? []
+export const providers = () => state.providers
+export const tools = () => state.tools
 
 export function refreshCatalog() {
-  void providerRes.refetch()
-  void toolRes.refetch()
+  void refreshCatalogState()
 }
 
 export const providerOf = (name: string | undefined) => providers().find((p) => p.name === name)

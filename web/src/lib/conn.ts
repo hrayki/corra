@@ -19,15 +19,27 @@ export class Conn {
   private onMessage: (m: HubToApp) => void
   private onOpen: () => void
   private onRefused?: () => void
+  private onState?: (s: ConnState) => void
 
-  constructor(url: () => string, onMessage: (m: HubToApp) => void, onOpen: () => void, onRefused?: () => void) {
+  constructor(
+    url: () => string,
+    onMessage: (m: HubToApp) => void,
+    onOpen: () => void,
+    onRefused?: () => void,
+    onState?: (s: ConnState) => void,
+  ) {
     const [s, set] = createSignal<ConnState>('connecting')
     this.state = s
-    this.setState = set
+    this.setState = (next) => {
+      if (s() === next) return
+      set(next)
+      this.onState?.(next)
+    }
     this.url = url
     this.onMessage = onMessage
     this.onOpen = onOpen
     this.onRefused = onRefused
+    this.onState = onState
     this.open()
   }
 
