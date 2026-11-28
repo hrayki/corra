@@ -1,6 +1,7 @@
 pub mod antigravity;
 mod child;
 pub mod claude;
+pub mod claude_proxy;
 pub mod import;
 pub mod mcp;
 mod record;
@@ -43,6 +44,7 @@ pub enum AgentOut {
         delta: Delta,
     },
     Status(ThreadStatus),
+    Usage(AgentUsage),
     Exited {
         error: Option<String>,
     },

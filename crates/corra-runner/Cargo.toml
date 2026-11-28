@@ -8,6 +8,7 @@ description = "Runs Claude Code for corra on a machine and connects it to the hu
 
 [dependencies]
 anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.23.1"
 clap = { version = "4.6.8", features = ["derive", "env"] }
 corra-proto = { version = "0.1.0", path = "../corra-proto" }
@@ -20,6 +21,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 tar = "0.4.46"
+time = { version = "0.3.55", features = ["parsing"] }
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7.20", features = ["io"] }

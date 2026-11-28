@@ -153,6 +153,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
     }
     hub.touch_machine(machine);
     hub.publish_machine(machine);
+    crate::usage::publish_current(&hub, AgentKind::Antigravity);
     tracing::info!(%machine, host = %info.hostname, "runner connected");
 
     let result: Result<()> = async {
@@ -199,6 +200,7 @@ async fn runner_loop(hub: HubRef, machine: MachineId, socket: WebSocket) -> Resu
             hub.db.set_machine_status(machine, MachineStatus::Offline)?;
         }
         hub.publish_machine(machine);
+        crate::usage::publish_current(&hub, AgentKind::Antigravity);
     }
     writer.abort();
     tracing::info!(%machine, "runner disconnected");
@@ -262,6 +264,9 @@ async fn handle_runner_msg(
             if owns(hub, machine, thread) {
                 hub.set_live_status(thread, status);
             }
+        }
+        RunnerMsg::AgentUsage { usage } => {
+            crate::usage::ingest_usage(hub, usage);
         }
         RunnerMsg::TermOutput { term, data } => {
             let owner = hub.terms.lock().unwrap().get(&term).copied();
@@ -451,7 +456,6 @@ async fn app_loop(hub: HubRef, socket: WebSocket, session: String) -> Result<()>
         for usage in hub.usage_messages() {
             send_json(&tx, &usage);
         }
-        crate::usage::maybe_refresh_background(hub.clone());
 
         loop {
             if *shutdown.borrow() {
@@ -942,7 +946,6 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             if name == "claude.token" {
                 hub.usage.reset(AgentKind::Claude);
                 crate::usage::publish_current(hub, AgentKind::Claude);
-                crate::usage::maybe_refresh_background(hub.clone());
             }
             Value::Null
         }

@@ -1053,6 +1053,11 @@ impl Runner {
                     tx.send(RunnerMsg::ThreadStatus { thread, status });
                 }
             }
+            AgentOut::Usage(usage) => {
+                if let Some(tx) = tx {
+                    tx.send(RunnerMsg::AgentUsage { usage });
+                }
+            }
             AgentOut::Exited { error } => {
                 if let Some(e) = &error {
                     tracing::warn!(%thread, "agent exited: {e}");

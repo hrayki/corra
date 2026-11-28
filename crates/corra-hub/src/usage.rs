@@ -2,23 +2,16 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use corra_proto::app::HubToApp;
-use corra_proto::{AgentKind, AgentUsage, UsageWindow, now_ms};
+use corra_proto::runner::RunnerRequest;
+use corra_proto::{AgentKind, AgentUsage, MachineId, UsageWindow, now_ms};
 use serde_json::Value;
 
 use crate::hub::{Hub, HubRef, Outbound};
 
-pub const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const CLAUDE_BETA_HEADER: &str = "oauth-2025-04-20";
-const CLAUDE_USER_AGENT: &str = "claude-code/2.1.330";
-const AUTO_REFRESH_INTERVAL_MS: i64 = 5 * 60 * 1000;
-const MANUAL_REFRESH_COOLDOWN_MS: i64 = 15 * 1000;
-const BACKOFF_BASE_MS: i64 = 2 * 60 * 1000;
-const BACKOFF_MAX_MS: i64 = 30 * 60 * 1000;
-const AUTH_BACKOFF_MS: i64 = 5 * 60 * 1000;
-const TRANSIENT_BACKOFF_MS: i64 = 60 * 1000;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(12);
+const MANUAL_REFRESH_COOLDOWN_MS: i64 = 10 * 1000;
+const RUNNER_USAGE_TIMEOUT: Duration = Duration::from_secs(22);
 const SAME_WINDOW_TOLERANCE_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Default)]
@@ -30,9 +23,6 @@ pub struct UsageTracker {
 struct RefreshMeta {
     in_flight: bool,
     last_attempt_ms: i64,
-    last_ok_ms: i64,
-    backoff_until_ms: i64,
-    consecutive_429s: u32,
 }
 
 impl UsageTracker {
@@ -58,26 +48,40 @@ fn kv_key(agent: AgentKind) -> String {
     format!("usage:{}", agent.as_str())
 }
 
-fn claude_oauth_token(hub: &Hub) -> Option<String> {
-    hub.secrets
-        .get("claude.token")
-        .ok()
-        .flatten()
-        .map(|s| s.split_whitespace().collect::<String>())
-        .filter(|s| !s.is_empty())
+fn agy_runner(hub: &Hub) -> Option<MachineId> {
+    let connected: Vec<MachineId> = hub.runners.lock().unwrap().keys().copied().collect();
+    if connected.is_empty() {
+        return None;
+    }
+    let machines = hub.db.machines().ok()?;
+    for id in &connected {
+        if let Some(m) = machines.iter().find(|m| m.id == *id)
+            && m.info.as_ref().is_some_and(|info| {
+                info.agents
+                    .iter()
+                    .any(|a| a.kind == AgentKind::Antigravity && a.version.is_some())
+            })
+        {
+            return Some(*id);
+        }
+    }
+    None
 }
 
 pub fn can_refresh(hub: &Hub, agent: AgentKind) -> bool {
     match agent {
-        AgentKind::Claude => claude_oauth_token(hub).is_some(),
-        AgentKind::Antigravity => false,
+        AgentKind::Claude => false,
+        AgentKind::Antigravity => agy_runner(hub).is_some(),
     }
 }
 
 fn load_stored(hub: &Hub, agent: AgentKind) -> Option<AgentUsage> {
     if let Some(raw) = hub.db.kv_get(&kv_key(agent)).ok().flatten()
-        && let Ok(u) = serde_json::from_str::<AgentUsage>(&raw)
+        && let Ok(mut u) = serde_json::from_str::<AgentUsage>(&raw)
     {
+        if agent == AgentKind::Claude {
+            u.error = None;
+        }
         return Some(u);
     }
     if agent == AgentKind::Claude
@@ -92,7 +96,7 @@ fn load_stored(hub: &Hub, agent: AgentKind) -> Option<AgentUsage> {
                 updated_at: at,
                 windows,
                 error: None,
-                refreshable: can_refresh(hub, AgentKind::Claude),
+                refreshable: false,
             });
         }
     }
@@ -146,6 +150,31 @@ pub fn publish_current(hub: &Hub, agent: AgentKind) {
         refreshable: can_refresh(hub, agent),
     });
     hub.publish(Outbound::All(HubToApp::Usage { usage }));
+}
+
+pub fn ingest_usage(hub: &Hub, incoming: AgentUsage) -> AgentUsage {
+    let now = now_ms();
+    let agent = incoming.agent;
+    let mut current = load_stored(hub, agent).unwrap_or(AgentUsage {
+        agent,
+        updated_at: now,
+        windows: vec![],
+        error: None,
+        refreshable: can_refresh(hub, agent),
+    });
+    merge_windows(&mut current.windows, incoming.windows, true, now);
+    current.updated_at = if incoming.updated_at > 0 {
+        incoming.updated_at
+    } else {
+        now
+    };
+    current.error = None;
+    current.refreshable = can_refresh(hub, agent);
+    save_stored(hub, &current);
+    hub.publish(Outbound::All(HubToApp::Usage {
+        usage: current.clone(),
+    }));
+    current
 }
 
 pub fn ingest_rate_limit(hub: &Hub, agent: AgentKind, raw: &Value) -> Option<AgentUsage> {
@@ -258,17 +287,6 @@ pub fn is_quota_error(error: Option<&str>) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-pub fn maybe_refresh_background(hub: HubRef) {
-    if !can_refresh(&hub, AgentKind::Claude) {
-        return;
-    }
-    tokio::spawn(async move {
-        if let Err(e) = refresh(&hub, AgentKind::Claude, false).await {
-            tracing::debug!("background usage refresh skipped/failed: {e:#}");
-        }
-    });
-}
-
 pub async fn refresh_for(hub: &HubRef, agent: Option<AgentKind>) -> Result<Value> {
     match agent {
         Some(a) => Ok(serde_json::to_value(refresh(hub, a, true).await?)?),
@@ -288,7 +306,7 @@ pub async fn refresh_for(hub: &HubRef, agent: Option<AgentKind>) -> Result<Value
 
 pub async fn refresh(hub: &HubRef, agent: AgentKind, manual: bool) -> Result<AgentUsage> {
     let now = now_ms();
-    if agent != AgentKind::Claude {
+    if agent != AgentKind::Antigravity {
         return Ok(load(hub, agent, now).unwrap_or(AgentUsage {
             agent,
             updated_at: 0,
@@ -297,17 +315,19 @@ pub async fn refresh(hub: &HubRef, agent: AgentKind, manual: bool) -> Result<Age
             refreshable: false,
         }));
     }
-    let Some(token) = claude_oauth_token(hub) else {
-        if manual {
-            bail!("Claude OAuth token isn't configured");
-        }
-        return Ok(load(hub, agent, now).unwrap_or(AgentUsage {
+    let Some(machine) = agy_runner(hub) else {
+        let mut current = load(hub, agent, now).unwrap_or(AgentUsage {
             agent,
             updated_at: 0,
             windows: vec![],
             error: None,
             refreshable: false,
-        }));
+        });
+        current.refreshable = false;
+        if manual {
+            current.error = Some("No awake machine with Antigravity to check usage".into());
+        }
+        return Ok(current);
     };
 
     {
@@ -322,28 +342,9 @@ pub async fn refresh(hub: &HubRef, agent: AgentKind, manual: bool) -> Result<Age
                 refreshable: true,
             }));
         }
-        if now < meta.backoff_until_ms {
-            let wait = wait_label(meta.backoff_until_ms - now);
-            let mut current = load(hub, agent, now).unwrap_or(AgentUsage {
-                agent,
-                updated_at: 0,
-                windows: vec![],
-                error: None,
-                refreshable: true,
-            });
-            current.error = Some(format!("Usage endpoint rate-limited; retry in {wait}"));
-            return Ok(current);
-        }
-        if !manual && meta.last_ok_ms > 0 && now - meta.last_ok_ms < AUTO_REFRESH_INTERVAL_MS {
-            return Ok(load(hub, agent, now).unwrap_or(AgentUsage {
-                agent,
-                updated_at: 0,
-                windows: vec![],
-                error: None,
-                refreshable: true,
-            }));
-        }
-        if manual && meta.last_ok_ms > 0 && now - meta.last_attempt_ms < MANUAL_REFRESH_COOLDOWN_MS
+        if manual
+            && meta.last_attempt_ms > 0
+            && now - meta.last_attempt_ms < MANUAL_REFRESH_COOLDOWN_MS
         {
             return Ok(load(hub, agent, now).unwrap_or(AgentUsage {
                 agent,
@@ -361,158 +362,37 @@ pub async fn refresh(hub: &HubRef, agent: AgentKind, manual: bool) -> Result<Age
         agent,
     };
 
-    let url = hub.claude_usage_url.lock().unwrap().clone();
     let resp = hub
-        .http
-        .get(&url)
-        .header("authorization", format!("Bearer {token}"))
-        .header("anthropic-beta", CLAUDE_BETA_HEADER)
-        .header("user-agent", CLAUDE_USER_AGENT)
-        .header("accept", "application/json")
-        .timeout(FETCH_TIMEOUT)
-        .send()
+        .runner_request_timeout(
+            machine,
+            RunnerRequest::AgentUsage {
+                agent: AgentKind::Antigravity,
+            },
+            RUNNER_USAGE_TIMEOUT,
+        )
         .await;
 
     let done = now_ms();
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            let body: Value = match r.json().await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Ok(record_refresh_error(
-                        hub,
-                        agent,
-                        done,
-                        TRANSIENT_BACKOFF_MS,
-                        false,
-                        format!("Couldn't parse usage response: {e}"),
-                    ));
-                }
-            };
-            let incoming = parse_claude_oauth_usage(&body);
+    match resp.and_then(|v| serde_json::from_value::<AgentUsage>(v).map_err(Into::into)) {
+        Ok(u) => Ok(ingest_usage(hub, u)),
+        Err(e) => {
             let mut current = load_stored(hub, agent).unwrap_or(AgentUsage {
                 agent,
-                updated_at: done,
+                updated_at: 0,
                 windows: vec![],
                 error: None,
-                refreshable: true,
+                refreshable: can_refresh(hub, agent),
             });
-            merge_windows(&mut current.windows, incoming, true, done);
-            current.updated_at = done;
-            current.error = None;
-            current.refreshable = true;
-            {
-                let mut map = hub.usage.inner.lock().unwrap();
-                let meta = map.entry(agent).or_default();
-                meta.last_ok_ms = done;
-                meta.backoff_until_ms = 0;
-                meta.consecutive_429s = 0;
-            }
+            prune_expired(&mut current.windows, done);
+            current.error = Some(truncate_chars(&format!("{e:#}"), 140));
+            current.refreshable = can_refresh(hub, agent);
             save_stored(hub, &current);
             hub.publish(Outbound::All(HubToApp::Usage {
                 usage: current.clone(),
             }));
             Ok(current)
         }
-        Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            let retry_after = r
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after_ms);
-            let wait_ms = {
-                let mut map = hub.usage.inner.lock().unwrap();
-                let meta = map.entry(agent).or_default();
-                let exp = meta.consecutive_429s.min(4);
-                meta.consecutive_429s = meta.consecutive_429s.saturating_add(1);
-                let computed = BACKOFF_BASE_MS
-                    .saturating_mul(1_i64 << exp)
-                    .min(BACKOFF_MAX_MS);
-                retry_after.unwrap_or(computed)
-            };
-            let wait = wait_label(wait_ms);
-            Ok(record_refresh_error(
-                hub,
-                agent,
-                done,
-                wait_ms,
-                true,
-                format!("Usage endpoint rate-limited; retry in {wait}"),
-            ))
-        }
-        Ok(r)
-            if r.status() == reqwest::StatusCode::UNAUTHORIZED
-                || r.status() == reqwest::StatusCode::FORBIDDEN =>
-        {
-            Ok(record_refresh_error(
-                hub,
-                agent,
-                done,
-                AUTH_BACKOFF_MS,
-                false,
-                "Claude token wasn't accepted by the usage endpoint".into(),
-            ))
-        }
-        Ok(r) => {
-            let status = r.status();
-            Ok(record_refresh_error(
-                hub,
-                agent,
-                done,
-                TRANSIENT_BACKOFF_MS,
-                false,
-                format!("Usage request failed ({status})"),
-            ))
-        }
-        Err(e) => {
-            let msg = if e.is_timeout() {
-                "Usage request timed out".into()
-            } else {
-                format!("Usage request failed: {e}")
-            };
-            Ok(record_refresh_error(
-                hub,
-                agent,
-                done,
-                TRANSIENT_BACKOFF_MS,
-                false,
-                msg,
-            ))
-        }
     }
-}
-
-fn record_refresh_error(
-    hub: &Hub,
-    agent: AgentKind,
-    now: i64,
-    backoff_ms: i64,
-    keep_429_count: bool,
-    message: String,
-) -> AgentUsage {
-    {
-        let mut map = hub.usage.inner.lock().unwrap();
-        let meta = map.entry(agent).or_default();
-        meta.backoff_until_ms = now + backoff_ms;
-        if !keep_429_count {
-            meta.consecutive_429s = 0;
-        }
-    }
-    let mut current = load_stored(hub, agent).unwrap_or(AgentUsage {
-        agent,
-        updated_at: 0,
-        windows: vec![],
-        error: None,
-        refreshable: can_refresh(hub, agent),
-    });
-    prune_expired(&mut current.windows, now);
-    current.error = Some(message);
-    current.refreshable = can_refresh(hub, agent);
-    save_stored(hub, &current);
-    hub.publish(Outbound::All(HubToApp::Usage {
-        usage: current.clone(),
-    }));
-    current
 }
 
 pub fn parse_claude_rate_limit_event(raw: &Value) -> Vec<UsageWindow> {
@@ -573,65 +453,6 @@ fn parse_claude_event_window(key: &str, v: &Value) -> Option<UsageWindow> {
         blocked,
         detail: None,
     })
-}
-
-pub fn parse_claude_oauth_usage(raw: &Value) -> Vec<UsageWindow> {
-    let Some(obj) = raw.as_object() else {
-        return vec![];
-    };
-    let mut out = Vec::new();
-    for (key, val) in obj {
-        let Some(w) = val.as_object() else {
-            continue;
-        };
-        if key == "extra_usage" {
-            if w.get("is_enabled").and_then(Value::as_bool) != Some(true) {
-                continue;
-            }
-            let used_pct = w
-                .get("utilization")
-                .and_then(Value::as_f64)
-                .filter(|u| u.is_finite())
-                .map(|u| u.clamp(0.0, 100.0));
-            let resets_at = w.get("resets_at").and_then(parse_timestamp_value);
-            if used_pct.is_none() && resets_at.is_none() {
-                continue;
-            }
-            out.push(UsageWindow {
-                key: key.clone(),
-                label: window_label(key),
-                used_pct,
-                resets_at,
-                blocked: used_pct.is_some_and(|p| p >= 100.0),
-                detail: None,
-            });
-            continue;
-        }
-        let used_pct = w
-            .get("utilization")
-            .and_then(Value::as_f64)
-            .filter(|u| u.is_finite())
-            .map(|u| u.clamp(0.0, 100.0));
-        let resets_at = w
-            .get("resets_at")
-            .or_else(|| w.get("resetsAt"))
-            .and_then(parse_timestamp_value);
-        let blocked = w.get("status").and_then(Value::as_str) == Some("rejected")
-            || used_pct.is_some_and(|p| p >= 100.0);
-        if used_pct.is_none() && resets_at.is_none() && !blocked {
-            continue;
-        }
-        out.push(UsageWindow {
-            key: key.clone(),
-            label: window_label(key),
-            used_pct,
-            resets_at,
-            blocked,
-            detail: None,
-        });
-    }
-    sort_windows(&mut out);
-    out
 }
 
 fn parse_generic_rate_limit(raw: &Value) -> Vec<UsageWindow> {
@@ -760,8 +581,12 @@ fn window_order(key: &str) -> (u8, &str) {
         "seven_day_opus" => 3,
         "seven_day_oauth_apps" => 4,
         "extra_usage" => 5,
-        "quota" | "limit" => 6,
-        _ => 7,
+        "gemini-5h" => 6,
+        "gemini-weekly" => 7,
+        "3p-5h" => 8,
+        "3p-weekly" => 9,
+        "quota" | "limit" => 10,
+        _ => 11,
     };
     (rank, key)
 }
@@ -774,6 +599,10 @@ pub fn window_label(key: &str) -> String {
         "seven_day_opus" => "Weekly (Opus)".into(),
         "seven_day_oauth_apps" => "OAuth apps".into(),
         "extra_usage" => "Extra usage".into(),
+        "gemini-5h" => "Gemini · 5-hour".into(),
+        "gemini-weekly" => "Gemini · Weekly".into(),
+        "3p-5h" => "Claude/GPT · 5-hour".into(),
+        "3p-weekly" => "Claude/GPT · Weekly".into(),
         "quota" => "Quota".into(),
         "limit" => "Limit".into(),
         other => {
@@ -888,22 +717,6 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn parse_retry_after_ms(header: &str) -> Option<i64> {
-    let secs: i64 = header.trim().parse().ok()?;
-    if secs <= 0 {
-        return None;
-    }
-    Some((secs.saturating_mul(1000)).clamp(60_000, 3_600_000))
-}
-
-fn wait_label(ms: i64) -> String {
-    if ms < 60_000 {
-        format!("{}s", (ms / 1000).max(1))
-    } else {
-        format!("{}m", (ms + 59_999) / 60_000)
-    }
-}
-
 fn truncate_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     if s.chars().count() > max {
@@ -936,42 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_oauth_usage_keeps_percentage_scale_and_skips_nulls() {
-        let body = json!({
-            "five_hour": {
-                "utilization": 33.0,
-                "resets_at": "2026-04-11T07:00:00.528743+00:00"
-            },
-            "seven_day": {
-                "utilization": 13.0,
-                "resets_at": "2026-04-17T00:59:59.951713+00:00"
-            },
-            "seven_day_opus": null,
-            "seven_day_sonnet": {
-                "utilization": 1.0,
-                "resets_at": "2026-04-16T03:00:00.951719+00:00"
-            },
-            "extra_usage": {
-                "is_enabled": false,
-                "monthly_limit": null,
-                "used_credits": null,
-                "utilization": null
-            }
-        });
-        let windows = parse_claude_oauth_usage(&body);
-        assert_eq!(windows.len(), 3);
-        assert_eq!(windows[0].key, "five_hour");
-        assert_eq!(windows[0].used_pct, Some(33.0));
-        assert_eq!(windows[0].resets_at, Some(1_775_890_800_528));
-        assert_eq!(windows[1].key, "seven_day");
-        assert_eq!(windows[1].used_pct, Some(13.0));
-        assert_eq!(windows[2].key, "seven_day_sonnet");
-        assert_eq!(windows[2].used_pct, Some(1.0));
-        assert!(!windows[2].blocked);
-    }
-
-    #[test]
-    fn passive_zero_utilization_preserves_existing_oauth_percentage_in_same_window() {
+    fn passive_zero_utilization_preserves_existing_percentage_in_same_window() {
         let now = 1_775_880_000_000;
         let reset_5h = 1_775_890_800_000;
         let reset_7d = 1_776_400_000_000;

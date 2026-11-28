@@ -69,7 +69,6 @@ pub struct Hub {
     pub delivering: Mutex<HashMap<ThreadId, usize>>,
     pub presence: Mutex<HashMap<u64, Instant>>,
     pub github_api: Mutex<String>,
-    pub claude_usage_url: Mutex<String>,
     pub usage: crate::usage::UsageTracker,
     pub pr_cache: Mutex<HashMap<(String, String), (Instant, Value)>>,
     pub kit_cache: Mutex<Option<(Instant, Arc<crate::kit::Kit>)>>,
@@ -129,7 +128,6 @@ impl Hub {
             delivering: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
             github_api: Mutex::new("https://api.github.com".into()),
-            claude_usage_url: Mutex::new(crate::usage::CLAUDE_USAGE_URL.into()),
             usage: crate::usage::UsageTracker::default(),
             pr_cache: Mutex::new(HashMap::new()),
             kit_cache: Mutex::new(None),
@@ -467,6 +465,13 @@ impl Hub {
 
     pub fn retention_days(&self) -> Option<i64> {
         let v = &self.settings()["retention_days"];
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            .filter(|d| *d > 0)
+    }
+
+    pub fn auto_settle_days(&self) -> Option<i64> {
+        let v = &self.settings()["auto_settle_days"];
         v.as_i64()
             .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
             .filter(|d| *d > 0)

@@ -67,7 +67,12 @@ impl Proc {
     }
 }
 
-fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef) -> Result<Proc> {
+fn spawn_claude(
+    ctx: &SessionCtx,
+    settings: &AgentSettings,
+    session: &SessionRef,
+    proxy_url: Option<&str>,
+) -> Result<Proc> {
     let mut cmd = Command::new(claude_bin());
     cmd.arg("-p")
         .arg("--output-format")
@@ -142,6 +147,9 @@ fn spawn_claude(ctx: &SessionCtx, settings: &AgentSettings, session: &SessionRef
         .env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
     for (k, v) in &ctx.spec.agent_env {
         cmd.env(k, v);
+    }
+    if let Some(url) = proxy_url {
+        cmd.env("ANTHROPIC_BASE_URL", url);
     }
     crate::git::thread_header_env(&mut cmd, &ctx.hub_url, ctx.spec.thread);
     let rec = super::record::Recorder::open(
@@ -322,8 +330,27 @@ fn new_state(ctx: &SessionCtx) -> (State, SessionRef) {
 
 async fn drive(ctx: &mut SessionCtx) -> Result<()> {
     let (mut st, session) = new_state(ctx);
-    let mut proc = spawn_claude(ctx, &st.settings, &session)?;
-    talk(ctx, &mut st, &mut proc).await
+    let has_custom_base = ctx
+        .spec
+        .agent_env
+        .iter()
+        .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && !v.is_empty())
+        || std::env::var_os("ANTHROPIC_BASE_URL").is_some_and(|v| !v.is_empty());
+    let proxy = if has_custom_base {
+        None
+    } else {
+        match super::claude_proxy::ClaudeProxy::start_default(ctx.out.clone()).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!("couldn't start claude usage proxy: {e:#}");
+                None
+            }
+        }
+    };
+    let mut proc = spawn_claude(ctx, &st.settings, &session, proxy.as_ref().map(|p| p.url()))?;
+    let res = talk(ctx, &mut st, &mut proc).await;
+    drop(proxy);
+    res
 }
 
 #[cfg(test)]

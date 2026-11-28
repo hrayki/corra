@@ -14,7 +14,6 @@ import { call, closeThread, loadEarlier, openThread, restoreDraft, state } from 
 import { panel, setPanel } from '../lib/panel'
 import { dayKey, dayLabel, tokens } from '../lib/format'
 import { Composer } from './Composer'
-import { UsageMeter } from './UsagePopover'
 import { EntryView, TurnBlock } from './Timeline'
 import type { Queued } from '../proto/Queued'
 import type { InputPart } from '../proto/InputPart'
@@ -304,7 +303,6 @@ export function ThreadPane(props: { id: string }) {
                 </Show>
               </div>
             </div>
-            <UsageMeter agent={thread()!.agent} />
             <IconBtn label="Find in thread (Ctrl+F)" class="max-md:hidden" active={find.open()} onClick={find.toggle}>
               <Search size={16} />
             </IconBtn>
