@@ -37,6 +37,10 @@ pub enum AppCall {
         thread: ThreadId,
         query: String,
     },
+    EventDetail {
+        thread: ThreadId,
+        seq: i64,
+    },
     Unsubscribe {
         thread: ThreadId,
     },

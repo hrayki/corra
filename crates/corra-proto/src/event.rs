@@ -242,6 +242,9 @@ pub struct ToolOutput {
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<InputPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub deferred: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

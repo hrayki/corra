@@ -313,6 +313,7 @@ pub fn history(s: &FoundSession) -> Result<Vec<(i64, Event)>> {
                         text: text.clone(),
                         is_error: *is_error,
                         images: vec![],
+                        deferred: None,
                     });
                     let status = match &output {
                         Some(o) if o.is_error => ToolStatus::Failed,

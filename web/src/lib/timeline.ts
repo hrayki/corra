@@ -14,6 +14,7 @@ import type { Choice } from '../proto/Choice'
 export type ItemView = {
   id: string
   parent?: string
+  seq?: number
   body: ItemBody
   done: boolean
   at?: number
@@ -170,6 +171,7 @@ export function apply(v: ThreadView, e: StoredEvent) {
       if (body.type === 'user_message' && id === `${t.id}:input`)
         for (const other of v.turns) if (other !== t) other.entries = other.entries.filter((x) => !(x.type === 'item' && x.item.id === id))
       if (existing) {
+        existing.seq = e.seq
         existing.body = body
         existing.done = done
         if (done) {
@@ -179,7 +181,10 @@ export function apply(v: ThreadView, e: StoredEvent) {
         }
       } else {
         if (body.type === 'user_message' && id === `${t.id}:input` && t.input.length > 0) break
-        t.entries.push({ type: 'item', item: { id, parent: parent ?? undefined, body, done, at: e.ts, ended: done ? e.ts : undefined } })
+        t.entries.push({
+          type: 'item',
+          item: { id, parent: parent ?? undefined, seq: e.seq, body, done, at: e.ts, ended: done ? e.ts : undefined },
+        })
       }
       break
     }
@@ -266,4 +271,15 @@ export function applyDelta(v: ThreadView, turn: string, item: string, parent: st
   if (it.done) return
   if (d.type === 'tool_input') it.liveInput = (it.liveInput ?? '') + d.json
   else it.live = (it.live ?? '') + d.text
+}
+
+export function patchItemDetail(v: ThreadView, itemId: string, body: ItemBody): boolean {
+  for (let i = v.turns.length - 1; i >= 0; i--) {
+    const it = findItem(v.turns[i], itemId)
+    if (it) {
+      it.body = body
+      return true
+    }
+  }
+  return false
 }

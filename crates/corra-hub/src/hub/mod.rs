@@ -1,6 +1,6 @@
 mod projects;
 mod runner;
-mod threads;
+pub mod threads;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};

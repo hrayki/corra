@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, type JSX } from 'solid-js'
+import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, type JSX } from 'solid-js'
 import ChevronRight from 'lucide-solid/icons/chevron-right'
 import Check from 'lucide-solid/icons/check'
 import RotateCcw from 'lucide-solid/icons/rotate-ccw'
@@ -9,11 +9,11 @@ import KeyRound from 'lucide-solid/icons/key-round'
 import Copy from 'lucide-solid/icons/copy'
 import GitFork from 'lucide-solid/icons/git-fork'
 import Undo2 from 'lucide-solid/icons/undo-2'
-import { call, restoreDraft, state } from '../lib/store'
+import { call, loadItemDetail, restoreDraft, state } from '../lib/store'
 import { pushToast } from '../lib/toast'
 import { folds, isWork, type Entry, type ItemView, type RequestView, type TurnView } from '../lib/timeline'
 import type { InputPart } from '../proto/InputPart'
-import { clock, duration } from '../lib/format'
+import { clock, duration, fullTimestamp, timeOfDay } from '../lib/format'
 import { setPanel } from '../lib/panel'
 import { Btn, Thumbs } from './bits'
 import { ToolDetail, toolSummary } from './tools'
@@ -128,17 +128,23 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
               </>
             }
           >
-            <For each={parts()}>
+            <Index each={parts()}>
               {(p, i) => (
                 <>
-                  <Show when={p.lead}>{(l) => render(l())}</Show>
-                  <Show when={p.work.length > 0}>
-                    <Fold thread={props.thread} label={foldLabel(i(), p.lead)} steps={stepsIn(p.work)} entries={p.work} render={render} />
+                  <Show when={p().lead}>{(l) => render(l())}</Show>
+                  <Show when={p().work.length > 0}>
+                    <Fold
+                      thread={props.thread}
+                      label={foldLabel(i, p().lead)}
+                      steps={stepsIn(p().work)}
+                      entries={p().work}
+                      render={render}
+                    />
                   </Show>
-                  <For each={p.rest}>{render}</For>
+                  <For each={p().rest}>{render}</For>
                 </>
               )}
-            </For>
+            </Index>
           </Show>
         </div>
       </Show>
@@ -203,10 +209,24 @@ export function TurnBlock(props: { thread: string; turn: TurnView; last: boolean
           </div>
         )}
       </Show>
-      <Show when={done() && firstFold() < 0 && top().length > 0 && took()}>
-        <div class="mt-2 text-[12px] text-faint">
-          {props.turn.outcome === 'interrupted' ? 'Stopped · ' : ''}
-          {took()}
+      <Show when={done() && top().length > 0 && (props.turn.ended || (firstFold() < 0 && took()))}>
+        <div class="mt-2 flex items-center gap-1.5 text-[11.5px] text-faint">
+          <Show when={props.turn.ended}>
+            {(ts) => (
+              <time class="num" title={fullTimestamp(ts())}>
+                {timeOfDay(ts())}
+              </time>
+            )}
+          </Show>
+          <Show when={firstFold() < 0 && took()}>
+            <Show when={props.turn.ended}>
+              <span>·</span>
+            </Show>
+            <span>
+              {props.turn.outcome === 'interrupted' ? 'Stopped · ' : ''}
+              {took()}
+            </span>
+          </Show>
         </div>
       </Show>
     </section>
@@ -438,29 +458,36 @@ function UserMessage(props: { thread: string; turn: TurnView }) {
             </div>
           }
         >
-          <div class={`${actionRow} justify-end`}>
-            <CopyButton text={() => text()?.text ?? ''} />
-            <Show when={state.threads[props.thread]?.agent !== 'antigravity'}>
-              <button
-                type="button"
-                class={actionBtn}
-                disabled={!props.turn.outcome}
-                title="Start a new thread from this point"
-                onClick={() => void forkAt(props.thread, props.turn.id)}
-              >
-                <GitFork size={13} />
-                Fork
-              </button>
-              <button
-                type="button"
-                class={actionBtn}
-                disabled={busy()}
-                title="Remove this message and everything after it, and undo its file changes"
-                onClick={() => setConfirmRewind(true)}
-              >
-                <Undo2 size={13} />
-                Rewind
-              </button>
+          <div class="flex flex-wrap items-center justify-end gap-1.5">
+            <div class={`${actionRow} justify-end`}>
+              <CopyButton text={() => text()?.text ?? ''} />
+              <Show when={state.threads[props.thread]?.agent !== 'antigravity'}>
+                <button
+                  type="button"
+                  class={actionBtn}
+                  disabled={!props.turn.outcome}
+                  title="Start a new thread from this point"
+                  onClick={() => void forkAt(props.thread, props.turn.id)}
+                >
+                  <GitFork size={13} />
+                  Fork
+                </button>
+                <button
+                  type="button"
+                  class={actionBtn}
+                  disabled={busy()}
+                  title="Remove this message and everything after it, and undo its file changes"
+                  onClick={() => setConfirmRewind(true)}
+                >
+                  <Undo2 size={13} />
+                  Rewind
+                </button>
+              </Show>
+            </div>
+            <Show when={props.turn.started > 0}>
+              <time class="num pr-0.5 text-[11.5px] text-faint" title={fullTimestamp(props.turn.started)}>
+                {timeOfDay(props.turn.started)}
+              </time>
             </Show>
           </div>
         </Show>
@@ -489,17 +516,22 @@ export function EntryView(props: { thread: string; entry: Entry; kids?: Map<stri
       </Match>
       <Match when={props.entry.type === 'notice' && props.entry}>
         {(e) => {
-          const n = e() as { level: string; text: string }
+          const n = e() as { level: string; text: string; ts: number }
           return (
             <div
-              class="rounded-xl px-3.5 py-2 text-[13px]"
+              class="flex items-baseline justify-between gap-3 rounded-xl px-3.5 py-2 text-[13px]"
               classList={{
                 'bg-bad/5 text-bad': n.level === 'error' && !isLimit(n.text),
                 'bg-warn/10 text-ink': n.level === 'warning' || (n.level === 'error' && isLimit(n.text)),
                 'text-mute bg-ink/[0.03]': n.level === 'info',
               }}
             >
-              {n.text}
+              <span class="min-w-0 flex-1">{n.text}</span>
+              <Show when={n.ts > 0}>
+                <time class="num shrink-0 text-[11px] text-faint" title={fullTimestamp(n.ts)}>
+                  {timeOfDay(n.ts)}
+                </time>
+              </Show>
             </div>
           )
         }}
@@ -550,6 +582,13 @@ function ItemBlock(props: { thread?: string; item: ItemView; kids?: Map<string, 
           <div data-find={found()} class="max-w-[85%] rounded-2xl rounded-br-md bg-panel px-4 py-2.5 text-[14px] whitespace-pre-wrap">
             <For each={(b() as { content: InputPart[] }).content}>{(p) => (p.type === 'text' ? <span>{p.text}</span> : null)}</For>
           </div>
+          <Show when={props.item.at}>
+            {(ts) => (
+              <time class="num pr-0.5 text-[11.5px] text-faint" title={fullTimestamp(ts())}>
+                {timeOfDay(ts())}
+              </time>
+            )}
+          </Show>
           <Show when={props.item.unread && props.thread}>
             {(t) => <NotRead thread={t()} input={(b() as { content: InputPart[] }).content} />}
           </Show>
@@ -609,17 +648,29 @@ function Todos(props: { item: ItemView }) {
 
 function ToolRow(props: { thread?: string; item: ItemView; kids?: Map<string, ItemView[]>; cwd?: string }) {
   const [open, setOpen] = createSignal(false)
+  const [loadingDetail, setLoadingDetail] = createSignal(false)
+  const [detailErr, setDetailErr] = createSignal('')
   const body = () => props.item.body as Extract<ItemView['body'], { type: 'tool_call' }>
   const summary = createMemo(() => toolSummary(body().name, body().input, props.item.liveInput, props.cwd))
   const status = () => body().status
   const kids = () => props.kids?.get(props.item.id) ?? []
+  const deferred = () => !!body().output?.deferred
+  const fetchDetail = () => {
+    if (!deferred() || !props.thread || !props.item.seq || loadingDetail()) return
+    setLoadingDetail(true)
+    setDetailErr('')
+    void loadItemDetail(props.thread, props.item.id, props.item.seq)
+      .catch((e) => setDetailErr((e as Error).message))
+      .finally(() => setLoadingDetail(false))
+  }
+  const toggle = () => {
+    const next = !open()
+    setOpen(next)
+    if (next) fetchDetail()
+  }
   return (
     <div>
-      <button
-        class="flex w-full items-baseline gap-2 text-left text-[13px] leading-[1.5]"
-        aria-expanded={open()}
-        onClick={() => setOpen(!open())}
-      >
+      <button class="flex w-full items-baseline gap-2 text-left text-[13px] leading-[1.5]" aria-expanded={open()} onClick={toggle}>
         <span
           class="shrink-0 font-medium"
           classList={{ 'text-mute': status() !== 'running', 'text-ink': status() === 'running', pulse: status() === 'running' }}
@@ -644,7 +695,28 @@ function ToolRow(props: { thread?: string; item: ItemView; kids?: Map<string, It
       </button>
       <Show when={open()}>
         <div class="mt-1.5 mb-1">
-          <ToolDetail name={body().name} input={body().input} output={body().output} />
+          <Show
+            when={!deferred()}
+            fallback={
+              <div class="flex items-center gap-2 rounded-lg border border-line bg-panel/60 px-3 py-2 text-[12px] text-mute">
+                <Show
+                  when={!detailErr()}
+                  fallback={
+                    <>
+                      <span class="text-bad">{detailErr()}</span>
+                      <button type="button" class="underline hover:text-ink" onClick={fetchDetail}>
+                        Retry
+                      </button>
+                    </>
+                  }
+                >
+                  <span>{loadingDetail() ? 'Loading full output…' : 'Output deferred'}</span>
+                </Show>
+              </div>
+            }
+          >
+            <ToolDetail name={body().name} input={body().input} output={body().output} />
+          </Show>
           <Show when={kids().length > 0}>
             <div class="mt-2 space-y-2 border-l border-line pl-3">
               <For each={kids()}>{(c) => <ItemBlock thread={props.thread} item={c} kids={props.kids} cwd={props.cwd} />}</For>
