@@ -123,6 +123,9 @@ pub enum AppCall {
         #[ts(optional)]
         name: Option<String>,
     },
+    UpdateRunner {
+        machine: MachineId,
+    },
     MoveThread {
         thread: ThreadId,
         #[serde(default, skip_serializing_if = "Option::is_none")]

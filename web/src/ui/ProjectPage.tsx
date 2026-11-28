@@ -153,7 +153,12 @@ export function ProjectPage(props: { id: string }) {
 
             <span class="pt-1 text-[13px] text-mute">Machine</span>
             <div>
-              <div class="text-[13.5px]">{status()}</div>
+              <div class="flex flex-wrap items-center gap-2 text-[13.5px]">
+                <span>{status()}</span>
+                <Show when={machine()?.update_pending}>
+                  <span class="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-medium text-warn">Runner update pending</span>
+                </Show>
+              </div>
               <p class="mt-0.5 text-[12.5px] text-faint">
                 It sleeps after 15 idle minutes, with its disk kept, and wakes with the next message.
               </p>
@@ -205,6 +210,16 @@ export function ProjectPage(props: { id: string }) {
                   >
                     <Moon size={13} />
                     Sleep
+                  </Btn>
+                </Show>
+                <Show when={machine()?.update_pending}>
+                  <Btn
+                    kind="plain"
+                    disabled={busy() || !!stage()}
+                    onClick={() => void run(() => call({ op: 'update_runner', machine: machine()!.id }))}
+                  >
+                    <RotateCw size={13} />
+                    Update runner
                   </Btn>
                 </Show>
                 <Show when={machine() && makes() && !confirmReset()}>

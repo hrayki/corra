@@ -128,6 +128,7 @@ struct Runner {
     fetching: Option<tokio::task::JoinHandle<Result<std::path::PathBuf>>>,
     fetched: Option<std::path::PathBuf>,
     switch_at: Option<tokio::time::Instant>,
+    switch_soon: bool,
     took: VecDeque<String>,
     connected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -164,6 +165,7 @@ pub async fn run(cli: Options) -> Result<()> {
         fetching: None,
         fetched: None,
         switch_at: None,
+        switch_soon: false,
         took: Default::default(),
         connected: cli.connected.clone(),
         bg_tx,
@@ -239,10 +241,13 @@ async fn connect(url: &str, token: &str) -> Result<Ws> {
 }
 
 pub fn machine_info() -> MachineInfo {
-    machine_info_with_cache(None)
+    machine_info_with_cache(None, update::own_build())
 }
 
-fn machine_info_with_cache(cached: Option<Vec<AgentAvailability>>) -> MachineInfo {
+fn machine_info_with_cache(
+    cached: Option<Vec<AgentAvailability>>,
+    runner_build: Option<String>,
+) -> MachineInfo {
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -266,6 +271,7 @@ fn machine_info_with_cache(cached: Option<Vec<AgentAvailability>>) -> MachineInf
         cpus,
         memory_mb,
         runner_version: env!("CARGO_PKG_VERSION").to_string(),
+        runner_build,
         home: files::home().to_string_lossy().to_string(),
         agents,
         disk_used_mb: disk_used_mb(),
@@ -380,7 +386,8 @@ async fn run_connection(
     let out_tx = OutTx(raw_tx);
 
     let cached = runner.cached_agents.clone();
-    let info = tokio::task::spawn_blocking(move || machine_info_with_cache(cached))
+    let own_build = runner.own_build.clone().or_else(update::own_build);
+    let info = tokio::task::spawn_blocking(move || machine_info_with_cache(cached, own_build))
         .await
         .map_err(|e| anyhow!("machine info failed: {e}"))?;
     runner.cached_agents = Some(info.agents.clone());
@@ -481,8 +488,12 @@ async fn run_connection(
                     Ok(Err(e)) => {
                         tracing::warn!("couldn't update the runner: {e:#}");
                         runner.newer = None;
+                        runner.switch_soon = false;
                     }
-                    Err(e) => tracing::warn!("the runner's update stopped: {e}"),
+                    Err(e) => {
+                        tracing::warn!("the runner's update stopped: {e}");
+                        runner.switch_soon = false;
+                    }
                 }
             }
             _ = async { tokio::time::sleep_until(runner.switch_at.unwrap()).await }, if runner.switch_at.is_some() => {
@@ -758,6 +769,40 @@ impl Runner {
                     });
                 }
             }
+            HubMsg::Request {
+                id,
+                body: corra_proto::runner::RunnerRequest::UpdateRunner,
+            } => {
+                if self.newer.is_none() {
+                    out.send(RunnerMsg::Reply {
+                        id,
+                        ok: Some(serde_json::json!({ "status": "up_to_date" })),
+                        err: None,
+                    });
+                } else if self.sessions.values().any(|s| {
+                    matches!(
+                        s.status,
+                        ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting
+                    )
+                }) {
+                    out.send(RunnerMsg::Reply {
+                        id,
+                        ok: None,
+                        err: Some(
+                            "A thread is active on this machine; wait for it to finish before updating the runner."
+                                .into(),
+                        ),
+                    });
+                } else {
+                    self.switch_soon = true;
+                    self.update();
+                    out.send(RunnerMsg::Reply {
+                        id,
+                        ok: Some(serde_json::json!({ "status": "updating" })),
+                        err: None,
+                    });
+                }
+            }
             HubMsg::Request { id, body } => {
                 let out = out.clone();
                 let (hub_url, token, git_token, sync) = (
@@ -896,6 +941,15 @@ impl Runner {
     }
 
     fn ready_to_update(&self) -> bool {
+        if self.switch_soon {
+            let busy = self.sessions.values().any(|s| {
+                matches!(
+                    s.status,
+                    ThreadStatus::Running | ThreadStatus::Waiting | ThreadStatus::Starting
+                )
+            });
+            return self.newer.is_some() && !busy;
+        }
         self.newer.is_some()
             && self.terms.is_empty()
             && self.sessions.values().all(|s| {
@@ -925,11 +979,17 @@ impl Runner {
             s.parking = true;
             let _ = s.cmds.send(SessionCmd::Stop);
         }
-        self.switch_at = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+        let delay = if self.switch_soon {
+            Duration::from_millis(600)
+        } else {
+            Duration::from_secs(2)
+        };
+        self.switch_at = Some(tokio::time::Instant::now() + delay);
     }
 
     fn switch(&mut self) {
         self.switch_at = None;
+        self.switch_soon = false;
         let Some(next) = self.fetched.take() else {
             return;
         };

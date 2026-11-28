@@ -22,6 +22,8 @@ export function MachinesTab() {
 }
 
 function Machines() {
+  const [updating, setUpdating] = createSignal<Record<string, boolean>>({})
+  const [error, setError] = createSignal('')
   const list = createMemo(() =>
     Object.values(state.machines)
       .filter((m) => m.status !== 'destroyed')
@@ -36,6 +38,17 @@ function Machines() {
     if (m.info?.disk_used_mb) parts.push(`${(m.info.disk_used_mb / 1024).toFixed(1)} GB of disk`)
     parts.push(m.status === 'connected' ? 'awake' : m.status === 'offline' && m.last_seen ? `seen ${ago(m.last_seen)} ago` : m.status)
     return parts.join(' · ')
+  }
+  const updateRunner = async (id: string) => {
+    setError('')
+    setUpdating((u) => ({ ...u, [id]: true }))
+    try {
+      await call({ op: 'update_runner', machine: id })
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUpdating((u) => ({ ...u, [id]: false }))
+    }
   }
   return (
     <Section
@@ -54,7 +67,7 @@ function Machines() {
                 {paired(m.provider) ? <Laptop size={15} /> : <Cloud size={15} />}
               </span>
               <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2 text-[13.5px] font-medium">
+                <div class="flex flex-wrap items-center gap-2 text-[13.5px] font-medium">
                   <span class="truncate">{m.name}</span>
                   <span
                     class="size-1.5 shrink-0 rounded-full"
@@ -65,9 +78,17 @@ function Machines() {
                       'bg-bad': m.status === 'failed',
                     }}
                   />
+                  <Show when={m.update_pending}>
+                    <span class="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-medium text-warn">Runner update pending</span>
+                  </Show>
                 </div>
                 <div class="truncate text-[12.5px] text-mute">{detail(m)}</div>
               </div>
+              <Show when={m.update_pending}>
+                <Btn small disabled={!!updating()[m.id]} onClick={() => void updateRunner(m.id)}>
+                  {updating()[m.id] ? 'Updating…' : 'Update runner'}
+                </Btn>
+              </Show>
               <Show when={gone(m)}>
                 <Btn
                   small
@@ -82,6 +103,9 @@ function Machines() {
           )}
         </For>
       </Card>
+      <Show when={error()}>
+        <p class="mt-2 text-[12.5px] text-bad">{error()}</p>
+      </Show>
     </Section>
   )
 }

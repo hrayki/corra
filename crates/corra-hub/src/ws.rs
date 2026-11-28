@@ -907,6 +907,17 @@ async fn exec_call_inner(hub: &HubRef, call: AppCall) -> Result<Value> {
             hub.publish_machine(machine);
             Value::Null
         }
+        AppCall::UpdateRunner { machine } => {
+            if !hub.runner_connected(machine) {
+                anyhow::bail!("that machine isn't connected");
+            }
+            hub.runner_request_timeout(
+                machine,
+                RunnerRequest::UpdateRunner,
+                Duration::from_secs(15),
+            )
+            .await?
+        }
         AppCall::DbStats => json!({ "db_bytes": hub.db.size_bytes().ok() }),
         AppCall::HubVersion { check } => {
             serde_json::to_value(crate::update::status(hub, check).await)?

@@ -8,7 +8,11 @@ const ASK_UNLESS_MAIN_ALLOWED: &[&str] = &["github.pr.merge"];
 
 const TOOL_ACTIONS: &[&str] = &[
     "threads.list",
+    "threads.read",
     "threads.start",
+    "threads.send",
+    "threads.stop",
+    "threads.follow",
     "secret.request",
     "github.pr.list",
     "github.pr.view",
@@ -37,22 +41,61 @@ const REPO: &str = "Repository as owner/name or just name. Optional when the pro
 fn all_defs() -> Vec<ToolDef> {
     let repo = json!({ "type": "string", "description": REPO });
     let number = json!({ "type": "integer", "description": "The pull request or issue number." });
+    let thread = json!({ "type": "string", "description": "A thread's id from threads.list, or the last characters of it." });
     vec![
         tool(
             "threads.list",
-            "List this project's threads with their titles and status.",
-            json!({}),
+            "List this project's threads: id, title, agent, status, and model settings.",
+            json!({
+                "status": { "type": "string", "enum": ["idle", "starting", "running", "waiting", "error"] }
+            }),
             &[],
         ),
         tool(
+            "threads.read",
+            "Read the end of a thread in this project: its settings, what was asked, what the agent answered, and which tools it ran.",
+            json!({
+                "thread": thread,
+                "last": { "type": "integer", "description": "How many turns to read. Defaults to 3." }
+            }),
+            &["thread"],
+        ),
+        tool(
             "threads.start",
-            "Start a new thread in this project with its own agent, which works on the prompt independently. Returns the new thread's id.",
+            "Start a new thread in this project with its own agent working on a prompt. Returns the new thread's id. You follow the new thread unless follow is false (defaults to false when your own thread can't receive automated messages).",
             json!({
                 "prompt": { "type": "string", "description": "The task for the new agent." },
                 "agent": { "type": "string", "enum": ["claude", "antigravity"], "description": "Which agent runs the new thread. Defaults to this thread's agent." },
-                "model": { "type": "string", "description": "Optional model id." }
+                "model": { "type": "string", "description": "Optional model id." },
+                "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Optional effort." },
+                "follow": { "type": "boolean", "description": "False to start it without following it." }
             }),
             &["prompt"],
+        ),
+        tool(
+            "threads.send",
+            "Send a message to a thread in this project. If it's mid-turn, it reads the message at its next step; set queue to hold the message until that turn ends.",
+            json!({
+                "thread": thread,
+                "message": { "type": "string" },
+                "queue": { "type": "boolean", "description": "True to hold the message until the agent's turn ends." }
+            }),
+            &["thread", "message"],
+        ),
+        tool(
+            "threads.stop",
+            "Stop a thread's agent mid-turn in this project.",
+            json!({ "thread": thread }),
+            &["thread"],
+        ),
+        tool(
+            "threads.follow",
+            "Follow a thread in this project, or stop following it. While you follow a thread you get a message when it finishes a turn, stops with an error or waits on the user.",
+            json!({
+                "thread": thread,
+                "follow": { "type": "boolean", "description": "False to stop following. Defaults to true." }
+            }),
+            &["thread"],
         ),
         tool(
             "secret.request",
@@ -264,16 +307,41 @@ async fn secret_request(
 }
 
 async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) -> Result<Value> {
+    let req_str = |key: &str| -> Result<String> {
+        input[key]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| anyhow!("{key} is required"))
+    };
     match action {
         "threads.list" => {
+            let want_status = input["status"].as_str();
             let list: Vec<Value> = hub
                 .db
                 .threads()?
                 .into_iter()
                 .filter(|x| x.project == p.id && x.hidden_at.is_none())
-                .map(|x| json!({ "id": x.id, "title": x.title, "status": x.status, "updated_at": x.updated_at }))
+                .filter(|x| want_status.is_none_or(|s| x.status.as_str() == s))
+                .map(|x| {
+                    json!({
+                        "id": x.id,
+                        "title": x.title,
+                        "agent": x.agent,
+                        "status": x.status,
+                        "model": x.settings.model,
+                        "effort": x.settings.effort,
+                        "permission_mode": x.settings.permission_mode,
+                        "updated_at": x.updated_at,
+                        "this_thread": x.id == t.id,
+                        "following": hub.follower(x.id) == Some(t.id),
+                    })
+                })
                 .collect();
             Ok(json!(list))
+        }
+        "threads.read" => {
+            let last = input["last"].as_u64().unwrap_or(3) as usize;
+            crate::manage::read_thread(hub, &req_str("thread")?, last, Some(p.id))
         }
         "threads.start" => {
             let target_agent = match input["agent"].as_str() {
@@ -287,9 +355,15 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
                     "Antigravity threads signed in with Google take messages only from the user. Pass agent: \"claude\", ask the user to send it, or add a Gemini API key in Settings."
                 );
             }
-            let prompt = input["prompt"]
-                .as_str()
-                .ok_or_else(|| anyhow!("prompt is required"))?;
+            let prompt = req_str("prompt")?;
+            let caller_hands_off = hub.hands_off(t.agent);
+            let follow = match input["follow"].as_bool() {
+                Some(true) if caller_hands_off => bail!(
+                    "Antigravity threads signed in with Google can't receive automated follower messages. Omit follow or set follow: false, and check progress with threads.read."
+                ),
+                Some(v) => v,
+                None => !caller_hands_off,
+            };
             let mut settings = if target_agent == t.agent {
                 t.settings.clone()
             } else {
@@ -302,20 +376,45 @@ async fn run(hub: &HubRef, t: &Thread, p: &Project, action: &str, input: Value) 
             if let Some(m) = input["model"].as_str() {
                 settings.model = Some(m.to_string());
             }
+            if let Some(e) = input["effort"].as_str() {
+                settings.effort = Some(e.to_string());
+            }
             let n = hub
                 .create_thread(
                     p.id,
                     target_agent,
                     t.machine,
                     settings,
-                    vec![InputPart::Text {
-                        text: prompt.to_string(),
-                    }],
+                    vec![InputPart::Text { text: prompt }],
                 )
                 .await?;
             hub.mark_started_by(n.id, t.id);
-            Ok(json!({ "thread": n.id, "title": n.title, "agent": target_agent }))
+            if follow {
+                hub.set_follower(n.id, Some(t.id));
+            }
+            Ok(
+                json!({ "thread": n.id, "title": n.title, "agent": target_agent, "following": follow }),
+            )
         }
+        "threads.send" => {
+            crate::manage::send_thread(
+                hub,
+                t,
+                &req_str("thread")?,
+                req_str("message")?,
+                input["queue"].as_bool().unwrap_or(false),
+                Some(p.id),
+            )
+            .await
+        }
+        "threads.stop" => crate::manage::stop_thread(hub, t, &req_str("thread")?, Some(p.id)).await,
+        "threads.follow" => crate::manage::follow_thread(
+            hub,
+            t,
+            &req_str("thread")?,
+            input["follow"].as_bool().unwrap_or(true),
+            Some(p.id),
+        ),
         a if a.starts_with("github.") => crate::github::run(hub, p, a, &input).await,
         _ => bail!("unknown tool {action}"),
     }
@@ -346,7 +445,7 @@ pub fn info(hub: &Hub) -> Vec<ToolInfo> {
         tool(
             "threads",
             "Other threads",
-            "List the project's threads and start new ones.",
+            "List, read, start, message, stop and follow threads in this project.",
             &[],
             None,
         ),

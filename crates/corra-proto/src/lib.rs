@@ -298,6 +298,8 @@ pub struct Machine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_seen: Option<i64>,
+    #[serde(default)]
+    pub update_pending: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -308,6 +310,9 @@ pub struct MachineInfo {
     pub cpus: u32,
     pub memory_mb: u64,
     pub runner_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runner_build: Option<String>,
     pub home: String,
     #[serde(default)]
     pub agents: Vec<AgentAvailability>,

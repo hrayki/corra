@@ -98,7 +98,8 @@ pub async fn handle(
         },
         RunnerRequest::TermOpen { .. }
         | RunnerRequest::TermAttach { .. }
-        | RunnerRequest::Stop { .. } => {
+        | RunnerRequest::Stop { .. }
+        | RunnerRequest::UpdateRunner => {
             bail!("handled elsewhere")
         }
     }

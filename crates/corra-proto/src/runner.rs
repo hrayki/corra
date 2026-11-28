@@ -238,4 +238,5 @@ pub enum RunnerRequest {
     AgentUsage {
         agent: AgentKind,
     },
+    UpdateRunner,
 }
