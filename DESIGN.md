@@ -15,8 +15,10 @@ The README says what corra is. This is how it fits together.
   corra's releases, and goes back to the version before when a new one doesn't come up.
 - **Runner** (`crates/corra-runner`): on each machine. It connects out to the hub over one WebSocket, runs Claude Code
   through its stream-json interface, or Antigravity through `agy`'s Agent Client Protocol server, and serves the
-  thread's panel: changes, files, terminal. When the hub serves a newer runner, a runner switches to it
-  once nothing has needed it for two minutes: no turn running and no terminal open. On Linux it starts as a small parent
+  thread's panel: changes, files, terminal. When the hub serves a newer runner, connected machines still on an older
+  build are flagged as having a runner update pending and can be updated on demand from Settings or the project page
+  when idle; otherwise a runner switches on its own once nothing has needed it for two minutes: no turn running and no
+  terminal open. On Linux it starts as a small parent
   that takes in and reaps the processes orphaned below it, since a machine's PID 1 may not (Modal's doesn't).
 - **App** (`web`, SolidJS): served by the hub as an installable PWA. The hub tells the app which build it serves; an app
   on another build saves its drafts and reloads, and so does one that can't load a part after a deploy.
@@ -110,8 +112,9 @@ A thread's keys, env vars and tools are fixed when its Claude Code process start
 message to an idle thread restarts the process on the same session; a thread that's mid-turn keeps the old ones until
 its next message.
 
-Beside Claude Code's own tools, agents get corra's: other threads, GitHub, and in a manager project, managing corra
-itself.
+Beside Claude Code's own tools, agents get corra's: GitHub, secret requests, and project-scoped thread tools (`list`,
+`read`, `start`, `send`, `stop`, `follow`). A manager project widens those across projects and adds `threads.move`,
+`projects.*`, `machines.*`, and `credentials.*`.
 
 ## The storage lease
 
@@ -150,9 +153,11 @@ what's left of the hub's process group.
 
 ## Threads
 
-A thread is a Claude Code session. The hub keeps its events and session files, so it survives a reset. Nothing is
-deleted unless Settings says to delete hidden threads after some number of days: then, once a day, a thread hidden that
-long goes with its events, session files, saved work and settings, unless a fork that hasn't started yet still needs it.
+A thread is a Claude Code session. The hub keeps its events and session files, so it survives a reset. Settings can
+auto-settle idle unpinned threads after a configured number of days, and sending a message to a settled thread unsettles
+it. Nothing is deleted unless Settings says to delete hidden threads after some number of days: then, once a day, a
+thread hidden that long goes with its events, session files, saved work and settings, unless a fork that hasn't started
+yet still needs it.
 A thread can move between machines with its uncommitted work, fork from any turn, or rewind to before one, which puts
 back the files it changed since. Any Claude Code session on a machine can come in as a thread, with its history; the
 next message resumes the same session.
@@ -173,10 +178,12 @@ thread, with Send again.
 A background agent that keeps working after a turn ends doesn't open a new turn: its steps join the turn that started it
 and the thread stays idle. Each subagent shows as a row that opens what it was asked, its steps and its result.
 Background agents and commands still running are listed at the end of the thread, each with a Stop. A message sent
-mid-turn is placed in the thread where it was sent. The hub tracks usage limits per agent, merging passive reports with
-cached Claude OAuth usage fetches (backing off on rate limits) and expiring windows past their reset time. Drafts and
-read marks are kept per device, in the browser. A thread opens on its last four turns; earlier
-ones load as you scroll up. Find (Ctrl+F) searches every message in the thread, mine and the agent's, including those
+mid-turn is placed in the thread where it was sent. The hub tracks usage limits per agent and expires windows past their
+reset time: for Claude Code, the runner proxies API requests locally to read `anthropic-ratelimit-unified-*` response
+headers during turns; for Antigravity, the runner runs `agy --print /usage --output-format json` after completed turns
+(throttled) and on demand on awake machines. Drafts and read marks are kept per device, in the browser. A thread opens
+on its last four turns with large tool inputs and outputs slimmed and loaded on demand when expanded; earlier ones load
+as you scroll up. Find (Ctrl+F) searches every message in the thread, mine and the agent's, including those
 folded into its work, but not tool calls, their output or thoughts. The hub reads the whole log for it, a chunk at a
 time and with no index, and returns the newest thousand matches. Going to a match loads the earlier turns down to it and
 opens whatever folds or shortens it. Matches are marked with the CSS Custom Highlight API, so the messages' HTML isn't
@@ -203,7 +210,7 @@ again if its connection dropped before the hub replied.
 
 A thread can follow another: when the followed thread finishes a turn, stops with an error or waits on me, the hub
 sends a short message into the follower, which wakes it. A thread started with `threads.start` is followed by the
-thread that started it, and shows under it in the sidebar. A thread has one follower, following can't go in a circle,
+thread that started it. A thread has one follower, following can't go in a circle,
 and a stop the follower asked for isn't reported back to it.
 
 When a thread waits on me, finishes or fails, the hub notifies me, unless one of my apps is open and focused. It sends
