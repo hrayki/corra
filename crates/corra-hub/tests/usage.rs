@@ -1,17 +1,12 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use axum::Router;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use corra_hub::db::Db;
 use corra_hub::hub::{Hub, HubRef, NewProject, Outbound};
 use corra_hub::providers::Providers;
 use corra_hub::secrets::Secrets;
 use corra_hub::usage;
 use corra_proto::app::HubToApp;
-use corra_proto::{AgentKind, Event, Thread, ThreadStatus, TurnOutcome, new_id, now_ms};
+use corra_proto::{
+    AgentKind, AgentUsage, Event, Thread, ThreadStatus, TurnOutcome, UsageWindow, new_id, now_ms,
+};
 use serde_json::json;
 
 fn test_hub() -> (tempfile::TempDir, HubRef) {
@@ -27,142 +22,83 @@ fn test_hub() -> (tempfile::TempDir, HubRef) {
     (dir, hub)
 }
 
-async fn mock_usage_server(
-    mode: Arc<AtomicUsize>,
-    hits: Arc<AtomicUsize>,
-    seen_beta: Arc<std::sync::Mutex<Option<String>>>,
-    seen_auth: Arc<std::sync::Mutex<Option<String>>>,
-) -> String {
-    let app = Router::new().route(
-        "/api/oauth/usage",
-        get(move |headers: HeaderMap| {
-            let mode = mode.clone();
-            let hits = hits.clone();
-            let seen_beta = seen_beta.clone();
-            let seen_auth = seen_auth.clone();
-            async move {
-                hits.fetch_add(1, Ordering::SeqCst);
-                *seen_beta.lock().unwrap() = headers
-                    .get("anthropic-beta")
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from);
-                *seen_auth.lock().unwrap() = headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from);
-                match mode.load(Ordering::SeqCst) {
-                    0 => (
-                        StatusCode::OK,
-                        axum::Json(json!({
-                            "five_hour": {
-                                "utilization": 42.5,
-                                "resets_at": "2099-04-11T07:00:00+00:00"
-                            },
-                            "seven_day": {
-                                "utilization": 18.0,
-                                "resets_at": "2099-04-17T01:00:00+00:00"
-                            },
-                            "seven_day_opus": null,
-                            "seven_day_sonnet": {
-                                "utilization": 1.0,
-                                "resets_at": "2099-04-16T03:00:00+00:00"
-                            },
-                            "extra_usage": {
-                                "is_enabled": false,
-                                "monthly_limit": null,
-                                "used_credits": null,
-                                "utilization": null
-                            }
-                        })),
-                    )
-                        .into_response(),
-                    _ => (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        [("retry-after", "180")],
-                        "rate limited",
-                    )
-                        .into_response(),
-                }
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}/api/oauth/usage")
-}
-
 #[tokio::test]
-async fn claude_oauth_refresh_fetches_caches_and_backs_off_on_429() {
+async fn runner_reported_usage_is_persisted_broadcast_and_clears_stale_claude_error() {
     let (_dir, hub) = test_hub();
-    hub.secrets
-        .set("claude.token", "sk-ant-oat01-test")
-        .unwrap();
+    let now = now_ms();
+    let reset_5h = now + 3_600_000;
+    let reset_7d = now + 5 * 86_400_000;
 
-    let mode = Arc::new(AtomicUsize::new(0));
-    let hits = Arc::new(AtomicUsize::new(0));
-    let seen_beta = Arc::new(std::sync::Mutex::new(None));
-    let seen_auth = Arc::new(std::sync::Mutex::new(None));
-    let url = mock_usage_server(
-        mode.clone(),
-        hits.clone(),
-        seen_beta.clone(),
-        seen_auth.clone(),
-    )
-    .await;
-    *hub.claude_usage_url.lock().unwrap() = url;
+    hub.db
+        .kv_set(
+            "usage:claude",
+            &serde_json::to_string(&AgentUsage {
+                agent: AgentKind::Claude,
+                updated_at: now - 60_000,
+                windows: vec![],
+                error: Some("Claude token wasn't accepted by the usage endpoint".into()),
+                refreshable: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(usage::load(&hub, AgentKind::Claude, now).is_none());
 
     let mut rx = hub.apps.subscribe();
-    let u = usage::refresh(&hub, AgentKind::Claude, true).await.unwrap();
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        seen_beta.lock().unwrap().as_deref(),
-        Some("oauth-2025-04-20")
+    let ingested = usage::ingest_usage(
+        &hub,
+        AgentUsage {
+            agent: AgentKind::Claude,
+            updated_at: now,
+            windows: vec![
+                UsageWindow {
+                    key: "five_hour".into(),
+                    label: "5-hour".into(),
+                    used_pct: Some(34.0),
+                    resets_at: Some(reset_5h),
+                    blocked: false,
+                    detail: None,
+                },
+                UsageWindow {
+                    key: "seven_day".into(),
+                    label: "Weekly".into(),
+                    used_pct: Some(77.0),
+                    resets_at: Some(reset_7d),
+                    blocked: false,
+                    detail: None,
+                },
+            ],
+            error: None,
+            refreshable: false,
+        },
     );
-    assert_eq!(
-        seen_auth.lock().unwrap().as_deref(),
-        Some("Bearer sk-ant-oat01-test")
-    );
-    assert!(u.refreshable);
-    assert_eq!(u.error, None);
-    assert_eq!(u.windows.len(), 3);
-    assert_eq!(u.windows[0].key, "five_hour");
-    assert_eq!(u.windows[0].used_pct, Some(42.5));
-    assert_eq!(u.windows[2].key, "seven_day_sonnet");
-    assert_eq!(u.windows[2].used_pct, Some(1.0));
+    assert!(!ingested.refreshable);
+    assert_eq!(ingested.error, None);
+    assert_eq!(ingested.windows.len(), 2);
+    assert_eq!(ingested.windows[0].used_pct, Some(34.0));
+    assert_eq!(ingested.windows[1].used_pct, Some(77.0));
 
     let msg = rx.try_recv().unwrap();
     assert!(matches!(
         &*msg,
-        Outbound::All(HubToApp::Usage { usage }) if usage.agent == AgentKind::Claude && usage.windows.len() == 3
+        Outbound::All(HubToApp::Usage { usage }) if usage.agent == AgentKind::Claude && usage.windows.len() == 2
     ));
 
-    let cached = usage::refresh(&hub, AgentKind::Claude, false)
+    let loaded = usage::load(&hub, AgentKind::Claude, now).unwrap();
+    assert_eq!(loaded.windows[0].used_pct, Some(34.0));
+    assert_eq!(loaded.windows[1].used_pct, Some(77.0));
+
+    let agy_without_runner = usage::refresh(&hub, AgentKind::Antigravity, true)
         .await
         .unwrap();
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert_eq!(cached.windows[0].used_pct, Some(42.5));
-
-    hub.usage.reset(AgentKind::Claude);
-    mode.store(1, Ordering::SeqCst);
-    let limited = usage::refresh(&hub, AgentKind::Claude, true).await.unwrap();
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
-    assert_eq!(limited.windows.len(), 3);
-    assert_eq!(limited.windows[0].used_pct, Some(42.5));
+    assert!(!agy_without_runner.refreshable);
     assert!(
-        limited
+        agy_without_runner
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("rate-limited")
+            .contains("No awake machine")
     );
-
-    let during_backoff = usage::refresh(&hub, AgentKind::Claude, true).await.unwrap();
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
-    assert_eq!(during_backoff.windows.len(), 3);
-    assert!(during_backoff.error.is_some());
 }
 
 #[tokio::test]

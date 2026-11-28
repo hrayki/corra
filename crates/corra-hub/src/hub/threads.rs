@@ -493,9 +493,18 @@ impl Hub {
             .db
             .thread(thread)?
             .ok_or_else(|| anyhow!("no such thread"))?;
+        let mut dirty = false;
+        if t.settled_at.is_some() {
+            t.settled_at = None;
+            dirty = true;
+        }
         if let Some(s) = &settings {
             t.settings.merge(s);
+            dirty = true;
+        }
+        if dirty {
             self.db.update_thread(&t)?;
+            self.publish_thread(&t);
         }
         if !t.machine.is_some_and(|m| self.runner_connected(m)) {
             self.set_thread_status(thread, ThreadStatus::Starting)?;
@@ -757,6 +766,32 @@ impl Hub {
             if old && !needed.contains(&t.id) {
                 self.stop_live(&t);
                 self.remove_thread(t.id)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    pub fn auto_settle(&self, now: i64) -> Result<usize> {
+        let Some(days) = self.auto_settle_days() else {
+            return Ok(0);
+        };
+        let cutoff = days * 86_400_000;
+        let mut n = 0;
+        for mut t in self.db.threads()? {
+            if t.hidden_at.is_some()
+                || t.settled_at.is_some()
+                || t.pinned_at.is_some()
+                || t.status != ThreadStatus::Idle
+                || self.delivering(t.id)
+                || !self.queued(t.id).is_empty()
+            {
+                continue;
+            }
+            if now - t.updated_at >= cutoff {
+                t.settled_at = Some(now);
+                self.db.update_thread(&t)?;
+                self.publish_thread(&t);
                 n += 1;
             }
         }

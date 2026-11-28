@@ -57,6 +57,9 @@ pub fn spawn(hub: Arc<Hub>) {
             if rounds % 20 == 1 {
                 orphans(&hub).await;
                 let now = now_ms();
+                if let Err(e) = hub.auto_settle(now) {
+                    tracing::warn!("auto-settling idle threads failed: {e:#}");
+                }
                 let _ = hub.db.forget_sends_before(now - 24 * 3600 * 1000);
                 hub.forget_deliveries_before(now - 24 * 3600 * 1000);
                 let swept = hub

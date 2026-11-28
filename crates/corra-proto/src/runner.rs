@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AgentSettings, Delta, Event, InputPart, MachineInfo, RequestResponse, StartSpec, ThreadId,
-    ThreadStatus,
+    AgentKind, AgentSettings, AgentUsage, Delta, Event, InputPart, MachineInfo, RequestResponse,
+    StartSpec, ThreadId, ThreadStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +39,9 @@ pub enum RunnerMsg {
     Status {
         thread: ThreadId,
         status: Value,
+    },
+    AgentUsage {
+        usage: AgentUsage,
     },
     TermOutput {
         term: String,
@@ -231,5 +234,8 @@ pub enum RunnerRequest {
     },
     Stop {
         thread: ThreadId,
+    },
+    AgentUsage {
+        agent: AgentKind,
     },
 }

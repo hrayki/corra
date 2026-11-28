@@ -307,3 +307,82 @@ async fn slim_events_defers_large_tool_outputs_but_keeps_summary_and_agent_calls
         other => panic!("unexpected event {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn auto_settle_settles_only_old_unpinned_idle_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub(dir.path());
+    let p = hub
+        .create_project(NewProject {
+            name: "settle".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let now = 10 * 86_400_000_i64;
+    let make = |title: &str, age_days: i64, status: ThreadStatus, pinned: bool| {
+        let t = Thread {
+            id: new_id(),
+            project: p.id,
+            title: title.into(),
+            agent: AgentKind::Claude,
+            machine: None,
+            session_id: None,
+            cwd: "~".into(),
+            settings: AgentSettings::default(),
+            status,
+            last_seq: 0,
+            created_at: now - age_days * 86_400_000,
+            updated_at: now - age_days * 86_400_000,
+            pinned_at: pinned.then_some(now - age_days * 86_400_000),
+            settled_at: None,
+            hidden_at: None,
+            started_by: None,
+        };
+        hub.db.insert_thread(&t).unwrap();
+        if pinned {
+            hub.db.update_thread(&t).unwrap();
+        }
+        t
+    };
+    let old_idle = make("old idle", 5, ThreadStatus::Idle, false);
+    let fresh_idle = make("fresh idle", 1, ThreadStatus::Idle, false);
+    let old_pinned = make("old pinned", 5, ThreadStatus::Idle, true);
+    let old_running = make("old running", 5, ThreadStatus::Running, false);
+
+    assert_eq!(hub.auto_settle(now).unwrap(), 0);
+    hub.set_setting("auto_settle_days", json!("3")).unwrap();
+    assert_eq!(hub.auto_settle(now).unwrap(), 1);
+
+    assert!(
+        hub.db
+            .thread(old_idle.id)
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_some()
+    );
+    assert!(
+        hub.db
+            .thread(fresh_idle.id)
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    assert!(
+        hub.db
+            .thread(old_pinned.id)
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    assert!(
+        hub.db
+            .thread(old_running.id)
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+}

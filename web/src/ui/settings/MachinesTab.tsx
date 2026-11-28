@@ -89,9 +89,11 @@ function Machines() {
 function Data() {
   const [status] = createResource(() => call<{ db_bytes: number | null }>({ op: 'db_stats' }))
   const [days, setDays] = createSignal<string | null>(null)
+  const [settleDays, setSettleDays] = createSignal<string | null>(null)
   const [error, setError] = createSignal('')
   const value = () => days() ?? String(state.settings.retention_days ?? '')
-  const save = async () => {
+  const settleValue = () => settleDays() ?? String(state.settings.auto_settle_days ?? '')
+  const saveRetention = async () => {
     const v = value().trim()
     if (v && !/^[1-9][0-9]*$/.test(v)) {
       setError('A whole number of days, or blank to keep them.')
@@ -105,6 +107,20 @@ function Data() {
       setError((e as Error).message)
     }
   }
+  const saveSettle = async () => {
+    const v = settleValue().trim()
+    if (v && !/^[1-9][0-9]*$/.test(v)) {
+      setError('A whole number of days, or blank to never auto-settle.')
+      return
+    }
+    setError('')
+    try {
+      await updateSettings({ auto_settle_days: v })
+      setSettleDays(null)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
   const size = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`)
   return (
     <Section title="Data" hint="Threads, their events and session files all live in the hub's database.">
@@ -114,18 +130,37 @@ function Data() {
           <span class="text-mute tabular-nums">{status()?.db_bytes != null ? size(status()!.db_bytes!) : '…'}</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2 px-3.5 py-3 text-[13px]">
+          <span class="flex-1">Auto-settle idle threads after</span>
+          <div class="flex items-center gap-2">
+            <input
+              aria-label="Auto-settle idle threads after days"
+              class={`${inputClass} w-20 text-right tabular-nums`}
+              inputmode="numeric"
+              placeholder="never"
+              value={settleValue()}
+              onInput={(e) => setSettleDays(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void saveSettle()}
+            />
+            <span class="text-mute">days</span>
+            <Btn small disabled={settleDays() === null} onClick={() => void saveSettle()}>
+              Save
+            </Btn>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2 px-3.5 py-3 text-[13px]">
           <span class="flex-1">Empty the trash after</span>
           <div class="flex items-center gap-2">
             <input
+              aria-label="Empty the trash after days"
               class={`${inputClass} w-20 text-right tabular-nums`}
               inputmode="numeric"
               placeholder="never"
               value={value()}
               onInput={(e) => setDays(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void save()}
+              onKeyDown={(e) => e.key === 'Enter' && void saveRetention()}
             />
             <span class="text-mute">days</span>
-            <Btn small disabled={days() === null} onClick={() => void save()}>
+            <Btn small disabled={days() === null} onClick={() => void saveRetention()}>
               Save
             </Btn>
           </div>

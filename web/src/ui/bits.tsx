@@ -2,6 +2,41 @@ import { For, Show, createEffect, createSignal, onCleanup, type JSX } from 'soli
 import { Portal } from 'solid-js/web'
 import type { ThreadStatus } from '../proto/ThreadStatus'
 import type { InputPart } from '../proto/InputPart'
+import type { AgentKind } from '../proto/AgentKind'
+
+export function AgentIcon(props: { agent: AgentKind; size?: number; class?: string; title?: string }) {
+  const s = () => props.size ?? 14
+  return (
+    <span
+      class={`inline-flex shrink-0 items-center justify-center ${props.class ?? ''}`}
+      title={props.title}
+      aria-hidden={props.title ? undefined : 'true'}
+    >
+      <Show
+        when={props.agent === 'claude'}
+        fallback={
+          <svg width={s()} height={s()} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 1.25c.42 3.35 1.9 4.83 5.25 5.25-3.35.42-4.83 1.9-5.25 5.25-.42-3.35-1.9-4.83-5.25-5.25C6.1 6.08 7.58 4.6 8 1.25Z" />
+            <circle cx="12.75" cy="12.75" r="1.4" opacity="0.72" />
+          </svg>
+        }
+      >
+        <svg
+          width={s()}
+          height={s()}
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.45"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <path d="M8 2v4.1M8 9.9V14M2 8h4.1M9.9 8H14M3.76 3.76l2.9 2.9M9.34 9.34l2.9 2.9M12.24 3.76l-2.9 2.9M6.66 9.34l-2.9 2.9" />
+        </svg>
+      </Show>
+    </span>
+  )
+}
 
 export function StatusMark(props: { status: ThreadStatus | 'done'; class?: string }) {
   return (

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -16,6 +17,9 @@ const MANIFEST: &str =
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
 const WAKE_QUIET: Duration = Duration::from_secs(5);
 const BYPASS: &str = "bypassPermissions";
+#[cfg(not(test))]
+const USAGE_MIN_INTERVAL_MS: i64 = 2 * 60 * 1000;
+static LAST_USAGE_MS: AtomicI64 = AtomicI64::new(0);
 
 pub async fn run(mut ctx: SessionCtx) {
     let error = drive(&mut ctx).await.err().map(|e| format!("{e:#}"));
@@ -47,6 +51,154 @@ pub fn installed() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|d| d.join("agy"))
         .find(|p| p.is_file())
+}
+
+fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+    let dt = time::OffsetDateTime::parse(s.trim(), &time::format_description::well_known::Rfc3339)
+        .ok()?;
+    let ms = (dt.unix_timestamp_nanos() / 1_000_000) as i64;
+    (ms > 0).then_some(ms)
+}
+
+fn agy_window_label(id: &str, group_name: Option<&str>, window: Option<&str>) -> String {
+    match id {
+        "gemini-5h" => "Gemini · 5-hour".into(),
+        "gemini-weekly" => "Gemini · Weekly".into(),
+        "3p-5h" => "Claude/GPT · 5-hour".into(),
+        "3p-weekly" => "Claude/GPT · Weekly".into(),
+        _ => {
+            let w = match window {
+                Some("5h") => "5-hour",
+                Some("weekly") => "Weekly",
+                Some(other) => other,
+                None => id,
+            };
+            match group_name {
+                Some(g) if !g.is_empty() => format!("{g} · {w}"),
+                _ => w.to_string(),
+            }
+        }
+    }
+}
+
+fn agy_window_order(id: &str) -> (u8, &str) {
+    let rank = match id {
+        "gemini-5h" => 0,
+        "gemini-weekly" => 1,
+        "3p-5h" => 2,
+        "3p-weekly" => 3,
+        _ => 4,
+    };
+    (rank, id)
+}
+
+pub fn parse_agy_usage(raw: &Value) -> Vec<UsageWindow> {
+    let Some(groups) = raw["command"]["data"]["groups"].as_array() else {
+        return vec![];
+    };
+    let single_group = groups.len() == 1;
+    let mut out = Vec::new();
+    for group in groups {
+        let group_name = group["name"].as_str();
+        let Some(buckets) = group["buckets"].as_array() else {
+            continue;
+        };
+        for bucket in buckets {
+            let Some(id) = bucket["id"].as_str() else {
+                continue;
+            };
+            let Some(rem) = bucket["remaining_fraction"].as_f64() else {
+                continue;
+            };
+            if !rem.is_finite() {
+                continue;
+            }
+            let used_pct = (((1.0 - rem) * 100.0).clamp(0.0, 100.0) * 10.0).round() / 10.0;
+            let resets_at = bucket["reset_time"].as_str().and_then(parse_rfc3339_ms);
+            let is_primary = single_group || id.starts_with("gemini-");
+            if !is_primary && used_pct == 0.0 && resets_at.is_none() {
+                continue;
+            }
+            out.push(UsageWindow {
+                key: id.to_string(),
+                label: agy_window_label(id, group_name, bucket["window"].as_str()),
+                used_pct: Some(used_pct),
+                resets_at,
+                blocked: used_pct >= 100.0,
+                detail: None,
+            });
+        }
+    }
+    out.sort_by(|a, b| agy_window_order(&a.key).cmp(&agy_window_order(&b.key)));
+    out
+}
+
+pub async fn fetch_usage() -> Result<AgentUsage> {
+    let bin =
+        installed().ok_or_else(|| anyhow!("Antigravity CLI isn't installed on this machine"))?;
+    let mut cmd = Command::new(bin);
+    cmd.args(["--print", "/usage", "--output-format", "json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("CORRA_TOKEN")
+        .env_remove("CORRA_TOKEN_FILE")
+        .env("AGY_ACP_FORCE_FILE_STORAGE", "1")
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(20), cmd.output())
+        .await
+        .map_err(|_| anyhow!("Antigravity usage check timed out"))??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let line = stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("Antigravity usage command failed");
+        bail!("{line}");
+    }
+    let raw: Value =
+        serde_json::from_slice(&output.stdout).context("parsing Antigravity /usage output")?;
+    let windows = parse_agy_usage(&raw);
+    if windows.is_empty() {
+        bail!("Antigravity returned no usage windows");
+    }
+    let now = now_ms();
+    LAST_USAGE_MS.store(now, Ordering::Relaxed);
+    Ok(AgentUsage {
+        agent: AgentKind::Antigravity,
+        updated_at: now,
+        windows,
+        error: None,
+        refreshable: true,
+    })
+}
+
+#[cfg(not(test))]
+fn maybe_refresh_usage(out: tokio::sync::mpsc::UnboundedSender<AgentOut>) {
+    let now = now_ms();
+    let prev = LAST_USAGE_MS.load(Ordering::Relaxed);
+    if prev > 0 && now - prev < USAGE_MIN_INTERVAL_MS {
+        return;
+    }
+    if LAST_USAGE_MS
+        .compare_exchange(prev, now, Ordering::SeqCst, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        match fetch_usage().await {
+            Ok(usage) => {
+                let _ = out.send(AgentOut::Usage(usage));
+            }
+            Err(e) => {
+                tracing::debug!("post-turn Antigravity usage check failed: {e:#}");
+            }
+        }
+    });
 }
 
 async fn install(ctx: &SessionCtx) -> Result<PathBuf> {
@@ -1453,6 +1605,10 @@ fn finish_turn(ctx: &SessionCtx, st: &mut State, outcome: TurnOutcome, error: Op
         },
     );
     st.wake_until = None;
+    #[cfg(not(test))]
+    if outcome == TurnOutcome::Completed {
+        maybe_refresh_usage(ctx.out.clone());
+    }
 }
 
 fn show_message(ctx: &SessionCtx, turn: &str, id: &str, input: &[InputPart]) {
@@ -3173,5 +3329,65 @@ mod tests {
         let _ = agy.next().await;
         agy.answer(&p, json!({ "stopReason": "end_turn" })).await;
         drain(&mut rx, ended).await;
+    }
+
+    #[test]
+    fn parse_agy_usage_extracts_windows_and_skips_untouched_third_party() {
+        let raw = json!({
+            "type": "command_result",
+            "command": {
+                "name": "/usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.9,
+                                    "reset_time": "2026-12-03T12:00:00Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.72,
+                                    "reset_time": "2026-11-28T14:00:00Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Third Party",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1.0,
+                                    "reset_time": "1970-01-01T00:00:00Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.5,
+                                    "reset_time": "2026-11-28T13:00:00Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let windows = parse_agy_usage(&raw);
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].key, "gemini-5h");
+        assert_eq!(windows[0].label, "Gemini · 5-hour");
+        assert_eq!(windows[0].used_pct, Some(28.0));
+        assert!(windows[0].resets_at.is_some());
+        assert_eq!(windows[1].key, "gemini-weekly");
+        assert_eq!(windows[1].label, "Gemini · Weekly");
+        assert_eq!(windows[1].used_pct, Some(10.0));
+        assert_eq!(windows[2].key, "3p-5h");
+        assert_eq!(windows[2].label, "Claude/GPT · 5-hour");
+        assert_eq!(windows[2].used_pct, Some(50.0));
     }
 }

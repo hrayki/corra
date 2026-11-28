@@ -87,6 +87,15 @@ pub async fn handle(
             let path = crate::secrets::write(&dir, &name, &value)?;
             Ok(json!({ "path": path.to_string_lossy() }))
         }
+        RunnerRequest::AgentUsage { agent } => match agent {
+            corra_proto::AgentKind::Antigravity => {
+                let u = crate::agents::antigravity::fetch_usage().await?;
+                Ok(serde_json::to_value(u)?)
+            }
+            corra_proto::AgentKind::Claude => {
+                bail!("Claude usage updates automatically during turns")
+            }
+        },
         RunnerRequest::TermOpen { .. }
         | RunnerRequest::TermAttach { .. }
         | RunnerRequest::Stop { .. } => {
